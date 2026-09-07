@@ -96,4 +96,57 @@ describe('linkWindowsDevTypeclaw', () => {
       await rm(globalDir, { recursive: true, force: true })
     }
   })
+
+  test('tolerates a bun link failure when the checkout is already linked globally', async () => {
+    const { checkout, env, cleanup } = await fakeBunLink()
+    try {
+      const result = await linkWindowsDevTypeclaw(checkout, {
+        platform: 'win32',
+        env,
+        runBunLink: async () => {
+          throw new Error('bun link failed: EEXIST: File exists (symlink())')
+        },
+      })
+
+      expect(result).toBe(realpathSync(checkout))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('rethrows a bun link failure when the global link points at another checkout', async () => {
+    const { env, cleanup } = await fakeBunLink()
+    const other = await mkdtemp(join(tmpdir(), 'tc-checkout-other-'))
+    try {
+      await expect(
+        linkWindowsDevTypeclaw(other, {
+          platform: 'win32',
+          env,
+          runBunLink: async () => {
+            throw new Error('bun link failed: EEXIST: File exists (symlink())')
+          },
+        }),
+      ).rejects.toThrow('EEXIST')
+    } finally {
+      await rm(other, { recursive: true, force: true })
+      await cleanup()
+    }
+  })
+
+  test('rethrows a bun link failure when nothing is linked globally', async () => {
+    const globalDir = await mkdtemp(join(tmpdir(), 'tc-bun-global-unlinked-'))
+    try {
+      await expect(
+        linkWindowsDevTypeclaw('/repo/typeclaw', {
+          platform: 'win32',
+          env: { BUN_INSTALL_GLOBAL_DIR: globalDir },
+          runBunLink: async () => {
+            throw new Error('bun link failed: permission denied')
+          },
+        }),
+      ).rejects.toThrow('permission denied')
+    } finally {
+      await rm(globalDir, { recursive: true, force: true })
+    }
+  })
 })
