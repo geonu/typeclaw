@@ -135,7 +135,12 @@ type ScaffoldedConfig = {
   docker?: { file?: DockerfileBlock }
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
-  sandbox?: { realProc?: boolean; writablePaths?: string[]; symlinks?: Array<{ from: string; to: string }> }
+  sandbox?: {
+    apparmorProfile?: string
+    realProc?: boolean
+    writablePaths?: string[]
+    symlinks?: Array<{ from: string; to: string }>
+  }
   logs?: { retentionDays?: number }
   memory?: Record<string, unknown>
 }
@@ -391,6 +396,33 @@ describe('planStart', () => {
     const idx = plan.runArgs.indexOf('--security-opt')
     expect(idx).toBeGreaterThan(-1)
     expect(plan.runArgs[idx + 1]).toBe('seccomp=unconfined')
+    expect(idx).toBeLessThan(plan.runArgs.indexOf(plan.imageTag))
+  })
+
+  test('sets --security-opt apparmor=unconfined by default before the image tag', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const idx = plan.runArgs.indexOf('apparmor=unconfined')
+
+    expect(idx).toBeGreaterThan(-1)
+    expect(plan.runArgs[idx - 1]).toBe('--security-opt')
+    expect(idx).toBeLessThan(plan.runArgs.indexOf(plan.imageTag))
+    expect(plan.runArgs).not.toContain('--privileged')
+    expect(plan.runArgs).not.toContain('--cap-add=SYS_ADMIN')
+  })
+
+  test('honors sandbox.apparmorProfile verbatim before the image tag', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { sandbox: { apparmorProfile: 'typeclaw-bwrap' } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const idx = plan.runArgs.indexOf('apparmor=typeclaw-bwrap')
+
+    expect(idx).toBeGreaterThan(-1)
+    expect(plan.runArgs[idx - 1]).toBe('--security-opt')
     expect(idx).toBeLessThan(plan.runArgs.indexOf(plan.imageTag))
   })
 
