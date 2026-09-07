@@ -40,6 +40,7 @@ PLATFORM="${2:-}"
 #                 NEVER authorize a release on its own; it only distinguishes
 #                 "the mask argv regressed" from "this host forbids bwrap".
 MODE="${3:-production}"
+APPARMOR_PROFILE="${TYPECLAW_APPARMOR_PROFILE:-unconfined}"
 if [ -z "$IMAGE" ]; then
   version="$(node -p "require('./package.json').version" 2>/dev/null || echo latest)"
   IMAGE="ghcr.io/typeclaw/typeclaw-base:${version}"
@@ -56,6 +57,38 @@ esac
 # The count is what matters here (one fd per mask); keep in sync if that grows.
 runner='
 set -u
+# Production hands the agent a non-root UID with an EMPTY capability set:
+# `setpriv --reuid --regid --clear-groups --bounding-set=-all --inh-caps=-all
+# --ambient-caps=-all` in buildEntrypointShim() (src/init/dockerfile.ts). The
+# published base image carries no ENTRYPOINT, so this container never replays
+# that handoff — the flags below stand in for it, and these assertions are what
+# stop the gate from certifying a root/full-bounding-set shape production never
+# runs. Fail before bwrap so a privilege regression is never mistaken for a
+# bwrap verdict either way.
+uid="$(id -u)"
+gid="$(id -g)"
+if [ "$uid" != 1001 ] || [ "$gid" != 1001 ]; then
+  echo "PRIVILEGE_UNEXPECTED: uid=$uid gid=$gid (expected 1001:1001)"
+  exit 1
+fi
+seen=0
+while read -r field value; do
+  case "$field" in
+    CapInh: | CapPrm: | CapEff: | CapBnd: | CapAmb:)
+      seen=$((seen + 1))
+      if [ "$value" != 0000000000000000 ]; then
+        echo "PRIVILEGE_CAPS_PRESENT: $field $value (expected 0000000000000000)"
+        exit 1
+      fi
+      ;;
+  esac
+done < /proc/self/status
+if [ "$seen" -ne 5 ]; then
+  echo "PRIVILEGE_CAPS_UNREADABLE: found $seen of 5 capability masks in /proc/self/status"
+  exit 1
+fi
+echo "PRIVILEGE_OK: uid=$uid gid=$gid, all five capability masks empty"
+
 d=/tmp/maskcheck
 mkdir -p "$d"
 for f in env secrets.json auth.json incidents.json; do printf CANARY > "$d/$f"; done
@@ -106,25 +139,35 @@ echo "Image: $IMAGE${PLATFORM:+ ($PLATFORM)}"
 # no QEMU registered that dies on exec format, failing the release for a reason
 # that has nothing to do with bwrap. Re-resolving the tag here keeps the check
 # honest on both the classic and containerd image stores.
-# seccomp=unconfined is what agent containers actually get (`runArgs` in
-# src/container/start.ts:888-899), so it is the baseline in BOTH modes. Only the
-# diagnostic mode lifts AppArmor, and only to keep the mask assertions reachable
-# on a host whose policy forbids bwrap outright — never to authorize a release.
+# seccomp=unconfined plus the configured AppArmor profile are what agent
+# containers actually get (`runArgs` in src/container/start.ts), so production
+# mirrors both. TYPECLAW_APPARMOR_PROFILE lets release CI select the shipped,
+# host-loaded profile exactly as an Ubuntu operator does; it defaults to the
+# product default, unconfined. Diagnostic always uses apparmor=unconfined after
+# the caller has explicitly relaxed the host sysctl.
 #
-# Measured on an ubuntu-24.04 runner against the 0.48.10 image: docker-default
-# AppArmor denies bwrap's opening mount(NULL, "/", MS_SLAVE|MS_REC), so the
-# production lane fails there today. That failure is the gate working, not the
-# gate misconfigured — it is reporting that the model bash surface is dead on
-# such a host. Fix it in src/container/start.ts, never by widening these flags.
+# Measured on Ubuntu 24.04: docker-default denies bwrap's opening
+# mount(NULL, "/", MS_SLAVE|MS_REC), while apparmor=unconfined reaches Ubuntu's
+# unprivileged_userns catch-all and loses the uid_map write at the stock sysctl
+# value of 1. The shipped typeclaw-bwrap profile is the supported production
+# path on that host; never make this lane green by relaxing the sysctl first.
 #
-# Still not matched, and deliberately not faked: production drops to the host
-# UID and clears capabilities in the entrypoint shim (src/init/dockerfile.ts)
-# before the runtime starts. Closing that gap is follow-up; do not claim full
-# parity until it is closed. Anything beyond these flags (NET_ADMIN,
-# --privileged) was measured to be unnecessary — do not add it back.
-run_args=(--rm --pull=always --security-opt seccomp=unconfined)
+# Anything beyond these production flags (NET_ADMIN, --privileged, or
+# SYS_ADMIN) is unnecessary; SYS_ADMIN is also empty after the production
+# entrypoint drops to a non-root UID, so do not add it here.
+#
+# --user/--cap-drop stand in for that entrypoint handoff, which this image
+# cannot replay (no ENTRYPOINT in the published base). 1001:1001 is hardcoded
+# rather than taken from `id -u`: a root or self-hosted runner would otherwise
+# silently downgrade the gate to the root posture it exists to reject. The UID
+# has no passwd entry in the base image, so HOME is set explicitly — without it
+# bash falls back to `/` and the failure reads like a bwrap fault. Both lanes
+# get this: the lanes differ only in AppArmor/sysctl treatment, never privilege.
+run_args=(--rm --pull=always --user 1001:1001 --cap-drop ALL -e HOME=/tmp --security-opt seccomp=unconfined)
 if [ "$MODE" = diagnostic ]; then
   run_args+=(--security-opt apparmor=unconfined)
+else
+  run_args+=(--security-opt "apparmor=$APPARMOR_PROFILE")
 fi
 if [ -n "$PLATFORM" ]; then
   run_args+=(--platform "$PLATFORM")
