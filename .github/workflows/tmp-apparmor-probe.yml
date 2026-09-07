@@ -1,0 +1,115 @@
+# TEMPORARY measurement harness. Deleted before this branch's PR is finalized.
+# Answers one question the repo cannot answer from macOS: on a STOCK ubuntu-24.04
+# host (AppArmor enforcing, kernel.apparmor_restrict_unprivileged_userns=1), which
+# `docker run --security-opt` set lets bwrap complete its sandbox setup?
+name: tmp apparmor probe
+
+on:
+  push:
+    branches: [fix/sandbox-apparmor]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  probe:
+    name: Probe bwrap under host AppArmor
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host AppArmor state
+        run: |
+          echo "kernel: $(uname -r)"
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo '<absent>')"
+          echo "apparmor enabled: $(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo '<absent>')"
+          echo "--- loaded profiles (docker/unconfined related) ---"
+          sudo aa-status 2>/dev/null | head -40 || true
+          echo "--- docker info security ---"
+          docker info --format '{{json .SecurityOptions}}'
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull base image
+        run: docker pull --platform linux/amd64 ghcr.io/typeclaw/typeclaw-base:0.48.10
+
+      - name: Matrix probe
+        run: |
+          IMAGE=ghcr.io/typeclaw/typeclaw-base:0.48.10
+
+          # Minimal reproduction of the production bwrap argv (src/sandbox/build.ts
+          # buildArgv, proc-bind strategy + --share-net from network:'inherit').
+          read -r -d '' RUNNER <<'EOS' || true
+          set -u
+          echo "  uid=$(id -u) gid=$(id -g) caps=$(grep CapEff /proc/self/status | awk '{print $2}')"
+          echo "  apparmor_profile=$(cat /proc/self/attr/current 2>/dev/null || echo '<none>')"
+          set +e
+          unshare --user --map-root-user true 2>&1 | sed 's/^/  userns_probe: /'
+          echo "  userns_rc=$?"
+          bwrap --unshare-all --share-net --new-session --die-with-parent --clearenv \
+            --setenv PATH /usr/local/bin:/usr/bin:/bin --setenv HOME /tmp --setenv LANG C.UTF-8 \
+            --ro-bind /usr /usr --ro-bind /etc /etc --dev /dev --tmpfs /tmp \
+            --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+            --ro-bind /proc /proc \
+            bash -c 'echo SANDBOX_OK; cat /proc/self/maps >/dev/null && echo PROC_OK' 2>&1
+          rc=$?
+          set -e
+          echo "  rc=$rc"
+          EOS
+
+          probe() {
+            label="$1"; shift
+            echo "=== $label"
+            docker run --rm --platform linux/amd64 "$@" "$IMAGE" bash -c "$RUNNER" 2>&1 | sed 's/^/  /'
+            echo
+          }
+
+          for sysctl_val in 1 0; do
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=$sysctl_val >/dev/null
+            echo "##################### userns_restrict=$sysctl_val #####################"
+            for who in root uid1000; do
+              if [ "$who" = root ]; then U=(); else U=(--user 1000:1000); fi
+              probe "[$who] seccomp=unconfined ONLY (today's production)" \
+                --security-opt seccomp=unconfined "${U[@]}"
+              probe "[$who] seccomp=unconfined + apparmor=unconfined (candidate fix)" \
+                --security-opt seccomp=unconfined --security-opt apparmor=unconfined "${U[@]}"
+              probe "[$who] seccomp+apparmor unconfined + CAP_SYS_ADMIN" \
+                --security-opt seccomp=unconfined --security-opt apparmor=unconfined --cap-add=SYS_ADMIN "${U[@]}"
+              probe "[$who] docker defaults (no security-opt)" "${U[@]}"
+            done
+          done
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1 >/dev/null
+
+      - name: Custom host AppArmor profile (option B)
+        run: |
+          IMAGE=ghcr.io/typeclaw/typeclaw-base:0.48.10
+          cat <<'PROFILE' | sudo tee /etc/apparmor.d/typeclaw-bwrap >/dev/null
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile typeclaw-bwrap flags=(attach_disconnected,mediate_deleted) {
+            userns,
+            mount,
+            umount,
+            pivot_root,
+            capability,
+            file,
+            network,
+          }
+          PROFILE
+          sudo apparmor_parser -r -W /etc/apparmor.d/typeclaw-bwrap && echo "profile loaded"
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          docker run --rm --platform linux/amd64 \
+            --security-opt seccomp=unconfined --security-opt apparmor=typeclaw-bwrap --user 1000:1000 \
+            "$IMAGE" bash -c 'cat /proc/self/attr/current; bwrap --unshare-all --share-net --new-session --die-with-parent --clearenv --setenv PATH /usr/bin:/bin --ro-bind /usr /usr --ro-bind /etc /etc --dev /dev --tmpfs /tmp --ro-bind-try /bin /bin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --ro-bind /proc /proc bash -c "echo SANDBOX_OK"' 2>&1 | sed 's/^/  /'
+          echo "rc=$?"
+
+      - name: Host audit denials
+        if: always()
+        run: sudo dmesg | grep -i apparmor | tail -30 || echo "no apparmor audit lines"
