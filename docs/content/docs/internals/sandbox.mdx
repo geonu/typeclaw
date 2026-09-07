@@ -1,6 +1,6 @@
 ---
 title: Per-tool sandbox (bwrap)
-description: Why the outer container runs with seccomp=unconfined, how bwrap is the real boundary against prompt-injected subagent bash calls, and the OrbStack /proc workaround
+description: Why the outer container selects permissive seccomp and AppArmor profiles, how to enable bwrap on Ubuntu, and how the inner sandbox contains prompt-injected bash calls
 icon: Shield
 ---
 
@@ -120,11 +120,40 @@ Upstream bubblewrap is explicit: "bubblewrap is not a complete, ready-made sandb
 
 These invariants are the always-on **kernel containment** boundary, applied to every command regardless of policy. Command-syntax restrictions — a prefix allowlist or shell-metacharacter rejection — are _optional_ `commandFilter` knobs a narrow consumer (e.g. a read-only reviewer) can opt into; they are not part of the base boundary, because a general-purpose bash sandbox must allow pipes, `&&`, and `$()`. Reviewers of any consumer should audit the resolved policy and the argv construction, not just confirm that `bwrap` was invoked.
 
-## `--security-opt seccomp=unconfined`
+## Container security options: seccomp and AppArmor
 
-`planStart()` in `src/container/start.ts` adds `--security-opt seccomp=unconfined` unconditionally. Without it, Docker's default seccomp profile blocks `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` for non-privileged containers, and bwrap exits at startup with "setting up uid map: Permission denied."
+`planStart()` in `src/container/start.ts` adds `--security-opt seccomp=unconfined` and `--security-opt apparmor=<sandbox.apparmorProfile>` before the image tag. The AppArmor profile defaults to `unconfined`. Without the seccomp option, Docker's default seccomp profile blocks `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)`. Without the AppArmor option, moby's `docker-default` profile applies an explicit `deny mount,` rule, and bwrap's opening `mount(NULL, "/", MS_SLAVE|MS_REC)` fails with `Permission denied` before even `echo` can run.
 
-The default profile is calibrated for multi-tenant container hosts — Kubernetes nodes, CI runners — where seccomp is one of several boundaries protecting tenant isolation. TypeClaw is single-tenant. The user owns the host, the agent folder is bind-mounted in, the secrets are in the env. The blast radius of an attacker already executing code inside the container is dominated by what they can do with those existing reads, not by the syscalls seccomp blocks. Dropping the filter loses the wrong thing from the wrong threat model.
+`apparmor=unconfined` is a profile selection, **not** a capability grant. It is a strict improvement over docker-default, and it is sufficient on Debian, pre-23.10 Ubuntu, and hosts where `kernel.apparmor_restrict_unprivileged_userns=0`. Stock Ubuntu 23.10+ defaults that sysctl to `1`; its `unprivileged_userns` catch-all then denies `proc/<pid>/uid_map` writes for an unconfined non-root process, producing `bwrap: setting up uid map: Permission denied`. Adding `SYS_ADMIN` cannot bypass this: the entrypoint drops to the host UID with `setpriv --reuid ... --bounding-set=-all --inh-caps=-all --ambient-caps=-all`, so the production agent is non-root with an empty capability set and Docker's `--cap-add` contributes nothing.
+
+### Ubuntu 23.10+ operator setup
+
+TypeClaw ships the narrowly-scoped host profile at `scripts/apparmor/typeclaw-bwrap`. From an initialized agent folder, install and load it on the host, select it in `typeclaw.json`, then recreate the container:
+
+```sh
+sudo install -m 0644 ./node_modules/typeclaw/scripts/apparmor/typeclaw-bwrap /etc/apparmor.d/typeclaw-bwrap
+sudo apparmor_parser -r -W /etc/apparmor.d/typeclaw-bwrap
+```
+
+```json
+{ "sandbox": { "apparmorProfile": "typeclaw-bwrap" } }
+```
+
+```sh
+typeclaw restart
+```
+
+`typeclaw doctor` detects the affected host-policy/config combination and prints this recovery path. It reports `docker-default` — and `unconfined` on a restricted host — as an **error**, because an unavailable sandbox makes every model bash call throw `SandboxUnavailableError`; the surface is dead, not degraded. A profile it does not ship is reported as unverified rather than working. Loading a host profile requires root and deliberately remains an operator action outside the blocked model-bash surface.
+
+The shipped profile grants more than `userns` and `mount`. Under the pinned `abi <abi/4.0>`, AF_UNIX and signals are separately mediated classes, so the profile names them explicitly:
+
+- `unix,` — Xvfb's `/tmp/.X11-unix` socket and the runtime's local IPC. Not covered by `network,`.
+- `signal (send,receive) peer=typeclaw-bwrap` — the runtime cancelling its own sandboxed bash on timeout or abort. Every process in the container carries the container profile, bwrap children included, so a cancellation kill is a same-profile send.
+- `signal (receive) peer=unconfined`, `peer=runc`, `peer=crun`, `peer=snap.docker.dockerd` — `docker stop`/`docker restart`, whose SIGTERM originates outside the profile. `peer=unconfined` alone is not enough: Ubuntu 23.10+ confines the OCI runtime, and `docker stop` commonly reaches PID 1 through `runc kill` rather than the daemon. A peer profile that is not loaded on a given host is inert, not an error; an operator running a differently labelled daemon must add that label locally.
+
+Both failure modes are quiet. A denied cancellation leaves a runaway sandbox; a denied SIGTERM turns every `typeclaw stop` into a full wait for dockerd's SIGKILL. Neither surfaces as a bwrap error, which is why `scripts/verify-apparmor-signals.sh` is a separate release gate from the mask lane — the mask lane's sandboxed command exits naturally and therefore never crosses the profile with a signal at all.
+
+The default Docker profiles are calibrated for multi-tenant hosts. TypeClaw's outer container is single-tenant: the user owns the host, the agent folder is bind-mounted in, and runtime secrets already enter the container. Selecting permissive seccomp/AppArmor profiles drops outer AppArmor's mandatory-access-control restrictions over operations such as mount and ptrace and access to `/proc` and `/sys`. It does **not** remove Docker namespaces, the capability bounding set, cgroups, device restrictions, masked paths, or the inner per-call bwrap boundary. That inner boundary remains the load-bearing containment against prompt-injected commands. Replacing the outer defaults with tighter compatible profiles is valid; silently restoring docker-default is not, because it disables the authorized bash workflow wholesale.
 
 ## `--init` and the namespace-ucount leak
 
@@ -144,21 +173,21 @@ That charge is accounted against the **ancestor** user namespace. The resource t
 
 ## `--cap-add=SYS_ADMIN` and `sandbox.realProc`
 
-`CAP_SYS_ADMIN` looks narrower than `seccomp=unconfined` (one capability vs ~44 syscalls) but is broader in practice. It is called "the new root" because it grants ~38 distinct privileges: `mount`, `swapon`, `sethostname`, namespace ops, `bpf`, `perf_event_open`, more. With it the outer container can `mount --bind / /proc/$$/root` and escape its own filesystem view. With `seccomp=unconfined` alone, it can _call_ `mount(2)` but the kernel rejects it for lack of `CAP_SYS_ADMIN`. The textbook "more caps is worse than more syscalls allowed" applies — so the default avoids it.
+`CAP_SYS_ADMIN` looks narrower than permissive seccomp/AppArmor profile selection, but would be broader in practice if retained: it is called "the new root" because it controls `mount`, `swapon`, `sethostname`, namespace operations, `bpf`, `perf_event_open`, and more. It is also not an AppArmor workaround here. The production entrypoint changes to a non-root UID and clears every bounding, inheritable, and ambient capability, so a Docker `--cap-add=SYS_ADMIN` does not reach the running agent at all. AppArmor profile selection authorizes the namespace setup operation without pretending a capability grant survives that handoff.
 
 Running ephemeral external package CLIs (`bunx` and `bun run <pkg-bin>`) inside the sandbox is a hard requirement — the bundled agent-messenger skills shell out to `bunx agent-*`, and under the bare `--tmpfs /proc` profile every such call aborts with Bun's `error: An internal error occurred (NotDir)` (see the OrbStack `/proc` section below). This stack does **not** claim descendant-proof persistent package-install isolation: a writable tree can gain a newly created descendant and install its own `node_modules`, so lexical command classifiers and pre-enumerated path fences are not authorization boundaries. A future compatible guarantee requires a runtime-owned read-only package broker. The `/proc` fix does **not** need `CAP_SYS_ADMIN`: the default `proc-bind` strategy `--ro-bind`s the container's already-real procfs into the sandbox, giving an allowed runner's child a working `/proc/self/{fd,maps}` with no mount and no capability. So `typeclaw.json#sandbox.realProc` **defaults to `false`** and `planStart()` does **not** add `--cap-add=SYS_ADMIN` by default.
 
-`sandbox.realProc: true` is an opt-in for the stricter `real-proc` strategy below, which mounts a fresh procfs in a new PID namespace for full PID isolation. That mount needs `CAP_SYS_ADMIN`, so `planStart()` grants `--cap-add=SYS_ADMIN` only then. On TypeClaw's single-tenant boundary the cap would be an accepted trade (the same reasoning that makes `seccomp=unconfined` the default — the user owns the host, the agent folder and secrets are already mounted in, so the inner per-tool bwrap user namespace is the load-bearing boundary, not the outer cap). But since `proc-bind` already unblocks the core external-package workflow without it, avoiding the grant is the better default: a smaller outer blast radius in exchange for the non-secret PID metadata `proc-bind` leaves visible (see below).
+`sandbox.realProc: true` remains the sole path that asks Docker for `--cap-add=SYS_ADMIN`, because mounting a fresh procfs in a new PID namespace requires it. Under the current non-root entrypoint that requested cap is cleared before the agent starts, so the container-side capability probe rejects `real-proc` and falls back to `proc-bind`. The request is off by default, and `proc-bind` already supports the core external-package workflow without either the capability or full PID isolation.
 
 ## Why not a custom seccomp profile
 
-A profile based on Docker's default plus the namespace/setup syscalls our exact bwrap invocation needs would be narrower than `seccomp=unconfined`. The exact syscall delta is not pinned down in this PR — bwrap also calls `mount`, `pivot_root`, and related namespace-setup syscalls under the user-namespace path, and the full list depends on the specific `--unshare-*` / `--proc` / `--dev` combination the follow-up helper settles on. Trace it under `strace -fc bwrap …` against the helper's argv once it lands and pin the profile to that delta if and when this matters.
+A seccomp profile based on Docker's default plus the namespace/setup syscalls in the exact bwrap invocation would be narrower than `seccomp=unconfined`. The full syscall delta includes `mount`, `pivot_root`, and related namespace setup and varies with the selected `/proc` strategy and architecture. It would need to be traced against every supported rendered argv and kept synchronized with the unpinned bwrap package.
 
-The reason we don't do that today is maintenance, not impossibility: a profile file has to be shipped, distributed, kept in sync with bwrap's evolving syscall use, and debugged when it silently breaks something. The cost only earns its keep when typeclaw goes multi-tenant. Single-tenant deployments don't need the precision; `seccomp=unconfined` is the right cost/benefit point until that changes.
+The reason we do not ship a custom **seccomp** profile today is maintenance: its syscall allowlist would have to track bwrap and every supported architecture. This is distinct from the shipped **AppArmor** profile, which is required on stock Ubuntu to grant the coarse `userns` and mount operations that host policy otherwise denies. Single-tenant deployments keep `seccomp=unconfined`; Ubuntu operators load the AppArmor profile rather than relaxing a host-global sysctl.
 
 ## bwrap in baseline
 
-`BASELINE_APT_PACKAGES` in `src/init/dockerfile.ts` includes `bubblewrap` (~132KB). Per-tool sandboxing is a runtime concern decided by the agent, not by the agent author, so it ships unconditionally rather than behind a `docker.file.bwrap` toggle. The flag pair (`seccomp=unconfined` on `docker run` + `bubblewrap` in baseline) is load-bearing together — dropping either breaks the sandbox with no test signal beyond the bwrap helper failing at runtime.
+`BASELINE_APT_PACKAGES` in `src/init/dockerfile.ts` includes `bubblewrap` (~132KB). Per-tool sandboxing is a runtime concern decided by the agent, not by the agent author, so it ships unconditionally rather than behind a `docker.file.bwrap` toggle. The package and security-option pair (`seccomp=unconfined` plus the configured AppArmor profile) are load-bearing together. On restricted Ubuntu, the host-loaded shipped profile is a fourth required piece. Dropping any one breaks the sandbox with no signal until bwrap executes; the release production lane exercises this exact Ubuntu path. Both release verifier lanes run the payload as a non-root UID with every capability mask empty and assert that posture before invoking bwrap, because the published base image carries no `ENTRYPOINT` and so never replays the `setpriv` handoff that gives production its actual privilege shape.
 
 ## OrbStack `/proc` quirk
 
@@ -192,7 +221,7 @@ unshare --pid --fork --mount --mount-proc -- \
 
 The outer `unshare` creates a new PID + mount namespace as real root and mounts a fresh procfs **scoped to that PID namespace**. bwrap then runs inside it and must NOT re-unshare pid (a second PID ns with no matching procfs reintroduces the crash), so it unshares every namespace _except_ pid explicitly instead of `--unshare-all`. Because the new procfs only contains the sandbox's own process tree, `--ro-bind /proc /proc` binds that scoped view — the agent runtime's pids are simply **absent** from the namespace (not merely unreadable, as under `proc-bind`), so even the non-secret PID metadata is hidden.
 
-Two constraints make this opt-in rather than default. First, `unshare --mount-proc` needs real `CAP_SYS_ADMIN` (`seccomp=unconfined` only unblocks the `unshare`/`clone` syscalls; the kernel still rejects `mount(2)` of proc without the capability), so `planStart()` grants `--cap-add=SYS_ADMIN` only when `realProc` is set — a broader outer cap than the default `proc-bind` needs. Second, OrbStack rejects the mount even with the cap, so the container-side resolver probes `canMountRealProc()` and falls back to `proc-bind` there regardless. The net: `realProc: true` is worth it only on a host where the mount works AND hiding PID metadata from sandboxed bash is worth the `CAP_SYS_ADMIN` grant.
+Two constraints make this opt-in rather than default. First, `unshare --mount-proc` needs real `CAP_SYS_ADMIN`; `planStart()` requests it only when `realProc` is set, but the production entrypoint's non-root UID and empty capability set mean the request currently does not survive to the agent. Second, OrbStack rejects the mount even in environments where the cap survives. The container-side `canMountRealProc()` probe therefore falls back to `proc-bind` whenever the mount is unavailable. The net: `realProc: true` only selects `real-proc` on a runtime where the capability actually reaches the process and the mount works.
 
 ### Strategy resolution order
 
