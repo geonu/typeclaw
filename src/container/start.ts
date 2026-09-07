@@ -870,21 +870,28 @@ export async function planStart({
   // Operators must `typeclaw restart` (removes and recreates), not
   // `docker restart` (reuses the old HostConfig).
   //
-  // `seccomp=unconfined` lets `bwrap(1)` (installed in baseline; see
-  // BASELINE_APT_PACKAGES in src/init/dockerfile.ts) create user/pid/mount
-  // namespaces from inside the container. Docker's default seccomp profile
-  // rejects `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` for
-  // non-privileged containers, which is the right default for multi-tenant
-  // hosts (Kubernetes nodes, CI runners) but wrong for typeclaw: the outer
-  // container is a single-tenant trust boundary — the user trusts everything
-  // inside it equally, the .env and agent folder are already mounted in —
-  // so the multi-tenant protections seccomp adds are not load-bearing for
-  // typeclaw's threat model. The per-tool sandbox bwrap builds for subagents
-  // IS the real boundary against prompt-injected commands; that boundary is
-  // what `--security-opt seccomp=unconfined` exists to enable. See
-  // `docs/internals/sandbox.mdx` for the full rationale including why
-  // `--cap-add=SYS_ADMIN` was rejected as an alternative (narrower in
-  // syscalls but strictly worse in capability semantics).
+  // These two security options are a load-bearing pair for `bwrap(1)`
+  // (installed in baseline; see BASELINE_APT_PACKAGES in
+  // src/init/dockerfile.ts). Docker's default seccomp profile rejects the
+  // namespace syscalls, while moby's docker-default AppArmor profile has an
+  // explicit `deny mount,` rule that rejects bwrap's opening
+  // mount(NULL, "/", MS_SLAVE|MS_REC). Selecting `apparmor=unconfined` removes
+  // that mount denial; it selects a profile, it does NOT grant a capability.
+  // On stock Ubuntu 23.10+ the host's `unprivileged_userns` catch-all then
+  // denies bwrap's /proc/<pid>/uid_map write when
+  // kernel.apparmor_restrict_unprivileged_userns=1. The complete path there is
+  // the shipped host-loaded `typeclaw-bwrap` profile plus
+  // sandbox.apparmorProfile="typeclaw-bwrap"; doctor reports the exact install
+  // and restart commands.
+  //
+  // CAP_SYS_ADMIN is not an alternative: the entrypoint drops to the host's
+  // non-root UID with an empty capability set, so Docker's --cap-add grant is
+  // void in the production process. These outer defaults are appropriate
+  // because the container is a single-tenant trust boundary — the user trusts
+  // everything inside it equally, and the .env and agent folder are already
+  // mounted in. Seccomp/AppArmor's multi-tenant protections are therefore not
+  // load-bearing for this threat model; the per-tool bwrap sandbox is the real
+  // boundary against prompt-injected commands. See docs/internals/sandbox.mdx.
   const runArgs = [
     'run',
     '-d',
@@ -894,6 +901,8 @@ export async function planStart({
     '--shm-size=2g',
     '--security-opt',
     'seccomp=unconfined',
+    '--security-opt',
+    `apparmor=${cfg.sandbox.apparmorProfile}`,
     '-p',
     `${publishHost}:${hostPort}:${CONTAINER_PORT}`,
   ]
@@ -919,17 +928,17 @@ export async function planStart({
   // sandbox.realProc (default FALSE) opts into the per-tool bwrap sandbox's
   // 'real-proc' strategy (src/sandbox/build.ts), which prefixes the sandbox with
   // `unshare --pid --fork --mount --mount-proc`. Mounting a fresh procfs for the
-  // new PID namespace needs real CAP_SYS_ADMIN — seccomp=unconfined alone is not
-  // enough (it only unblocks the unshare/clone SYSCALLS; the kernel still
-  // rejects mount(2) of proc without the capability). So the grant is gated on
-  // the flag and is OFF by default: external-package execution (`bunx agent-*`)
+  // new PID namespace needs real CAP_SYS_ADMIN, so the Docker grant remains
+  // gated on the flag and is OFF by default. The entrypoint's production
+  // non-root UID clears that cap before the agent starts today, and the runtime
+  // capability probe consequently falls back to proc-bind. External-package
+  // execution (`bunx agent-*`)
   // no longer needs it — the default 'proc-bind' strategy gives the runner real
   // /proc without any outer capability (see docs/internals/sandbox.mdx). Setting
-  // realProc:true adds the stricter PID-isolation posture at the cost of this
-  // broad "new root" grant. The container-side strategy resolution still probes
-  // whether the mount actually works (canMountRealProc) and falls back to
-  // proc-bind on runtimes where the cap is a no-op (e.g. OrbStack), so this grant
-  // is necessary-but-not-sufficient by design. Placed before the image tag (like
+  // realProc:true requests the stricter PID-isolation posture. The
+  // container-side strategy resolution probes whether the mount actually works
+  // (canMountRealProc) and falls back to proc-bind when the cap is absent or the
+  // runtime rejects the mount (e.g. OrbStack). Placed before the image tag (like
   // --cap-add=NET_ADMIN) so docker applies it at run time.
   if (cfg.sandbox.realProc) {
     runArgs.push('--cap-add=SYS_ADMIN')

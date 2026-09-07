@@ -210,6 +210,26 @@ describe('createConfigReloadable', () => {
     expect(diff.restartRequired.map((c) => c.path)).toEqual(['git.ignore'])
   })
 
+  test('field fence: sandbox.apparmorProfile changes land in `restartRequired`', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, sandbox: { apparmorProfile: 'unconfined' } }),
+    )
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, sandbox: { apparmorProfile: 'typeclaw-bwrap' } }),
+    )
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const diff = result.details as { restartRequired: { path: string }[] }
+    expect(diff.restartRequired.map((change) => change.path)).toEqual(['sandbox'])
+  })
+
   test('field fence: $schema change is ignored', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, $schema: './a.json' }))
     const reloadable = createConfigReloadable({ cwd })

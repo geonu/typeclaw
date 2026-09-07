@@ -325,18 +325,45 @@ jobs:
           docker pull --platform linux/arm64 "$IMAGE"
           docker buildx imagetools inspect "${REGISTRY_IMAGE}:latest"
 
-      # Only the DIAGNOSTIC lane needs this. Ubuntu 24.04 ships
-      # kernel.apparmor_restrict_unprivileged_userns=1, and a process that has
-      # been made AppArmor-unconfined is subject to that restriction, so the
-      # diagnostic container cannot open the user namespace bwrap builds the
-      # sandbox from ("setting up uid map: Permission denied"). Measured on this
-      # runner; it is unrelated to --share-net, which the verifier now also sets.
-      #
-      # It does nothing for the production lane: under docker-default AppArmor
-      # the userns is permitted and the opening mount is denied instead, so that
-      # lane fails at mount regardless of this sysctl. Do not read a green
-      # diagnostic lane as evidence the production lane can pass.
-      - name: Allow unprivileged user namespaces for the diagnostic lane
+      - name: Load the shipped production AppArmor profile
+        # Ubuntu 24.04 starts with
+        # kernel.apparmor_restrict_unprivileged_userns=1. The supported path is
+        # a host-loaded profile, not a host-global sysctl relaxation; install it
+        # exactly as an operator would before the authoritative production lane.
+        run: |
+          sudo install -m 0644 scripts/apparmor/typeclaw-bwrap /etc/apparmor.d/typeclaw-bwrap
+          sudo apparmor_parser -r -W /etc/apparmor.d/typeclaw-bwrap
+
+      # Authoritative. Runs at the runner's stock restricted-userns value (1)
+      # with the shipped host-loaded profile. A failure means model bash is dead
+      # under the documented Ubuntu production configuration and blocks release.
+      - name: Verify bwrap runs under production container flags
+        env:
+          VERSION: ${{ needs.checks.outputs.version }}
+          PLATFORM: linux/${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+          TYPECLAW_APPARMOR_PROFILE: typeclaw-bwrap
+        run: scripts/verify-mask-fd-sandbox.sh "${REGISTRY_IMAGE}:${VERSION}" "${PLATFORM}" production
+
+      # Also authoritative, and also on the stock sysctl. The mask lane above
+      # only proves bwrap can START — its sandboxed command exits on its own, so
+      # it never sends or receives a signal across the profile. A profile that
+      # loads and runs bwrap can still leave `typeclaw stop` waiting out the full
+      # SIGKILL grace and leave cancelled sandboxes running, with nothing in
+      # either failure naming AppArmor. The timeout is belt-and-braces: the
+      # script bounds its own waits, and this stops a wedged daemon from pinning
+      # a release job.
+      - name: Verify signal delivery under the shipped AppArmor profile
+        timeout-minutes: 10
+        env:
+          VERSION: ${{ needs.checks.outputs.version }}
+          PLATFORM: linux/${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+          TYPECLAW_APPARMOR_PROFILE: typeclaw-bwrap
+        run: scripts/verify-apparmor-signals.sh "${REGISTRY_IMAGE}:${VERSION}" "${PLATFORM}"
+
+      # Diagnostic-only relaxation. This MUST remain after the authoritative
+      # production lane: setting it first would certify flags that work only
+      # after a host-global policy change real Ubuntu 24.04 users do not get.
+      - name: Allow unprivileged user namespaces for the diagnostic lane only
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Verify the sandbox file-mask contract against the shipped bwrap
@@ -359,26 +386,13 @@ jobs:
         # foreign-arch binary with no QEMU registered and fail the release on
         # exec format instead of on bwrap.
         #
-        # Two lanes, both required, because either one alone misleads. The
-        # diagnostic lane lifts AppArmor so the mask assertions stay reachable
-        # even where host policy forbids bwrap; it answers "did the mask argv
-        # regress?". The production lane uses the flags an agent container
-        # actually gets and answers "can bwrap run at all here?". Running the
-        # diagnostic first means a production-lane failure is already
-        # attributable: masks OK + production dead == host policy, not the argv.
+        # This diagnostic lane answers only "did the mask argv regress?" after
+        # AppArmor's host restriction is deliberately lifted. It cannot
+        # authorize a release without the production lane above.
         env:
           VERSION: ${{ needs.checks.outputs.version }}
           PLATFORM: linux/${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
         run: scripts/verify-mask-fd-sandbox.sh "${REGISTRY_IMAGE}:${VERSION}" "${PLATFORM}" diagnostic
-
-      # Authoritative. A failure here is NOT a CI misconfiguration to be flagged
-      # away — it means model bash is dead under the flags agent containers run
-      # with, which is the outage this whole gate exists to prevent shipping.
-      - name: Verify bwrap runs under production container flags
-        env:
-          VERSION: ${{ needs.checks.outputs.version }}
-          PLATFORM: linux/${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
-        run: scripts/verify-mask-fd-sandbox.sh "${REGISTRY_IMAGE}:${VERSION}" "${PLATFORM}" production
 
   # ─────────────────────────── release ───────────────────────────
   # The irreversible publish path, gated on a verified multi-arch base image.

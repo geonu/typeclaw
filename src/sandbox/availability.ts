@@ -64,11 +64,13 @@ export function _resetBwrapAvailabilityCacheForTests(): void {
 // --mount --mount-proc`, which mounts a fresh procfs in a new PID namespace.
 // That mount needs REAL CAP_SYS_ADMIN. `typeclaw start` grants the container
 // `--cap-add=SYS_ADMIN` when sandbox.realProc is on, but the grant is a no-op
-// on runtimes that virtualize or strip caps: rootless Docker (userns-capped
-// caps), gVisor/runsc (caps never reach the host kernel), Docker Desktop
-// Enhanced Container Isolation (intercepts mount), and AppArmor-enforcing
-// hosts (Ubuntu 24.04+ restricts unprivileged userns even with the cap). On
-// those the `unshare` fails fast with "Operation not permitted" (exit != 0)
+// on runtimes that virtualize or strip caps: the production entrypoint's
+// non-root UID (empty cap set), rootless Docker (userns-capped caps),
+// gVisor/runsc (caps never reach the host kernel), and Docker Desktop Enhanced
+// Container Isolation (intercepts mount). AppArmor hosts need the configured
+// host-loaded profile before bwrap reaches this strategy probe; selecting
+// apparmor=unconfined alone is insufficient on stock Ubuntu 23.10+. On
+// unsupported runtimes `unshare` fails fast with "Operation not permitted"
 // before bwrap runs. Probing once at the first sandboxed bash call lets the
 // consumer fall back to the '--tmpfs /proc' strategy instead of failing every
 // low-trust bash call — restoring the pre-realProc behavior on unsupported

@@ -480,13 +480,21 @@ export const symlinkSchema = z.object({
 
 export type SandboxSymlink = z.infer<typeof symlinkSchema>
 
+// Docker treats the profile as one argument, but keeping the value to the
+// kernel profile-name alphabet prevents whitespace or option-like text from
+// turning a hand-edited config into ambiguous docker argv.
+const apparmorProfileSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_.-]+$/, 'AppArmor profile must be non-empty and contain only letters, digits, _, ., or -')
+
 export const sandboxSchema = z
   .object({
+    apparmorProfile: apparmorProfileSchema.default('unconfined'),
     realProc: z.boolean().default(false),
     writablePaths: z.array(relativeAgentPathSchema).default([]),
     symlinks: z.array(symlinkSchema).default([]),
   })
-  .default({ realProc: false, writablePaths: [], symlinks: [] })
+  .default({ apparmorProfile: 'unconfined', realProc: false, writablePaths: [], symlinks: [] })
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 

@@ -56,12 +56,13 @@ export type BuildDockerfileOptions = {
 // agent author. See `src/sandbox/` for the bwrap command builder, and
 // `docs/internals/sandbox.mdx` for why bwrap is the right
 // shape for per-call isolation inside an already-containerized agent. The
-// outer container's `--security-opt seccomp=unconfined` (added in the same
-// commit as this line; see `src/container/start.ts:planStart`) is what lets
-// bwrap create user/pid/mount namespaces from inside Docker. Without that
-// flag the seccomp default profile blocks `unshare(CLONE_NEWUSER)` and bwrap
-// fails at startup. The two changes are load-bearing together — do not drop
-// one without the other.
+// outer container's `seccomp=unconfined` plus configured AppArmor profile
+// (see `src/container/start.ts:planStart`) let bwrap create user/pid/mount
+// namespaces from inside Docker. Docker's seccomp default blocks userns and
+// docker-default AppArmor explicitly denies mount; on stock Ubuntu 23.10+ the
+// operator must load the shipped typeclaw-bwrap profile because the host's
+// unprivileged_userns catch-all also denies uid_map writes to unconfined
+// processes. The package, options, and host profile are load-bearing together.
 //
 // `jq` is in baseline (not behind a toggle) so it is available to the
 // per-tool bwrap sandbox that wraps agent bash calls. The sandbox only

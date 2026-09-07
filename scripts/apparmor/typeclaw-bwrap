@@ -1,0 +1,43 @@
+# TypeClaw's per-tool bwrap sandbox needs userns and mount. Moby's
+# docker-default profile denies mount, while Ubuntu 23.10+'s unprivileged_userns
+# catch-all restricts unconfined processes, so the host must load this profile.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile typeclaw-bwrap flags=(attach_disconnected,mediate_deleted) {
+  userns,
+  mount,
+  umount,
+  pivot_root,
+  capability,
+  file,
+  network,
+  # AF_UNIX is a separately mediated class under the pinned 4.0 ABI, not a
+  # subset of `network`. Xvfb's /tmp/.X11-unix socket and the runtime's local
+  # IPC both need it, and omitting it would fail only at runtime.
+  unix,
+
+  # Signals are mediated too, so every peer that must reach a container process
+  # is named here — mirroring moby's docker-default template
+  # (profiles/apparmor/template.go), which exists because container processes
+  # became unsignalable without it.
+  #
+  #   - unconfined: an unconfined dockerd, and privileged host processes.
+  #   - runc / crun: Ubuntu 23.10+ ships an AppArmor-confined OCI runtime, and
+  #     `docker stop` reaches PID 1 through `runc kill`, not always through the
+  #     daemon. `peer=unconfined` alone does not cover that hop.
+  #   - snap.docker.dockerd: snap-packaged Docker runs its daemon confined.
+  #   - typeclaw-bwrap: the runtime cancelling its own sandboxed bash call. Every
+  #     process in the container carries this profile, bwrap children included,
+  #     so timeout/abort kills are same-profile sends.
+  #
+  # A peer profile that is not loaded on this host is inert, not an error. An
+  # operator running a differently-labelled daemon or OCI runtime must add that
+  # label here; `scripts/verify-apparmor-signals.sh` is the check that a given
+  # host's stop/restart and cancellation paths actually survive this policy.
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (receive) peer=snap.docker.dockerd,
+  signal (send,receive) peer=typeclaw-bwrap,
+}

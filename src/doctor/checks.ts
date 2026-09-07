@@ -22,6 +22,7 @@ import { detectMissingDeps } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { detectWsl, isWindows, isWindowsDriveMount, type WslInfo } from '@/shared'
 
+import { apparmorSandbox } from './apparmor'
 import { buildChannelChecks } from './channel-checks'
 import { agentFileOwnership, type FileOwnershipDeps } from './file-ownership'
 import { buildOperationalIncidentChecks } from './operational-incidents'
@@ -40,6 +41,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } & FileOwners
     agentFolderGitRepo(),
     agentFileOwnership(opts),
     configValid(),
+    apparmorSandbox(),
     hostdHomeWritable(),
     wslDriveMount(),
     windowsSecretPerms(),

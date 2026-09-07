@@ -427,9 +427,20 @@ describe('configSchema', () => {
 })
 
 describe('sandboxSchema', () => {
-  test('defaults realProc to false and writablePaths/symlinks to [] when omitted', () => {
+  test('defaults apparmorProfile to unconfined, realProc to false, and writablePaths/symlinks to [] when omitted', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.sandbox).toEqual({ realProc: false, writablePaths: [], symlinks: [] })
+    expect(parsed.sandbox).toEqual({
+      apparmorProfile: 'unconfined',
+      realProc: false,
+      writablePaths: [],
+      symlinks: [],
+    })
+  })
+
+  test('rejects an invalid AppArmor profile name', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { apparmorProfile: 'profile --privileged' } }),
+    ).toThrow(/AppArmor profile/i)
   })
 
   test('accepts agent-relative writablePaths', () => {
