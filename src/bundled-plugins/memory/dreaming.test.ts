@@ -1463,6 +1463,37 @@ describe('commitMemorySnapshot', () => {
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 
+  test('force-adds ignored memory artifacts but excludes the rebuildable vector cache', async () => {
+    await initRepo(agentDir)
+    await writeFile(streamFile('2026-04-27'), 'fragment\n')
+    const vectorDir = join(agentDir, 'memory', '.vectors')
+    await mkdir(vectorDir, { recursive: true })
+    await writeFile(join(vectorDir, 'index.db'), 'sqlite cache')
+    await writeFile(join(vectorDir, 'index.db-wal'), 'wal sidecar')
+    await writeFile(join(vectorDir, 'index.db-shm'), 'shm sidecar')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual(['memory/streams/2026-04-27.jsonl'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/streams/2026-04-27.jsonl'])
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('does not commit a snapshot when only the rebuildable vector cache exists', async () => {
+    await initRepo(agentDir)
+    const vectorDir = join(agentDir, 'memory', '.vectors')
+    await mkdir(vectorDir, { recursive: true })
+    await writeFile(join(vectorDir, 'index.db'), 'sqlite cache')
+    await writeFile(join(vectorDir, 'index.db-wal'), 'wal sidecar')
+    await writeFile(join(vectorDir, 'index.db-shm'), 'shm sidecar')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual([])
+    expect(await lastCommitSubject(agentDir)).toBe('init')
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
   test('subsequent edits to tracked memory files do not appear in git status', async () => {
     await initRepo(agentDir)
     await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
