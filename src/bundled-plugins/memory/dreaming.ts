@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { z } from 'zod'
 
@@ -33,6 +33,7 @@ import { loadAllReferences, type Reference } from './references/load-references'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
+import { VECTOR_INDEX_REL_PATH } from './vector/doctor'
 import { embed, EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
 import { topicPassage } from './vector/passages'
@@ -734,7 +735,17 @@ function isEnoent(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT'
 }
 
-const SNAPSHOT_PATHS = ['memory/'] as const
+// The vector index is generated, rebuildable cache state, not durable memory.
+// Keep force-adding the broad memory/ root so new durable artifact types are
+// snapshotted automatically, while Git's exclusion pathspec keeps the SQLite
+// DB and its WAL/SHM sidecars out of history.
+const EXCLUDE_PATHSPEC_PREFIX = ':(exclude)'
+const VECTOR_INDEX_DIRECTORY_REL_PATH = dirname(VECTOR_INDEX_REL_PATH)
+const SNAPSHOT_PATHS = ['memory/', `${EXCLUDE_PATHSPEC_PREFIX}${VECTOR_INDEX_DIRECTORY_REL_PATH}/`] as const
+
+function isSnapshotExclusionPathspec(pathspec: string): boolean {
+  return pathspec.startsWith(EXCLUDE_PATHSPEC_PREFIX)
+}
 
 async function ensureMemoryFiles(agentDir: string): Promise<void> {
   const memoryDir = join(agentDir, 'memory')
@@ -767,10 +778,14 @@ async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
 
   await clearSkipWorktree(bun, cwd, repo)
 
-  // `git add -- foo bar/` fails with exit 128 if any pathspec matches no
-  // path on disk. Filter to existing paths before passing them in.
-  const presentPaths = SNAPSHOT_PATHS.filter((p) => existsSync(join(cwd, p)))
-  if (presentPaths.length === 0) {
+  // `git add -- foo bar/` fails with exit 128 if any ordinary pathspec matches
+  // no path on disk. Keep exclusion pathspecs: they are Git syntax rather than
+  // filesystem paths, and must accompany the broad memory/ root everywhere it
+  // flows. Still return early when no ordinary root is present, so an exclusion
+  // by itself never reaches `git add`.
+  const presentPaths = SNAPSHOT_PATHS.filter((p) => isSnapshotExclusionPathspec(p) || existsSync(join(cwd, p)))
+  const hasPresentSnapshotRoot = presentPaths.some((p) => !isSnapshotExclusionPathspec(p))
+  if (!hasPresentSnapshotRoot) {
     await applySkipWorktree(bun, cwd, repo)
     return
   }
