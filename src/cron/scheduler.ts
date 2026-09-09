@@ -58,9 +58,17 @@ const consoleLogger: SchedulerLogger = {
   error: (m) => console.error(m),
 }
 
-// Node clamps delays greater than this to 1ms. Re-arm long waits instead of
-// allowing an early callback to dispatch a future occurrence.
-const maxTimeoutMs = 2 ** 31 - 1
+// Timers count down against a monotonic clock, while cron occurrences are wall-clock
+// instants. A machine or VM suspension advances the latter but not the former, so a
+// single day-long timer would resume still holding almost its full delay and fire late
+// by the suspension. There is no portable in-process resume callback to correct that;
+// periodically re-checking the wall clock is the only reliable mechanism.
+//
+// One minute bounds resumed-host convergence while keeping the idle cost modest: each
+// enabled job wakes once per minute (30 jobs are 30 wake-ups/minute, or 43,200/day).
+// An intermediate wake-up only re-arms the immutable occurrence below; it never fires
+// early, because the callback dispatches only after the wall clock reaches nextFire.
+const maxArmMs = 60 * 1000
 
 export function createScheduler({
   jobs,
@@ -119,7 +127,7 @@ export function createScheduler({
         fire(live)
         scheduleNext(id)
       },
-      Math.min(delay, maxTimeoutMs),
+      Math.min(delay, maxArmMs),
     )
     handles.set(id, handle)
   }

@@ -10,8 +10,10 @@ function createFakeClock(start = new Date('2026-01-01T00:00:00Z').getTime()): Sc
   fireNext: () => void
   handleCount: () => number
   setNow: (next: number) => void
+  suspend: (ms: number) => void
 } {
   let now = start
+  let monotonicNow = start
   const timers: Array<{ fireAt: number; cb: () => void; cancelled: boolean }> = []
   let nextHandle = 1
   const handles = new Map<number, (typeof timers)[number]>()
@@ -19,7 +21,7 @@ function createFakeClock(start = new Date('2026-01-01T00:00:00Z').getTime()): Sc
   return {
     now: () => now,
     setTimeout: (cb, ms) => {
-      const timer = { fireAt: now + Math.max(0, ms), cb, cancelled: false }
+      const timer = { fireAt: monotonicNow + Math.max(0, ms), cb, cancelled: false }
       const handle = nextHandle++
       timers.push(timer)
       handles.set(handle, timer)
@@ -30,16 +32,20 @@ function createFakeClock(start = new Date('2026-01-01T00:00:00Z').getTime()): Sc
       if (timer) timer.cancelled = true
     },
     advance: async (ms) => {
-      const target = now + ms
+      const target = monotonicNow + ms
       for (;;) {
         const due = timers.filter((t) => !t.cancelled && t.fireAt <= target).sort((a, b) => a.fireAt - b.fireAt)[0]
         if (!due) break
-        now = due.fireAt
+        now += due.fireAt - monotonicNow
+        monotonicNow = due.fireAt
         due.cancelled = true
         due.cb()
-        await new Promise((r) => setImmediate(r))
+        const { promise, resolve } = Promise.withResolvers<void>()
+        setImmediate(resolve)
+        await promise
       }
-      now = target
+      now += target - monotonicNow
+      monotonicNow = target
     },
     fireNext: () => {
       const next = timers.filter((t) => !t.cancelled).sort((a, b) => a.fireAt - b.fireAt)[0]
@@ -50,6 +56,9 @@ function createFakeClock(start = new Date('2026-01-01T00:00:00Z').getTime()): Sc
     handleCount: () => Array.from(handles.values()).filter((t) => !t.cancelled).length,
     setNow: (next) => {
       now = next
+    },
+    suspend: (ms) => {
+      now += ms
     },
   }
 }
@@ -210,55 +219,71 @@ describe('createScheduler', () => {
     scheduler.stop()
   })
 
-  test('does not fire a long-delay job when Node clamps an oversized timer', async () => {
-    const clock = createFakeClock()
-    const nodeMaxTimeoutMs = 2 ** 31 - 1
-    const nodeLikeClock: SchedulerClock & Pick<typeof clock, 'advance'> = {
-      ...clock,
-      setTimeout: (cb, ms) => clock.setTimeout(cb, ms > nodeMaxTimeoutMs ? 1 : ms),
-    }
-    const recorder = createFireRecorder()
-    const dueAt = new Date('2026-02-01T00:00:00Z').toISOString()
-    const scheduler = createScheduler({
-      jobs: [{ id: 'long-delay', at: dueAt, kind: 'prompt', prompt: 'run', enabled: true }],
-      onFire: recorder.onFire,
-      clock: nodeLikeClock,
-      logger: silentLogger,
-    })
-
-    scheduler.start()
-    await nodeLikeClock.advance(nodeMaxTimeoutMs)
-
-    expect(recorder.fires).toHaveLength(0)
-
-    await nodeLikeClock.advance(new Date(dueAt).getTime() - nodeLikeClock.now())
-
-    expect(recorder.firesByJob.get('long-delay')).toHaveLength(1)
-
-    scheduler.stop()
-  })
-
-  test('retains a long-delay occurrence across a backward clock adjustment', async () => {
+  test('does not fire a future occurrence during bounded re-arms', async () => {
     const clock = createFakeClock()
     const recorder = createFireRecorder()
-    const nodeMaxTimeoutMs = 2 ** 31 - 1
+    const dueAt = new Date('2026-01-01T00:03:00Z').toISOString()
     const scheduler = createScheduler({
-      jobs: [promptJob('monthly', '0 0 1 * *')],
+      jobs: [{ id: 'future', at: dueAt, kind: 'prompt', prompt: 'run', enabled: true }],
       onFire: recorder.onFire,
       clock,
       logger: silentLogger,
     })
 
     scheduler.start()
-    clock.setNow(new Date('2025-12-15T00:00:00Z').getTime())
-    clock.fireNext()
-    await clock.advance(nodeMaxTimeoutMs)
+    await clock.advance(3 * 60 * 1000 - 1)
 
     expect(recorder.fires).toHaveLength(0)
 
-    await clock.advance(new Date('2026-02-01T00:00:00Z').getTime() - clock.now())
+    await clock.advance(1)
 
-    expect(recorder.firesByJob.get('monthly')).toHaveLength(1)
+    expect(recorder.firesByJob.get('future')).toHaveLength(1)
+
+    scheduler.stop()
+  })
+
+  test('converges on a captured occurrence after a suspended timer', async () => {
+    const start = new Date('2026-01-01T00:00:00Z').getTime()
+    const clock = createFakeClock(start)
+    const firedAt: number[] = []
+    const dueAt = start + 5 * 60 * 1000
+    const scheduler = createScheduler({
+      jobs: [{ id: 'suspended', at: new Date(dueAt).toISOString(), kind: 'prompt', prompt: 'run', enabled: true }],
+      onFire: () => firedAt.push(clock.now()),
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    clock.suspend(2 * 60 * 1000)
+    await clock.advance(5 * 60 * 1000)
+
+    expect(firedAt).toEqual([dueAt])
+
+    scheduler.stop()
+  })
+
+  test('retains a captured occurrence across a backward clock adjustment', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const dueAt = new Date('2026-01-01T00:03:00Z').toISOString()
+    const scheduler = createScheduler({
+      jobs: [{ id: 'backward', at: dueAt, kind: 'prompt', prompt: 'run', enabled: true }],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    clock.setNow(new Date('2025-12-31T23:59:00Z').getTime())
+    clock.fireNext()
+    await clock.advance(3 * 60 * 1000)
+
+    expect(recorder.fires).toHaveLength(0)
+
+    await clock.advance(60 * 1000)
+
+    expect(recorder.firesByJob.get('backward')).toHaveLength(1)
 
     scheduler.stop()
   })
