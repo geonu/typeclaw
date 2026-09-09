@@ -1591,6 +1591,12 @@ function isBuildCall(args: string[]): boolean {
   return args[0] === 'build' || (args[0] === 'buildx' && args[1] === 'build')
 }
 
+function protectionTagFrom(calls: RecordedCall[]): string {
+  const tag = calls.find((call) => call.args[0] === 'image' && call.args[1] === 'tag')?.args[3]
+  if (!tag) throw new Error('expected a temporary image protection tag')
+  return tag
+}
+
 type ContainerScenario =
   | { exists: false }
   | {
@@ -1610,6 +1616,9 @@ type ContainerScenario =
 
 function fakeDockerExec(scenario: {
   imageExists: boolean
+  imageIdBeforeBuild?: string
+  imageRmFails?: boolean
+  imageTags?: string[]
   container: ContainerScenario
   dockerPlatformName?: string
   buildxAvailable?: boolean
@@ -1624,8 +1633,10 @@ function fakeDockerExec(scenario: {
 }): {
   exec: DockerExec
   calls: RecordedCall[]
+  hasImageTag: (tag: string) => boolean
 } {
   const calls: RecordedCall[] = []
+  const imageTags = new Set(scenario.imageTags)
   let containerState = scenario.container
   let rmReturned = false
   let inspectsAfterRm = 0
@@ -1653,7 +1664,22 @@ function fakeDockerExec(scenario: {
     })
 
     if (args[0] === 'image' && args[1] === 'inspect') {
-      return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
+      if (!scenario.imageExists) return { exitCode: 1, stdout: '', stderr: '' }
+      const imageId = scenario.imageIdBeforeBuild ?? 'sha256:old-image'
+      return { exitCode: 0, stdout: `${imageId}\n`, stderr: '' }
+    }
+    if (args[0] === 'image' && args[1] === 'tag') {
+      imageTags.add(args[3] ?? '')
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'image' && args[1] === 'rm') {
+      const target = args.at(-1) ?? ''
+      if (scenario.imageRmFails) {
+        return { exitCode: 1, stdout: '', stderr: 'image is being used by a container' }
+      }
+      if (target.startsWith('sha256:')) imageTags.clear()
+      else imageTags.delete(target)
+      return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'version') {
       return { exitCode: 0, stdout: `${scenario.dockerPlatformName ?? 'Docker Engine'}\n`, stderr: '' }
@@ -1760,7 +1786,7 @@ function fakeDockerExec(scenario: {
     }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls }
+  return { exec, calls, hasImageTag: (tag) => imageTags.has(tag) }
 }
 
 describe('start (composition)', () => {
@@ -2334,6 +2360,184 @@ describe('start (composition)', () => {
     expect(buildCall).toBeDefined()
     expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
+  })
+
+  test('reclaims a replaced image by releasing its temporary protection tag', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:replaced-image',
+      container: { exists: false },
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const protectCall = calls.find((call) => call.args[0] === 'image' && call.args[1] === 'tag')
+    const protectionTag = protectionTagFrom(calls)
+    expect(protectCall?.args[2]).toBe('sha256:replaced-image')
+    expect(protectionTag).toStartWith(`typeclaw-${basename(root)}:rebuild-`)
+    expect(calls.map((call) => call.args)).toContainEqual(['image', 'rm', '--no-prune', protectionTag])
+    expect(calls.map((call) => call.args)).not.toContainEqual(['image', 'rm', '--no-prune', 'sha256:replaced-image'])
+  })
+
+  test('preserves another agent tag that points at the replaced image', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const otherAgentTag = 'typeclaw-other-agent:latest'
+    const { exec, hasImageTag } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:shared-image',
+      imageTags: [otherAgentTag],
+      container: { exists: false },
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(hasImageTag(otherAgentTag)).toBe(true)
+  })
+
+  test('keeps the current image when a rebuild resolves to the same image ID', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:cached-image',
+      container: { exists: false },
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const protectionTag = protectionTagFrom(calls)
+    expect(calls.map((call) => call.args)).toContainEqual(['image', 'rm', '--no-prune', protectionTag])
+    expect(calls.map((call) => call.args)).not.toContainEqual(['image', 'rm', '--no-prune', 'sha256:cached-image'])
+  })
+
+  test('preserves the prior image when its replacement build fails', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:prior-image',
+      buildFails: true,
+      container: { exists: false },
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      streamOutput: false,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(false)
+    const protectionTag = protectionTagFrom(calls)
+    expect(calls.map((call) => call.args)).toContainEqual(['image', 'rm', '--no-prune', protectionTag])
+    expect(calls.map((call) => call.args)).not.toContainEqual(['image', 'rm', '--no-prune', 'sha256:prior-image'])
+  })
+
+  test('warns without blocking startup when Docker retains a replaced image', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const warnings: string[] = []
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:in-use-image',
+      imageRmFails: true,
+      container: { exists: false },
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const protectionTag = protectionTagFrom(calls)
+    expect(calls.map((call) => call.args)).toContainEqual(['image', 'rm', '--no-prune', protectionTag])
+    expect(warnings).toEqual([
+      expect.stringMatching(
+        /^Could not remove temporary Docker image protection tag typeclaw-.+:rebuild-[0-9a-f]+: image is being used by a container$/,
+      ),
+    ])
+  })
+
+  test('prints a cleanup warning without calling the parent warning hook while streaming output', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const warnings: string[] = []
+    const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const { exec } = fakeDockerExec({
+      imageExists: true,
+      imageIdBeforeBuild: 'sha256:in-use-image',
+      imageRmFails: true,
+      container: { exists: false },
+    })
+
+    try {
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        forceBuild: true,
+        onWarning: (warning) => warnings.push(warning),
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: noAutoUpgrade,
+        ...bypassVerify,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain(
+        'typeclaw: Could not remove temporary Docker image protection tag',
+      )
+      expect(warnings).toEqual([])
+    } finally {
+      stderr.mockRestore()
+    }
   })
 
   test('builds via `docker buildx build` (BuildKit frontend) so the Dockerfile cache mounts are honored', async () => {
