@@ -263,6 +263,30 @@ describe('createScheduler', () => {
     scheduler.stop()
   })
 
+  test('fires within one minute of a suspension that lands past the occurrence', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const dueAt = new Date('2026-01-01T00:10:00Z').toISOString()
+    const scheduler = createScheduler({
+      jobs: [{ id: 'resume-bound', at: dueAt, kind: 'prompt', prompt: 'run', enabled: true }],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    clock.suspend(15 * 60 * 1000)
+    await clock.advance(60 * 1000 - 1)
+
+    expect(recorder.fires).toHaveLength(0)
+
+    await clock.advance(1)
+
+    expect(recorder.firesByJob.get('resume-bound')).toHaveLength(1)
+
+    scheduler.stop()
+  })
+
   test('retains a captured occurrence across a backward clock adjustment', async () => {
     const clock = createFakeClock()
     const recorder = createFireRecorder()
