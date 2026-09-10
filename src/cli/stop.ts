@@ -4,7 +4,7 @@ import { resolveController } from '@/container'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { requireAgentDir } from './require-agent-dir'
-import { c, spinner } from './ui'
+import { c, reportConfigWarnings, spinner } from './ui'
 
 export const stopCommand = defineCommand({
   meta: {
@@ -22,10 +22,12 @@ export const stopCommand = defineCommand({
 
     const s = spinner()
     s.start('Stopping container...')
-    const result = await resolveController().stop({ cwd })
+    const warnings: string[] = []
+    const result = await resolveController().stop({ cwd, onWarning: (warning) => warnings.push(warning) })
 
     if (!result.ok) {
       s.error(result.reason)
+      reportConfigWarnings(warnings)
       process.exit(1)
     }
 
@@ -34,5 +36,6 @@ export const stopCommand = defineCommand({
     } else {
       s.stop(c.dim(`Container ${result.containerName} is not running.`))
     }
+    reportConfigWarnings(warnings)
   },
 })

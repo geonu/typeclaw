@@ -2,12 +2,47 @@ import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { resolveController } from '@/container'
+import { type Controller, resolveController } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { guardIncompleteInit } from './incomplete-init'
 import { errorLine, renderStartSuccess, reportConfigWarnings, spinner } from './ui'
+
+export type StartCommandEvent =
+  | { kind: 'spinner-start'; message: string }
+  | { kind: 'spinner-stop'; message: string }
+  | { kind: 'spinner-error'; message: string }
+  | { kind: 'warnings'; warnings: string[] }
+  | { kind: 'success'; output: string }
+
+export type StartCommandDeps = {
+  start: Controller['start']
+  onEvent: (event: StartCommandEvent) => void
+}
+
+export async function runStartCommand(
+  options: { cwd: string; preferredHostPort: number; forceBuild: boolean; cliEntry?: string },
+  deps: StartCommandDeps,
+): Promise<{ ok: boolean }> {
+  deps.onEvent({ kind: 'spinner-start', message: 'Starting container...' })
+  const warnings: string[] = []
+  const result = await deps.start({
+    ...options,
+    onWarning: (warning) => warnings.push(warning),
+  })
+  if (!result.ok) {
+    deps.onEvent({ kind: 'spinner-error', message: result.reason })
+    deps.onEvent({ kind: 'warnings', warnings })
+    return { ok: false }
+  }
+
+  deps.onEvent({ kind: 'spinner-stop', message: result.alreadyRunning ? 'Already running.' : 'Started.' })
+  deps.onEvent({ kind: 'warnings', warnings })
+  deps.onEvent({ kind: 'warnings', warnings: result.dockerfileWarnings })
+  deps.onEvent({ kind: 'success', output: renderStartSuccess(result) })
+  return { ok: true }
+}
 
 export const startCommand = defineCommand({
   meta: {
@@ -71,20 +106,37 @@ export const startCommand = defineCommand({
     }
 
     const s = spinner()
-    s.start('Starting container...')
-    const result = await resolveController().start({
-      cwd,
-      preferredHostPort: Number(args.port),
-      forceBuild: args.build,
-      cliEntry: process.argv[1],
-    })
-    if (!result.ok) {
-      s.error(result.reason)
-      process.exit(1)
-    }
-    s.stop(result.alreadyRunning ? 'Already running.' : 'Started.')
-
-    reportConfigWarnings(result.dockerfileWarnings)
-    console.log(renderStartSuccess(result))
+    const controller = resolveController()
+    const result = await runStartCommand(
+      {
+        cwd,
+        preferredHostPort: Number(args.port),
+        forceBuild: args.build,
+        cliEntry: process.argv[1],
+      },
+      {
+        start: (startOptions) => controller.start(startOptions),
+        onEvent: (event) => {
+          switch (event.kind) {
+            case 'spinner-start':
+              s.start(event.message)
+              break
+            case 'spinner-stop':
+              s.stop(event.message)
+              break
+            case 'spinner-error':
+              s.error(event.message)
+              break
+            case 'warnings':
+              reportConfigWarnings(event.warnings)
+              break
+            case 'success':
+              console.log(event.output)
+              break
+          }
+        },
+      },
+    )
+    if (!result.ok) process.exit(1)
   },
 })

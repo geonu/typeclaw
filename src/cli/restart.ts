@@ -2,12 +2,59 @@ import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { resolveController } from '@/container'
+import { type Controller, resolveController } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { guardIncompleteInit } from './incomplete-init'
 import { c, errorLine, renderStartSuccess, reportConfigWarnings, spinner } from './ui'
+
+export type RestartCommandEvent =
+  | { kind: 'stop-spinner-start'; message: string }
+  | { kind: 'stop-spinner-stop'; message: string }
+  | { kind: 'stop-spinner-error'; message: string }
+  | { kind: 'start-spinner-start'; message: string }
+  | { kind: 'start-spinner-stop'; message: string }
+  | { kind: 'start-spinner-error'; message: string }
+  | { kind: 'warnings'; warnings: string[] }
+  | { kind: 'success'; output: string }
+
+export type RestartCommandDeps = {
+  restart: Controller['restart']
+  onEvent: (event: RestartCommandEvent) => void
+}
+
+export async function runRestartCommand(
+  options: { cwd: string; preferredHostPort: number; forceBuild: boolean; cliEntry?: string },
+  deps: RestartCommandDeps,
+): Promise<{ ok: boolean }> {
+  deps.onEvent({ kind: 'stop-spinner-start', message: 'Stopping container...' })
+  let stopped = false
+  const warnings: string[] = []
+  const result = await deps.restart({
+    ...options,
+    onWarning: (warning) => warnings.push(warning),
+    onStopped: (stopResult) => {
+      stopped = true
+      deps.onEvent({
+        kind: 'stop-spinner-stop',
+        message: stopResult.running ? `Stopped ${c.cyan(stopResult.containerName)}.` : 'Already stopped.',
+      })
+      deps.onEvent({ kind: 'start-spinner-start', message: 'Starting container...' })
+    },
+  })
+  if (!result.ok) {
+    deps.onEvent({ kind: stopped ? 'start-spinner-error' : 'stop-spinner-error', message: result.reason })
+    deps.onEvent({ kind: 'warnings', warnings })
+    return { ok: false }
+  }
+
+  deps.onEvent({ kind: 'start-spinner-stop', message: 'Started.' })
+  deps.onEvent({ kind: 'warnings', warnings })
+  deps.onEvent({ kind: 'warnings', warnings: result.start.dockerfileWarnings })
+  deps.onEvent({ kind: 'success', output: renderStartSuccess(result.start) })
+  return { ok: true }
+}
 
 export const restartCommand = defineCommand({
   meta: {
@@ -70,30 +117,49 @@ export const restartCommand = defineCommand({
       process.exit(1)
     }
 
-    const controller = resolveController()
-
     const stopSpin = spinner()
-    stopSpin.start('Stopping container...')
+    const controller = resolveController()
     let startSpin: ReturnType<typeof spinner> | undefined
-    const restarted = await controller.restart({
-      cwd,
-      preferredHostPort: Number(args.port),
-      forceBuild: args.build,
-      cliEntry: process.argv[1],
-      onStopped: (stopped) => {
-        stopSpin.stop(stopped.running ? `Stopped ${c.cyan(stopped.containerName)}.` : 'Already stopped.')
-        startSpin = spinner()
-        startSpin.start('Starting container...')
+    const result = await runRestartCommand(
+      {
+        cwd,
+        preferredHostPort: Number(args.port),
+        forceBuild: args.build,
+        cliEntry: process.argv[1],
       },
-    })
-    if (!restarted.ok) {
-      if (startSpin === undefined) stopSpin.error(restarted.reason)
-      else startSpin.error(restarted.reason)
-      process.exit(1)
-    }
-    startSpin?.stop('Started.')
-
-    reportConfigWarnings(restarted.start.dockerfileWarnings)
-    console.log(renderStartSuccess(restarted.start))
+      {
+        restart: (restartOptions) => controller.restart(restartOptions),
+        onEvent: (event) => {
+          switch (event.kind) {
+            case 'stop-spinner-start':
+              stopSpin.start(event.message)
+              break
+            case 'stop-spinner-stop':
+              stopSpin.stop(event.message)
+              break
+            case 'stop-spinner-error':
+              stopSpin.error(event.message)
+              break
+            case 'start-spinner-start':
+              startSpin = spinner()
+              startSpin.start(event.message)
+              break
+            case 'start-spinner-stop':
+              startSpin?.stop(event.message)
+              break
+            case 'start-spinner-error':
+              startSpin?.error(event.message)
+              break
+            case 'warnings':
+              reportConfigWarnings(event.warnings)
+              break
+            case 'success':
+              console.log(event.output)
+              break
+          }
+        },
+      },
+    )
+    if (!result.ok) process.exit(1)
   },
 })
