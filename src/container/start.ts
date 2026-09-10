@@ -532,7 +532,7 @@ async function runStart({
       }
     }
 
-    const imageExisted = await imageExists(exec, imageTagValue)
+    const previousImageId = await inspectImageId(exec, imageTagValue)
 
     // First attempt uses the user's preferred host port (8973 by default, or
     // whatever they passed via --port / typeclaw.json). If it's already bound
@@ -552,7 +552,7 @@ async function runStart({
     let plan = await planStart({
       cwd,
       hostPort,
-      imageExists: imageExisted,
+      imageExists: previousImageId !== null,
       forceBuild: forceBuild || dockerfileRefresh.changed,
       hostdControl,
       publishHost,
@@ -563,14 +563,31 @@ async function runStart({
 
     let built = false
     if (plan.needsBuild) {
-      const buildResult = await runImageBuild({
-        exec,
-        cwd,
-        imageTag: plan.imageTag,
-        buildContext: plan.buildContext,
-        hasBuildx,
-        streamOutput,
-      })
+      const protection = await protectImageForRebuild(exec, plan.imageTag, previousImageId)
+      if (protection.warning !== null) {
+        if (streamOutput) process.stderr.write(`typeclaw: ${protection.warning}\n`)
+        else onWarning?.(protection.warning)
+      }
+
+      let buildResult: Awaited<ReturnType<typeof runImageBuild>>
+      try {
+        buildResult = await runImageBuild({
+          exec,
+          cwd,
+          imageTag: plan.imageTag,
+          buildContext: plan.buildContext,
+          hasBuildx,
+          streamOutput,
+        })
+      } finally {
+        if (protection.tag !== null) {
+          const releaseWarning = await releaseImageProtection(exec, protection.tag)
+          if (releaseWarning !== null) {
+            if (streamOutput) process.stderr.write(`typeclaw: ${releaseWarning}\n`)
+            else onWarning?.(releaseWarning)
+          }
+        }
+      }
       if (!buildResult.ok) {
         await cleanupHostDaemonRegistration(containerName, hostd)
         const retryDetail = buildResult.credentialHelperRetried
@@ -1223,9 +1240,45 @@ export async function refreshGitignore(cwd: string): Promise<void> {
 // the migration write with a commit on every read path, not only here.
 export const commitSystemFile = commitSystemFileShared
 
-async function imageExists(exec: DockerExec, tag: string): Promise<boolean> {
-  const result = await exec(['image', 'inspect', tag])
-  return result.exitCode === 0
+async function inspectImageId(exec: DockerExec, tag: string): Promise<string | null> {
+  const result = await exec(['image', 'inspect', '--format', '{{.Id}}', tag])
+  if (result.exitCode !== 0) return null
+  return result.stdout.trim() || null
+}
+
+async function protectImageForRebuild(
+  exec: DockerExec,
+  imageTag: string,
+  previousImageId: string | null,
+): Promise<{ tag: string | null; warning: string | null }> {
+  if (previousImageId === null) return { tag: null, warning: null }
+
+  const protectionTag = `${imageTag}:rebuild-${randomBytes(8).toString('hex')}`
+  try {
+    const result = await exec(['image', 'tag', previousImageId, protectionTag])
+    if (result.exitCode === 0) return { tag: protectionTag, warning: null }
+    const detail = sanitizeDockerStderr(result.stderr) || `docker image tag exited with code ${result.exitCode}`
+    return {
+      tag: null,
+      warning: `Could not protect existing Docker image ${previousImageId} for cleanup: ${detail}`,
+    }
+  } catch (error) {
+    return {
+      tag: null,
+      warning: `Could not protect existing Docker image ${previousImageId} for cleanup: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+async function releaseImageProtection(exec: DockerExec, protectionTag: string): Promise<string | null> {
+  try {
+    const result = await exec(['image', 'rm', '--no-prune', protectionTag])
+    if (result.exitCode === 0) return null
+    const detail = sanitizeDockerStderr(result.stderr) || `docker image rm exited with code ${result.exitCode}`
+    return `Could not remove temporary Docker image protection tag ${protectionTag}: ${detail}`
+  } catch (error) {
+    return `Could not remove temporary Docker image protection tag ${protectionTag}: ${error instanceof Error ? error.message : String(error)}`
+  }
 }
 
 type InspectedState =
