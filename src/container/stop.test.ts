@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -49,6 +49,9 @@ type FakeOptions = {
   // Applies BOTH to the "in-progress" non-zero rm and to the exit-0 rm
   // (OrbStack/Docker Desktop under load acknowledge the rm before draining).
   drainAfterInspectCalls?: number
+  lifeStatus?: 'running' | 'exited' | 'dead' | 'removing'
+  statusProbeExitCode?: number
+  statusProbeStderr?: string
 }
 
 function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string[][] } {
@@ -59,6 +62,13 @@ function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string
   const exec: DockerExec = async (args): Promise<DockerExecResult> => {
     calls.push(args)
     if (args[0] === 'inspect') {
+      if (args.includes('{{.State.Status}}')) {
+        return {
+          exitCode: options.statusProbeExitCode ?? 0,
+          stdout: `${options.lifeStatus ?? 'exited'}\n`,
+          stderr: options.statusProbeStderr ?? '',
+        }
+      }
       if (rmReturned) {
         inspectsAfterRm += 1
         if (inspectsAfterRm > (options.drainAfterInspectCalls ?? 0)) {
@@ -377,5 +387,94 @@ describe('stop (composition)', () => {
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/archive.*disk full/i)
     expect(calls.find((call) => call[0] === 'rm')).toBeUndefined()
+  })
+
+  test('warns and continues with non-force removal when Docker says logs are permanently unavailable', async () => {
+    const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: false } })
+    const warnings: string[] = []
+
+    const result = await stop({
+      cwd: root,
+      exec,
+      archiveLogs: async () => ({ ok: false, kind: 'unavailable', reason: 'terminal Docker state' }),
+      onWarning: (warning) => warnings.push(warning),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(calls).toContainEqual(['rm', CONTAINER_ID])
+    expect(calls.some((call) => call.includes('--force'))).toBe(false)
+    expect(warnings).toEqual([expect.stringContaining('no new snapshot was captured')])
+  })
+
+  test('keeps ordinary archive failures fatal without issuing any rm', async () => {
+    const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: false } })
+    const warnings: string[] = []
+
+    const result = await stop({
+      cwd: root,
+      exec,
+      archiveLogs: async () => ({ ok: false, kind: 'failed', reason: 'disk full' }),
+      onWarning: (warning) => warnings.push(warning),
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/Could not archive logs.*disk full.*Preserving/)
+    expect(calls.some((call) => call[0] === 'rm')).toBe(false)
+    expect(warnings).toEqual([])
+  })
+
+  test('diagnoses a non-benign removal failure stuck in removing without forcing it', async () => {
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      rmExitCode: 1,
+      rmStderr: 'permission denied',
+      lifeStatus: 'removing',
+    })
+
+    const result = await stop({ cwd: root, exec, archiveLogs })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toContain('docker rm failed: permission denied')
+    expect(result.reason).toContain('Restart Docker or OrbStack')
+    expect(calls.some((call) => call.includes('-f') || call.includes('--force'))).toBe(false)
+  })
+
+  test('diagnoses a timed-out removal drain when Docker reports the container dead', async () => {
+    const now = spyOn(Date, 'now')
+    let timestamp = 0
+    now.mockImplementation(() => (timestamp += 10_001))
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      drainAfterInspectCalls: Number.MAX_SAFE_INTEGER,
+      lifeStatus: 'dead',
+    })
+
+    try {
+      const result = await stop({ cwd: root, exec, archiveLogs })
+
+      expect(result.ok).toBe(false)
+      if (result.ok) throw new Error('expected failure')
+      expect(result.reason).toContain('still being removed by docker after 10s')
+      expect(result.reason).toContain('marked this container dead')
+      expect(calls.some((call) => call.includes('-f') || call.includes('--force'))).toBe(false)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  test('keeps the pre-existing removal error byte-identical when the status probe is unreadable', async () => {
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      rmExitCode: 1,
+      rmStderr: 'permission denied',
+      statusProbeExitCode: 1,
+      statusProbeStderr: 'daemon unavailable',
+    })
+
+    const result = await stop({ cwd: root, exec, archiveLogs })
+
+    expect(result).toEqual({ ok: false, reason: 'docker rm failed: permission denied' })
+    expect(calls.some((call) => call.includes('-f') || call.includes('--force'))).toBe(false)
   })
 })
