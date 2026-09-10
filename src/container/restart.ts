@@ -38,7 +38,12 @@ async function restartWithLease(
   lease: AgentOperationLease,
   operationLock: WithAgentOperationLock,
 ): Promise<RestartResult> {
-  const stopped = await stop({ cwd: options.cwd, operationLock, operationLease: lease })
+  const stopped = await stop({
+    cwd: options.cwd,
+    onWarning: options.onWarning,
+    operationLock,
+    operationLease: lease,
+  })
   if (!stopped.ok) return { ok: false, reason: `stop failed: ${stopped.reason}` }
   options.onStopped?.(stopped)
 

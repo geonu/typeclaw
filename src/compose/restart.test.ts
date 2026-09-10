@@ -145,4 +145,17 @@ describe('composeRestart events', () => {
       warnings: ['captured warning'],
     })
   })
+
+  test('collects stop-phase warnings in the per-agent result', async () => {
+    await makeValidAgent(root, 'alpha')
+    const restart: Controller['restart'] = async (options) => {
+      options.onWarning?.('dead logs unavailable')
+      options.onStopped?.({ ok: true, containerName: 'alpha', running: false })
+      return { ok: false, reason: 'simulated start failure' }
+    }
+
+    const { results } = await composeRestart({ rootCwd: root, preferredHostPort: 8973 }, { restart })
+
+    expect(results[0]?.warnings).toEqual(['dead logs unavailable'])
+  })
 })
