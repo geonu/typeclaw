@@ -41,7 +41,7 @@ import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { type AgentOperationLease, type WithAgentOperationLock, withAgentOperationLock } from './agent-operation-lock'
 import { acquireManagedBuildCache, type ManagedBuildCacheLease } from './build-cache'
-import { archiveContainerLogs, type DockerLogArchiver } from './log-archive'
+import { archiveContainerLogs, dockerLogsUnavailableWarning, type DockerLogArchiver } from './log-archive'
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
   buildxAvailable,
@@ -60,7 +60,12 @@ import {
   sanitizeDockerConfigJson,
   sanitizeDockerStderr,
 } from './shared'
-import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
+import {
+  buildCrashReason,
+  createVerifyRunning,
+  describeUnremovableContainer,
+  type VerifyRunningFn,
+} from './verify-running'
 
 const PACKAGE_FILE = 'package.json'
 const TYPECLAW_PACKAGE = 'typeclaw'
@@ -276,12 +281,24 @@ async function runStart({
   try {
     const containerName = containerNameFromCwd(cwd)
     const imageTagValue = imageTagFromCwd(cwd)
-    const archiveBeforeRemove = async (containerId: string) =>
-      await archiveLogs({
+    const archiveBeforeRemove = async (containerId: string) => {
+      const archive = await archiveLogs({
         agentDir: cwd,
         containerId,
         retentionDays: (await loadTypeclawConfig(cwd)).logs.retentionDays,
       })
+      if (archive.ok) return { ok: true as const }
+      if (archive.kind === 'failed') return { ok: false as const, reason: archive.reason }
+      // Dispatch on the callback, NOT on streamOutput. `streamOutput` defaults
+      // to true, and standalone start/restart both stream Docker build output
+      // AND pass a collector so they can render warnings after their spinner
+      // settles; keying on streamOutput writes under the live spinner and
+      // leaves that collector empty. stderr stays the no-callback fallback.
+      const warning = dockerLogsUnavailableWarning(containerId)
+      if (onWarning !== undefined) onWarning(warning)
+      else if (streamOutput) process.stderr.write(`${warning}\n`)
+      return { ok: true as const }
+    }
 
     // Probe container state BEFORE refreshing Dockerfile/.gitignore: when the
     // container is already running, start() is a no-op and must not produce
@@ -530,9 +547,11 @@ async function runStart({
         }
       }
       if (cleanup === 'stuck') {
+        const reason = `Container ${containerName} could not be safely inspected or removed; preserving it and refusing to docker run --name to avoid a conflict.`
+        const diagnosis = await describeUnremovableContainer(exec, state.containerId)
         return {
           ok: false,
-          reason: `Container ${containerName} could not be safely inspected or removed; preserving it and refusing to docker run --name to avoid a conflict.`,
+          reason: diagnosis === null ? reason : `${reason} ${diagnosis}`,
         }
       }
     }
@@ -1373,8 +1392,7 @@ async function inspectContainer(exec: DockerExec, name: string): Promise<Inspect
 // container record behind, and start()'s own port-TOCTOU retry triggers
 // this path against that corpse).
 //
-// cleanupRunCorpse refuses to touch a running container and uses non-force rm,
-// so a container that starts after its inspect probe is also preserved. A concurrent
+// cleanupRunCorpse refuses to touch a running container and uses non-force rm. A concurrent
 // legitimate start of the same name (or a foreign-but-named container the
 // user wants alive) is surfaced as a hard failure rather than silently
 // killed. 'stuck' likewise surfaces — a wedged daemon that won't drain a
