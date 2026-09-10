@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -538,6 +538,26 @@ describe('cleanupRunCorpse', () => {
     }
 
     expect(await cleanupRunCorpse(exec, 'x', beforeRemove)).toBe('stuck')
+  })
+
+  test('returns "stuck" when the removal drain times out', async () => {
+    const now = spyOn(Date, 'now')
+    let timestamp = 0
+    now.mockImplementation(() => (timestamp += 10_001))
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect' && args.includes('{{.Id}}|{{.State.Running}}')) {
+        return { exitCode: 0, stdout: `${CORPSE_ID}|false\n`, stderr: '' }
+      }
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: 'false\n', stderr: '' }
+      if (args[0] === 'rm') return { exitCode: 0, stdout: '', stderr: '' }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    try {
+      expect(await cleanupRunCorpse(exec, 'x', beforeRemove)).toBe('stuck')
+    } finally {
+      now.mockRestore()
+    }
   })
 
   test.each(['\n', `short|false\n`, `${CORPSE_ID}|unknown\n`, `${'A'.repeat(64)}|false\n`])(
