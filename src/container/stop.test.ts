@@ -369,7 +369,7 @@ describe('stop (composition)', () => {
 
   test('does not remove the container when archival fails', async () => {
     const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: false } })
-    const failingArchive = async () => ({ ok: false as const, reason: 'disk full' })
+    const failingArchive = async () => ({ ok: false as const, kind: 'failed' as const, reason: 'disk full' })
 
     const result = await stop({ cwd: root, exec, archiveLogs: failingArchive })
 

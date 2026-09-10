@@ -4507,7 +4507,7 @@ describe('start (composition)', () => {
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
-      archiveLogs: async () => ({ ok: false, reason: 'disk full' }),
+      archiveLogs: async () => ({ ok: false, kind: 'failed', reason: 'disk full' }),
     })
 
     expect(result.ok).toBe(false)
@@ -4933,7 +4933,7 @@ describe('start (composition)', () => {
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
-      archiveLogs: async () => ({ ok: false, reason: 'read-only filesystem' }),
+      archiveLogs: async () => ({ ok: false, kind: 'failed', reason: 'read-only filesystem' }),
     })
 
     expect(result.ok).toBe(false)
