@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 // Stable TypeScript 7.0 ships no programmatic API (returns in 7.1); this meta-test
 // walks its own source AST, so it pulls the classic compiler API from the TS6 compat
@@ -16,6 +17,7 @@ import { buildGitignore } from '@/init/gitignore'
 import { isWindows } from '@/shared'
 
 import type { WithAgentOperationLock } from './agent-operation-lock'
+import { acquireManagedBuildCache } from './build-cache'
 import type { DockerExec } from './shared'
 import {
   commitSystemFile,
@@ -188,6 +190,7 @@ const bypassVerify = {
   ensureModels: noEnsureModels,
   archiveLogs: noArchiveLogs,
   provisionGithubCliStore: noGithubCliProvision,
+  acquireBuildCache: null,
 }
 
 function labelValue(runArgs: string[], key: string): string | undefined {
@@ -1623,8 +1626,15 @@ function fakeDockerExec(scenario: {
   dockerPlatformName?: string
   buildxAvailable?: boolean
   buildxBuildFails?: boolean
+  managedBuildxBuildFails?: boolean
+  defaultBuildxBuildFails?: boolean
   buildFails?: boolean
   buildStderr?: string
+  daemonId?: string
+  managedBuilderCreateFails?: boolean
+  managedBuilderRmFails?: boolean
+  buildThrows?: boolean
+  cacheExportMissing?: boolean
   // Simulate a broken credential helper: build calls fail with the helper-not-
   // found stderr UNTIL the call is made with DOCKER_CONFIG set in its env (the
   // sanitized-config retry), at which point the build succeeds.
@@ -1641,6 +1651,7 @@ function fakeDockerExec(scenario: {
   let rmReturned = false
   let inspectsAfterRm = 0
   let runningRacePending = scenario.container.exists && scenario.container.rmFindsRunning === true
+  let managedBuilderExists = false
   const exec: DockerExec = async (args, options) => {
     let dockerfileSnapshot: string | null = null
     if (options?.cwd) {
@@ -1690,6 +1701,26 @@ function fakeDockerExec(scenario: {
       return scenario.buildxAvailable === false
         ? { exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' }
         : { exitCode: 0, stdout: 'buildx v0.0.0\n', stderr: '' }
+    }
+    if (args[0] === 'info') {
+      return scenario.daemonId === undefined
+        ? { exitCode: 1, stdout: '', stderr: 'daemon identity unavailable' }
+        : { exitCode: 0, stdout: `${scenario.daemonId}\n`, stderr: '' }
+    }
+    if (args[0] === 'buildx' && args[1] === 'inspect') {
+      return managedBuilderExists
+        ? { exitCode: 0, stdout: 'managed builder\n', stderr: '' }
+        : { exitCode: 1, stdout: '', stderr: 'no builder found' }
+    }
+    if (args[0] === 'buildx' && args[1] === 'create') {
+      if (scenario.managedBuilderCreateFails) return { exitCode: 1, stdout: '', stderr: 'create failed' }
+      managedBuilderExists = true
+      return { exitCode: 0, stdout: `${args.at(-1)}\n`, stderr: '' }
+    }
+    if (args[0] === 'buildx' && args[1] === 'rm') {
+      if (scenario.managedBuilderRmFails) return { exitCode: 1, stdout: '', stderr: 'builder removal failed' }
+      managedBuilderExists = false
+      return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'inspect') {
       if (rmReturned && containerState.exists) {
@@ -1754,6 +1785,7 @@ function fakeDockerExec(scenario: {
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (isBuildCall(args)) {
+      if (scenario.buildThrows) throw new Error('build process failed')
       if (scenario.buildFails) {
         return { exitCode: 1, stdout: '', stderr: scenario.buildStderr ?? 'build exploded' }
       }
@@ -1761,6 +1793,12 @@ function fakeDockerExec(scenario: {
       // builder). The legacy `docker build` retry still succeeds.
       if (scenario.buildxBuildFails && args[0] === 'buildx') {
         return { exitCode: 1, stdout: '', stderr: 'ERROR: no builder instance found' }
+      }
+      if (scenario.managedBuildxBuildFails && args[0] === 'buildx' && args.includes('--builder')) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: managed builder failed' }
+      }
+      if (scenario.defaultBuildxBuildFails && args[0] === 'buildx' && !args.includes('--builder')) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: default builder failed' }
       }
       if (scenario.credHelperMissingUntilSanitized && options?.env?.DOCKER_CONFIG === undefined) {
         return {
@@ -1770,6 +1808,12 @@ function fakeDockerExec(scenario: {
             'ERROR: failed to solve: error getting credentials - err: exec: ' +
             '"docker-credential-desktop": executable file not found in %PATH%',
         }
+      }
+      const cacheTo = args[args.indexOf('--cache-to') + 1]
+      const cacheDestination = cacheTo?.match(/^type=local,dest=(.+),mode=min$/)?.[1]
+      if (args[0] === 'buildx' && cacheDestination !== undefined && !scenario.cacheExportMissing) {
+        await mkdir(cacheDestination, { mode: 0o700 })
+        await writeFile(join(cacheDestination, 'index.json'), '{}')
       }
       return { exitCode: 0, stdout: '', stderr: '' }
     }
@@ -2567,6 +2611,234 @@ describe('start (composition)', () => {
     expect(buildCall?.captureStderr).toBe(true)
   })
 
+  test('uses exact managed cache flags and removes the owned builder after promotion', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon',
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(true)
+    const managedCalls = calls.filter(({ args }) => args[0] === 'buildx' && (args[1] === 'rm' || args[1] === 'build'))
+    expect(managedCalls.map(({ args }) => args[1])).toEqual(['build', 'rm'])
+    const build = managedCalls[0]!.args
+    const builderName = build[build.indexOf('--builder') + 1]
+    if (builderName === undefined) throw new Error('expected managed builder name')
+    expect(builderName).toMatch(/^typeclaw-[a-f0-9]{24}$/)
+    expect(managedCalls[1]!.args).toEqual(['buildx', 'rm', builderName])
+    expect(build).toContain('--load')
+    expect(build).not.toContain('--cache-from')
+    const cacheToIndex = build.indexOf('--cache-to')
+    // Parse the destination instead of regexing the whole CSV value: the path
+    // separator is platform-dependent, so a `/generations/` literal fails on Windows.
+    const cacheTo = /^type=local,dest=(.+),mode=min$/.exec(build[cacheToIndex + 1] ?? '')
+    if (cacheTo === null) throw new Error('expected a local managed cache export destination')
+    const dest = cacheTo[1]!
+    expect(basename(dest)).toMatch(/^[a-f0-9]{32}$/)
+    expect(basename(dirname(dest))).toBe('generations')
+    expect(managedCalls[0]!.env?.BUILDX_CONFIG).toStartWith(join(root, 'build-cache'))
+    expect(managedCalls[1]!.env?.BUILDX_CONFIG).toBe(managedCalls[0]!.env?.BUILDX_CONFIG)
+    expect(calls.some(({ args }) => args[0] === 'builder' || args[0] === 'system')).toBe(false)
+    expect(calls.some(({ args }) => args[0] === 'image' && args[1] === 'rm')).toBe(false)
+    expect(calls.some(({ args }) => args[0] === 'volume' || (args[0] === 'rm' && args.includes('-f')))).toBe(false)
+  })
+
+  test('surfaces retired-cache cleanup warnings without blocking the managed build', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const stateDir = join(root, 'build-cache')
+    const scopeHash = createHash('sha256').update(basename(root)).digest('hex')
+    await mkdir(join(stateDir, scopeHash, 'unsafe-entry'), { recursive: true })
+    const warnings: string[] = []
+    const { exec } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-warning',
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      buildCacheStateDir: stateDir,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(warnings.join(' ')).toContain('unsafe managed build cache entry preserved')
+  })
+
+  test('failed thrown managed build does not promote staging and still removes its builder once', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-failure',
+      buildThrows: true,
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(calls.filter(({ args }) => args[0] === 'buildx' && args[1] === 'rm')).toHaveLength(1)
+    const build = calls.find(({ args }) => args[0] === 'buildx' && args[1] === 'build')
+    const cacheTo = build?.args[build.args.indexOf('--cache-to') + 1]
+    const staging = cacheTo?.match(/^type=local,dest=(.+),mode=min$/)?.[1]
+    expect(staging).toBeDefined()
+    expect(existsSync(staging!)).toBe(false)
+  })
+
+  test('builder removal failure warns but does not block the managed build', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const warnings: string[] = []
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-removal-failure',
+      managedBuilderRmFails: true,
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(warnings).toHaveLength(1)
+    expect(warnings.every((warning) => warning.includes('managed builder removal failed'))).toBe(true)
+    expect(calls.find(({ args }) => args[0] === 'buildx' && args[1] === 'build')?.args).toContain('--builder')
+  })
+
+  test('managed builder setup failure preserves default buildx then legacy fallback', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const warnings: string[] = []
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-setup-failure',
+      managedBuilderCreateFails: true,
+      buildxBuildFails: true,
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(true)
+    const builds = calls.filter(({ args }) => isBuildCall(args))
+    expect(builds.map(({ args }) => args.slice(0, 2))).toEqual([
+      ['buildx', 'build'],
+      ['build', '-t'],
+    ])
+    expect(builds[0]!.args).not.toContain('--builder')
+    expect(builds[0]!.args).not.toContain('--cache-from')
+    expect(builds[0]!.args).not.toContain('--cache-to')
+    expect(builds[0]!.env?.BUILDX_CONFIG).toBeUndefined()
+    expect(calls.some(({ args }) => args[0] === 'buildx' && args[1] === 'rm')).toBe(false)
+    expect(warnings.some((warning) => warning.includes('managed build cache unavailable'))).toBe(true)
+  })
+
+  test('managed acquire release failure falls back to default buildx without rejecting start', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const warnings: string[] = []
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-release-failure',
+    })
+    const acquireWithReleaseFailure: typeof acquireManagedBuildCache = async (options) =>
+      await acquireManagedBuildCache({
+        ...options,
+        randomBuilderName: () => 'typeclaw-aaaaaaaaaaaaaaaaaaaaaaaa',
+        randomGenerationId: () => 'invalid',
+        faultInjection: {
+          releaseLock: async (release) => {
+            await release()
+            throw new Error('injected release failure')
+          },
+        },
+      })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireWithReleaseFailure,
+    })
+
+    expect(result.ok).toBe(true)
+    const build = calls.find(({ args }) => isBuildCall(args))
+    expect(build?.args).not.toContain('--builder')
+    expect(build?.env?.BUILDX_CONFIG).toBeUndefined()
+    expect(warnings.join(' ')).toContain('injected release failure')
+  })
+
   test('captures build output when streaming is disabled by a live parent renderer', async () => {
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
@@ -2665,19 +2937,26 @@ describe('start (composition)', () => {
       cwd: root,
       preferredHostPort: 8973,
       exec,
+      buildCacheStateDir: join(root, 'build-cache'),
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
     })
 
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => isBuildCall(c.args))
     expect(buildCall?.args[0]).toBe('build')
     expect(buildCall?.args).not.toContain('buildx')
+    expect(buildCall?.args).not.toContain('--cache-from')
+    expect(buildCall?.args).not.toContain('--cache-to')
+    expect(buildCall?.env?.BUILDX_CONFIG).toBeUndefined()
     // The Dockerfile on disk must be BuildKit-free, or the legacy build chokes.
     expect(buildCall?.dockerfileSnapshot).not.toContain('# syntax=')
     expect(buildCall?.dockerfileSnapshot).not.toContain('--mount=type=cache')
+    expect(calls.some((c) => c.args[0] === 'info')).toBe(false)
+    expect(calls.some((c) => c.args[0] === 'buildx' && c.args[1] === 'rm')).toBe(false)
   })
 
   test('when a buildx BUILD fails, transparently falls back to legacy `docker build` and start still succeeds', async () => {
@@ -2687,6 +2966,7 @@ describe('start (composition)', () => {
       imageExists: false,
       container: { exists: false },
       buildxAvailable: true,
+      daemonId: 'managed-daemon-build-fallback',
       buildxBuildFails: true,
     })
 
@@ -2694,10 +2974,12 @@ describe('start (composition)', () => {
       cwd: root,
       preferredHostPort: 8973,
       exec,
+      buildCacheStateDir: join(root, 'build-cache'),
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
     })
 
     expect(result.ok).toBe(true)
@@ -2706,10 +2988,71 @@ describe('start (composition)', () => {
     expect(buildCalls[0]?.args.slice(0, 2)).toEqual(['buildx', 'build'])
     const legacy = buildCalls.find((c) => c.args[0] === 'build')
     expect(legacy).toBeDefined()
+    expect(legacy?.env?.BUILDX_CONFIG).toBeUndefined()
+    expect(legacy?.args).not.toContain('--cache-from')
+    expect(legacy?.args).not.toContain('--cache-to')
+    expect(
+      calls
+        .filter(({ args }) => args[0] === 'build' || (args[0] === 'buildx' && ['rm', 'build'].includes(args[1]!)))
+        .map(({ args }) => args.slice(0, 2).join(' ')),
+    ).toEqual(['buildx build', 'buildx rm', 'buildx build', 'build -t'])
     // The retry rewrote the Dockerfile to its BuildKit-stripped form.
     expect(legacy?.dockerfileSnapshot).not.toContain('# syntax=')
     expect(legacy?.dockerfileSnapshot).not.toContain('--mount=type=cache')
+    const managed = buildCalls[0]!
+    const cacheTo = managed.args[managed.args.indexOf('--cache-to') + 1]
+    const staging = cacheTo?.match(/^type=local,dest=(.+),mode=min$/)?.[1]
+    expect(staging).toBeDefined()
+    expect(existsSync(staging!)).toBe(false)
+    expect(existsSync(join(staging!, '..', '..', 'active.json'))).toBe(false)
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+  })
+
+  test('managed buildx failure cleans up then retries default buildx without managed state', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-default-retry',
+      managedBuildxBuildFails: true,
+    })
+    const warnings: string[] = []
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      buildCacheStateDir: join(root, 'build-cache'),
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      acquireBuildCache: acquireManagedBuildCache,
+    })
+
+    expect(result.ok).toBe(true)
+    const relevant = calls.filter(
+      ({ args }) => args[0] === 'build' || (args[0] === 'buildx' && ['rm', 'build'].includes(args[1]!)),
+    )
+    expect(relevant.map(({ args }) => args.slice(0, 2).join(' '))).toEqual([
+      'buildx build',
+      'buildx rm',
+      'buildx build',
+    ])
+    const managed = relevant[0]!
+    const current = relevant[2]!
+    expect(managed.args).toContain('--builder')
+    expect(current.args).not.toContain('--builder')
+    expect(current.args).not.toContain('--cache-from')
+    expect(current.args).not.toContain('--cache-to')
+    expect(current.env?.BUILDX_CONFIG).toBeUndefined()
+    expect(current.dockerfileSnapshot).toContain('# syntax=docker/dockerfile:1.7')
+    expect(warnings).toContain("managed buildx build failed; retrying with Docker's current builder")
+    expect(warnings.join(' ')).not.toContain('managed builder failed')
   })
 
   test('when a build fails on a missing credential helper, retries the same build under a sanitized DOCKER_CONFIG and succeeds', async () => {
@@ -2731,6 +3074,7 @@ describe('start (composition)', () => {
       imageExists: false,
       container: { exists: false },
       buildxAvailable: true,
+      daemonId: 'managed-daemon-credential-retry',
       credHelperMissingUntilSanitized: true,
     })
 
@@ -2740,9 +3084,11 @@ describe('start (composition)', () => {
         cwd: root,
         preferredHostPort: 8973,
         exec,
+        buildCacheStateDir: join(root, 'build-cache'),
         allocatePort: deterministicAllocator,
         ensureDeps: noEnsureDeps,
         ...bypassVerify,
+        acquireBuildCache: acquireManagedBuildCache,
       })
 
       // then it recovers transparently and the container comes up
@@ -2750,12 +3096,19 @@ describe('start (composition)', () => {
       const buildCalls = calls.filter((c) => isBuildCall(c.args))
       // first build runs without the override and fails on the cred helper
       expect(buildCalls[0]?.env?.DOCKER_CONFIG).toBeUndefined()
+      expect(buildCalls[0]?.args).toContain('--builder')
+      expect(buildCalls[0]?.env?.BUILDX_CONFIG).toBeDefined()
       // the retry runs the SAME buildx frontend, now pointed at a sanitized dir
       // (the dir's contents are removed by runImageBuild's cleanup; the sanitize
       // transform itself is asserted in sanitizeDockerConfigJson's unit tests)
       const retry = buildCalls.find((c) => c.env?.DOCKER_CONFIG !== undefined)
       expect(retry).toBeDefined()
       expect(retry?.args.slice(0, 2)).toEqual(['buildx', 'build'])
+      const firstBuilderIndex = buildCalls[0]!.args.indexOf('--builder')
+      const retryBuilderIndex = retry!.args.indexOf('--builder')
+      expect(buildCalls[0]!.args[firstBuilderIndex + 1]).toBe(retry!.args[retryBuilderIndex + 1])
+      expect(buildCalls[0]!.args).toEqual(retry!.args)
+      expect(buildCalls[0]!.env?.BUILDX_CONFIG).toBe(retry!.env?.BUILDX_CONFIG)
       // the retry must NOT point at the user's real config dir
       expect(retry?.env?.DOCKER_CONFIG).not.toBe(dockerCfg)
       // regression guard: the sanitized dir is a DEEP COPY that preserved the
@@ -2766,6 +3119,51 @@ describe('start (composition)', () => {
     } finally {
       if (prevDockerConfig === undefined) delete process.env.DOCKER_CONFIG
       else process.env.DOCKER_CONFIG = prevDockerConfig
+      await rm(dockerCfg, { recursive: true, force: true })
+    }
+  })
+
+  test('default buildx retry applies credential-helper recovery after managed buildx fails', async () => {
+    const dockerCfg = await mkdtemp(join(tmpdir(), 'typeclaw-test-dockercfg-'))
+    await writeFile(join(dockerCfg, 'config.json'), JSON.stringify({ credsStore: 'desktop' }))
+    const previousDockerConfig = process.env.DOCKER_CONFIG
+    process.env.DOCKER_CONFIG = dockerCfg
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      daemonId: 'managed-daemon-default-credential-retry',
+      managedBuildxBuildFails: true,
+      credHelperMissingUntilSanitized: true,
+    })
+
+    try {
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        buildCacheStateDir: join(root, 'build-cache'),
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: noAutoUpgrade,
+        ...bypassVerify,
+        acquireBuildCache: acquireManagedBuildCache,
+      })
+
+      expect(result.ok).toBe(true)
+      const builds = calls.filter(({ args }) => isBuildCall(args))
+      expect(builds).toHaveLength(3)
+      expect(builds[0]!.args).toContain('--builder')
+      expect(builds[1]!.args).not.toContain('--builder')
+      expect(builds[1]!.env?.DOCKER_CONFIG).toBeUndefined()
+      expect(builds[2]!.args).toEqual(builds[1]!.args)
+      expect(builds[2]!.env?.DOCKER_CONFIG).toBeDefined()
+      expect(builds.some(({ args }) => args[0] === 'build')).toBe(false)
+    } finally {
+      if (previousDockerConfig === undefined) delete process.env.DOCKER_CONFIG
+      else process.env.DOCKER_CONFIG = previousDockerConfig
       await rm(dockerCfg, { recursive: true, force: true })
     }
   })

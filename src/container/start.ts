@@ -40,6 +40,7 @@ import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { type AgentOperationLease, type WithAgentOperationLock, withAgentOperationLock } from './agent-operation-lock'
+import { acquireManagedBuildCache, type ManagedBuildCacheLease } from './build-cache'
 import { archiveContainerLogs, type DockerLogArchiver } from './log-archive'
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
@@ -197,6 +198,8 @@ export type StartOptions = {
   archiveLogs?: DockerLogArchiver
   operationLock?: WithAgentOperationLock
   operationLease?: AgentOperationLease
+  buildCacheStateDir?: string
+  acquireBuildCache?: typeof acquireManagedBuildCache | null
 }
 
 export type HostDaemonStatus =
@@ -267,6 +270,8 @@ async function runStart({
   assertConfigWritable = assertAgentConfigWritable,
   provisionGithubCliStore: provisionGithubCliStoreForAgent = provisionGithubCliStore,
   archiveLogs = archiveContainerLogs,
+  buildCacheStateDir,
+  acquireBuildCache = acquireManagedBuildCache,
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -563,6 +568,10 @@ async function runStart({
 
     let built = false
     if (plan.needsBuild) {
+      const buildWarning = (warning: string): void => {
+        if (streamOutput) process.stderr.write(`typeclaw: ${warning}\n`)
+        else onWarning?.(warning)
+      }
       const protection = await protectImageForRebuild(exec, plan.imageTag, previousImageId)
       if (protection.warning !== null) {
         if (streamOutput) process.stderr.write(`typeclaw: ${protection.warning}\n`)
@@ -574,10 +583,14 @@ async function runStart({
         buildResult = await runImageBuild({
           exec,
           cwd,
+          cacheScope: containerName,
           imageTag: plan.imageTag,
           buildContext: plan.buildContext,
           hasBuildx,
+          acquireBuildCache,
+          buildCacheStateDir,
           streamOutput,
+          onWarning: buildWarning,
         })
       } finally {
         if (protection.tag !== null) {
@@ -1107,13 +1120,10 @@ export async function refreshDockerfile(
   return { changed: true, warnings }
 }
 
-// Builds the agent image with a seamless buildx->legacy fallback. The preferred
-// frontend is chosen from `hasBuildx`; if a buildx build FAILS (e.g. the plugin
-// is installed but there is no usable builder/driver), we transparently rewrite
-// the Dockerfile to its BuildKit-stripped form and retry once with the legacy
-// `docker build`. The user sees one successful `typeclaw start` instead of a
-// buildx-specific dead end. A genuine Dockerfile error fails both paths, so the
-// retry costs at most one extra attempt before the real error surfaces.
+// Builds the agent image with a managed-buildx -> current-buildx -> legacy
+// fallback. A managed builder failure first releases all isolated state and
+// retries the unchanged BuildKit Dockerfile on Docker's current builder. Only
+// when that also fails do we strip BuildKit syntax and try `docker build`.
 //
 // Layered on top is a credential-helper recovery: typeclaw only pulls PUBLIC
 // images (the BuildKit syntax frontend + the typeclaw-base FROM), but a broken
@@ -1127,56 +1137,105 @@ export async function refreshDockerfile(
 async function runImageBuild(args: {
   exec: DockerExec
   cwd: string
+  cacheScope: string
   imageTag: string
   buildContext: string
   hasBuildx: boolean
+  acquireBuildCache: typeof acquireManagedBuildCache | null
+  buildCacheStateDir?: string
   streamOutput: boolean
+  onWarning: (warning: string) => void
 }): Promise<{ ok: true } | { ok: false; exitCode: number; credentialHelperRetried: boolean }> {
-  const { exec, cwd, imageTag, buildContext, hasBuildx, streamOutput } = args
+  const {
+    exec,
+    cwd,
+    cacheScope,
+    imageTag,
+    buildContext,
+    hasBuildx,
+    acquireBuildCache,
+    buildCacheStateDir,
+    streamOutput,
+    onWarning,
+  } = args
+  let lease: ManagedBuildCacheLease | undefined
   const buildArgv = (frontend: 'buildx' | 'legacy'): string[] =>
     frontend === 'buildx'
-      ? ['buildx', 'build', '--load', '-t', imageTag, buildContext]
+      ? [
+          'buildx',
+          'build',
+          ...(lease !== undefined ? ['--builder', lease.builder.builderName, ...lease.cacheArgs] : []),
+          '--load',
+          '-t',
+          imageTag,
+          buildContext,
+        ]
       : ['build', '-t', imageTag, buildContext]
 
   let sanitizedConfig: SanitizedDockerConfig | null = null
-  const attempt = async (frontend: 'buildx' | 'legacy'): Promise<DockerExecResult> =>
+  const attempt = async (
+    frontend: 'buildx' | 'legacy',
+    config: SanitizedDockerConfig | null,
+  ): Promise<DockerExecResult> =>
     exec(buildArgv(frontend), {
       cwd,
       ...(streamOutput ? { inheritStdio: true, captureStderr: true } : {}),
       ...(streamOutput ? {} : { captureStdout: false, maxCapturedStderrBytes: 32 * 1024 }),
-      env: sanitizedConfig?.env,
+      env: { ...(frontend === 'buildx' ? lease?.builder.env : {}), ...config?.env },
     })
+  const attemptWithCredentialRecovery = async (
+    frontend: 'buildx' | 'legacy',
+    config: SanitizedDockerConfig | null,
+  ): Promise<{ result: DockerExecResult; config: SanitizedDockerConfig | null }> => {
+    let result = await attempt(frontend, config)
+    if (result.exitCode !== 0 && config === null && isMissingDockerCredentialHelper(result.stderr)) {
+      config = await createSanitizedDockerConfig()
+      if (config !== null) result = await attempt(frontend, config)
+    }
+    return { result, config }
+  }
 
   try {
     let frontend: 'buildx' | 'legacy' = hasBuildx ? 'buildx' : 'legacy'
-    let result = await attempt(frontend)
+    let result: DockerExecResult
+    if (frontend === 'buildx' && acquireBuildCache !== null) {
+      const acquired = await acquireBuildCache({
+        exec,
+        cacheScope,
+        ...(buildCacheStateDir !== undefined ? { stateDir: buildCacheStateDir } : {}),
+      })
+      if (acquired.ok) {
+        lease = acquired.lease
+        for (const warning of acquired.warnings) onWarning(warning)
+      } else onWarning(`managed build cache unavailable; using Docker's current builder: ${acquired.reason}`)
+    }
+    if (frontend === 'buildx' && lease !== undefined) {
+      const managedLease = lease
+      let managedSuccess = false
+      try {
+        ;({ result, config: sanitizedConfig } = await attemptWithCredentialRecovery(frontend, sanitizedConfig))
+        managedSuccess = result.exitCode === 0
+      } finally {
+        const finished = await managedLease.finish(managedSuccess)
+        for (const warning of finished.warnings) onWarning(warning)
+        lease = undefined
+      }
+      if (result.exitCode !== 0) {
+        onWarning("managed buildx build failed; retrying with Docker's current builder")
+        ;({ result, config: sanitizedConfig } = await attemptWithCredentialRecovery(frontend, sanitizedConfig))
+      }
+    } else {
+      ;({ result, config: sanitizedConfig } = await attemptWithCredentialRecovery(frontend, sanitizedConfig))
+    }
     if (result.exitCode === 0) return { ok: true }
 
-    // Same-frontend retry: a broken credential helper aborts the pull before
-    // the builder ever matters, so strip it and retry the identical build.
-    if (sanitizedConfig === null && isMissingDockerCredentialHelper(result.stderr)) {
-      sanitizedConfig = await createSanitizedDockerConfig()
-      if (sanitizedConfig) {
-        result = await attempt(frontend)
-        if (result.exitCode === 0) return { ok: true }
-      }
-    }
-
     if (frontend === 'buildx') {
-      // buildx failed for a non-cred reason — fall back to the legacy builder
-      // against a stripped Dockerfile so a misconfigured-buildx host still ends
-      // up with an image. The sanitized config (if any) carries into the retry.
+      // Both managed and current buildx failed. Strip BuildKit-only syntax only
+      // now, preserving the current builder as the first compatibility fallback.
       await refreshDockerfile(cwd, { buildKit: false })
       frontend = 'legacy'
-      result = await attempt(frontend)
+      ;({ result, config: sanitizedConfig } = await attemptWithCredentialRecovery(frontend, sanitizedConfig))
       if (result.exitCode === 0) return { ok: true }
-      if (sanitizedConfig === null && isMissingDockerCredentialHelper(result.stderr)) {
-        sanitizedConfig = await createSanitizedDockerConfig()
-        if (sanitizedConfig) {
-          result = await attempt(frontend)
-          if (result.exitCode === 0) return { ok: true }
-        }
-      }
     }
 
     if (sanitizedConfig !== null && streamOutput) {

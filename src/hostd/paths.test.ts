@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { isWindows } from '@/shared'
 
 import {
+  buildCacheDir,
   ensureDirs,
   homeRoot,
   lockfilePath,
@@ -44,6 +45,7 @@ describe('paths', () => {
     expect(lockfilePath()).toBe(join(home, 'run', 'hostd.lock'))
     expect(logfilePath()).toBe(join(home, 'log', 'hostd.log'))
     expect(registrationsDir()).toBe(join(home, 'run', 'registrations'))
+    expect(buildCacheDir()).toBe(join(home, 'build-cache'))
   })
 
   test('ensureDirs creates run/, log/, and registrations/', async () => {
