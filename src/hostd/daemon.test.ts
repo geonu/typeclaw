@@ -245,11 +245,13 @@ describe('startDaemon', () => {
   })
 
   test('GC gives a re-registration a full renewed miss budget after partial misses', async () => {
-    let phase: 'partial' | 'renewed' = 'partial'
+    let phase: 'partial' | 'registering' | 'renewed' = 'partial'
     let partialProbes = 0
     let partialProbeStarted = false
     let renewedProbes = 0
     const releasePartialProbe = deferred()
+    const registerSettled = deferred()
+    const releaseFinalProbe = deferred()
     const exec: DockerExec = async (args) => {
       if (args[0] !== 'ps') return { exitCode: 1, stdout: '', stderr: 'unknown command' }
       if (phase === 'partial') {
@@ -257,28 +259,54 @@ describe('startDaemon', () => {
         if (partialProbes === 1) return { exitCode: 0, stdout: '', stderr: '' }
         partialProbeStarted = true
         await releasePartialProbe.promise
-      } else {
-        renewedProbes += 1
+        return { exitCode: 0, stdout: '', stderr: '' }
       }
+      if (phase === 'registering') {
+        // This probe raced the re-register RPC, so it is authoritative for
+        // neither generation. Report a Docker blip: `runGc` then spends no
+        // budget, and `renewedProbes` keeps counting only probes that can
+        // actually spend the renewed one.
+        await registerSettled.promise
+        return { exitCode: 1, stdout: '', stderr: 'docker unavailable' }
+      }
+      renewedProbes += 1
+      // Hold every probe from the budget-spending one onward, pinning the
+      // registry at gcMissesToDeregister - 1 misses. Otherwise the "still
+      // registered" assertion below races the 20ms tick, and on an
+      // oversubscribed runner the final miss lands before the `list`
+      // round-trip answers.
+      if (renewedProbes >= 3) await releaseFinalProbe.promise
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     daemon = await startDaemon({ exec, gcIntervalMs: 20, gcMissesToDeregister: 3 })
     await send({ kind: 'register', containerName: 'coder', cwd: '/old' })
 
     await waitFor(() => partialProbeStarted)
-    phase = 'renewed'
+    phase = 'registering'
     expect((await send({ kind: 'register', containerName: 'coder', cwd: '/renewed' })).ok).toBe(true)
+    phase = 'renewed'
+    registerSettled.resolve()
     releasePartialProbe.resolve()
 
-    await waitFor(() => renewedProbes >= 2)
+    // Settling on an early deregistration too keeps a regression (budget not
+    // renewed) failing on the assertion below rather than on this wait's timeout.
+    await waitFor(
+      async () => {
+        if (renewedProbes >= 3) return true
+        const list = await send({ kind: 'list' })
+        return list.ok && (list.result as ListResult).registrations.length === 0
+      },
+      { description: 'renewed miss budget spent down to its last miss' },
+    )
     const beforeFinalMiss = await send({ kind: 'list' })
     expect(beforeFinalMiss.ok).toBe(true)
     if (!beforeFinalMiss.ok) return
     expect((beforeFinalMiss.result as ListResult).registrations).toEqual([{ containerName: 'coder', cwd: '/renewed' }])
 
+    releaseFinalProbe.resolve()
     await waitFor(async () => {
       const list = await send({ kind: 'list' })
-      return renewedProbes >= 3 && list.ok && (list.result as ListResult).registrations.length === 0
+      return list.ok && (list.result as ListResult).registrations.length === 0
     })
   })
 
