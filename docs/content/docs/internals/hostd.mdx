@@ -64,6 +64,12 @@ NDJSON over the Unix socket. Connection-per-request. Kinds: `register`, `deregis
 - `version.ts` — sha256 fingerprint over `src/**/*.ts` (tests excluded). `UNVERSIONED_SENTINEL` fallback when `src/` ancestor isn't findable.
 - `paths.ts` — `~/.typeclaw/` paths. Honors `TYPECLAW_HOME`.
 
+## Managed image-build cache
+
+Host-stage image builds keep one successful local OCI cache generation per agent and Docker daemon under `~/.typeclaw/build-cache/<agent-hash>/<daemon-hash>/`. Each build exports to a fresh generation and atomically promotes it only on success. The daemon-keyed Buildx builder uses an isolated `BUILDX_CONFIG` and is removed after every attempt, which also removes its internal cache.
+
+Retired daemon roots are cleaned only after their hashed path, private top-level directories, isolated Buildx config, and persisted TypeClaw builder ownership are proven. OCI cache contents are recursively unlinked without following symlinks. Unsafe or corrupt state is preserved and reported without blocking the default-buildx/legacy fallback; recovery names the owned builder to remove first when needed, then the exact daemon-state directory that resets the agent's cache.
+
 `src/portbroker/`:
 
 - `policy.ts` — `shouldForward({ policy, port })`, `brokerEnabled(policy)`. Always implicitly excludes `CONTAINER_PORT`.

@@ -25,6 +25,8 @@ TypeClaw runs code in three stages with different filesystems ([/concepts/archit
 
 Lifecycle removal paths (`stop`, `restart`, and stale-container cleanup during `start`) first save `docker logs --timestamps` to a unique `<agent>/.typeclaw/logs/<container-id>-<timestamp>-<suffix>.log` snapshot. Archives are retained for 14 days by default; set `logs.retentionDays` in `typeclaw.json` to a whole number from 1 through 3650 to change the age limit. Capture or retention failure preserves the Docker container instead of removing the only remaining log source. The local-only archive directory is gitignored and hidden from model-driven tools; the live `typeclaw logs` command continues to read the current Docker container.
 
+Image builds retain only the latest successful local BuildKit cache for each agent and Docker daemon under `~/.typeclaw/build-cache`. The isolated managed builder is removed after every attempt; cleanup is ownership-scoped and warnings do not block startup. If cache state is invalid, `start` prints the exact state directory to remove; if builder cleanup also failed, it prints the builder-removal command that must run first.
+
 ## Providers
 
 ```sh
