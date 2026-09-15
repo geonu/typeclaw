@@ -87,6 +87,10 @@ export function modelsDir(): string {
   return join(homeRoot(), 'models')
 }
 
+export function buildCacheDir(): string {
+  return join(homeRoot(), 'build-cache')
+}
+
 export function versionCachePath(): string {
   return join(homeRoot(), 'version-cache.json')
 }
