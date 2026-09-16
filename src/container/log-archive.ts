@@ -6,7 +6,10 @@ import { DEFAULT_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS } from '@/config'
 
 import { resolveDockerBinary, sanitizeDockerStderr } from './shared'
 
-export type DockerLogArchiveResult = { ok: true; status: 'archived'; path: string } | { ok: false; reason: string }
+export type DockerLogArchiveResult =
+  | { ok: true; status: 'archived'; path: string }
+  | { ok: false; kind: 'unavailable'; reason: string }
+  | { ok: false; kind: 'failed'; reason: string }
 
 export type DockerLogArchiver = (input: {
   agentDir: string
@@ -65,6 +68,8 @@ const WRITE_SETTLEMENT_MS = 60_000
 const STALE_PARTIAL_GRACE_MS = 5 * 60 * 1_000
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000
 const MAX_FILENAME_ATTEMPTS = 16
+// Fixed daemon protocol text from moby's daemon/logs.go, not human-language input.
+const DOCKER_LOGS_TERMINAL_UNAVAILABLE = 'can not get logs from container which is dead or marked for removal'
 const CONTAINER_ID_PATTERN = /^[a-f0-9]{64}$/
 const NONCE_PATTERN = /^[a-f0-9]{32}$/
 const ARCHIVE_FILENAME_PATTERN = /^[a-f0-9]{64}-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-[a-f0-9]{32}\.log$/
@@ -75,10 +80,10 @@ export async function archiveContainerLogs(
   runtime: DockerLogArchiveRuntime = {},
 ): Promise<DockerLogArchiveResult> {
   if (!CONTAINER_ID_PATTERN.test(containerId)) {
-    return { ok: false, reason: `Invalid full Docker container ID: ${containerId}` }
+    return { ok: false, kind: 'failed', reason: `Invalid full Docker container ID: ${containerId}` }
   }
   if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > MAX_LOG_RETENTION_DAYS) {
-    return { ok: false, reason: `Invalid Docker log archive retention period: ${retentionDays}` }
+    return { ok: false, kind: 'failed', reason: `Invalid Docker log archive retention period: ${retentionDays}` }
   }
 
   const logsDir = join(agentDir, '.typeclaw', 'logs')
@@ -116,7 +121,9 @@ export async function archiveContainerLogs(
     }
     if (captured.exitCode !== 0) {
       const detail = sanitizeDockerStderr(captured.stderrExcerpt)
-      throw new Error(`docker logs exited with code ${captured.exitCode}${detail ? `: ${detail}` : ''}`)
+      const message = `docker logs exited with code ${captured.exitCode}${detail ? `: ${detail}` : ''}`
+      if (isDockerLogsPermanentlyUnavailable(captured.stderrExcerpt)) throw new LogArchiveError('unavailable', message)
+      throw new Error(message)
     }
 
     await output.chmod(0o600)
@@ -132,8 +139,29 @@ export async function archiveContainerLogs(
   } catch (error) {
     const cleanupErrors = await cleanupTemp(output, temporaryPath)
     const suffix = cleanupErrors.length === 0 ? '' : ` (${cleanupErrors.join('; ')})`
-    return { ok: false, reason: `${errorMessage(error)}${suffix}` }
+    return {
+      ok: false,
+      kind: error instanceof LogArchiveError ? error.kind : 'failed',
+      reason: `${errorMessage(error)}${suffix}`,
+    }
   }
+}
+
+export function dockerLogsUnavailableWarning(containerId: string): string {
+  return `Docker reported logs unavailable for container ${containerId} because it is dead or already being removed; no new snapshot was captured. Continuing cleanup so the agent can restart. Existing snapshots in .typeclaw/logs/ are preserved.`
+}
+
+class LogArchiveError extends Error {
+  constructor(
+    readonly kind: 'unavailable',
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+function isDockerLogsPermanentlyUnavailable(stderr: string): boolean {
+  return stderr.toLowerCase().includes(DOCKER_LOGS_TERMINAL_UNAVAILABLE)
 }
 
 export async function streamProcessOutput(input: StreamCaptureInput): Promise<StreamCaptureResult> {

@@ -366,9 +366,9 @@ function formatStartDone<T extends { alreadyRunning?: boolean; hostPort: number 
 }
 
 function formatStopDone<T extends { running: boolean }>(result: AgentResult<T>): string {
-  if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
-  if (result.data.running) return `${c.green('✔')} stopped`
-  return `${c.dim('○')} ${c.dim('not running')}`
+  if (!result.ok) return appendWarnings(`${c.red('✖')} ${c.red('failed:')} ${result.reason}`, result.warnings)
+  const head = result.data.running ? `${c.green('✔')} stopped` : `${c.dim('○')} ${c.dim('not running')}`
+  return appendWarnings(head, result.warnings)
 }
 
 function formatRestartDone<T extends { start: { hostPort: number } }>(result: AgentResult<T>): string {

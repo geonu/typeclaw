@@ -45,11 +45,12 @@ export async function composeStop(
 }
 
 async function runOne(name: string, cwd: string, stop: Controller['stop']): Promise<AgentResult<StopSuccess>> {
+  const warnings: string[] = []
   try {
-    const data = await stop({ cwd })
-    if (!data.ok) return { name, ok: false, reason: data.reason }
-    return { name, ok: true, data }
+    const data = await stop({ cwd, onWarning: (warning) => warnings.push(warning) })
+    if (!data.ok) return { name, ok: false, reason: data.reason, warnings }
+    return { name, ok: true, data, warnings }
   } catch (error) {
-    return { name, ok: false, reason: error instanceof Error ? error.message : String(error) }
+    return { name, ok: false, reason: error instanceof Error ? error.message : String(error), warnings }
   }
 }

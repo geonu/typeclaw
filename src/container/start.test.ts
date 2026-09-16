@@ -1608,6 +1608,7 @@ type ContainerScenario =
       rmFails?: boolean
       rmStderr?: string
       rmFindsRunning?: boolean
+      status?: 'running' | 'exited' | 'dead' | 'removing'
       // Models Docker's async removal-drain after a `docker rm` that
       // returned with "removal in progress" stderr: the container keeps
       // showing up in `inspect` until N post-rm inspect probes have run,
@@ -1734,6 +1735,9 @@ function fakeDockerExec(scenario: {
       // The idempotent path probes `inspect --format {{.Id}}` after seeing
       // the container is up; mirror that here so the fake stays sufficient.
       const format = args[args.indexOf('--format') + 1] ?? ''
+      if (format === '{{.State.Status}}') {
+        return { exitCode: 0, stdout: `${containerState.status ?? 'exited'}\n`, stderr: '' }
+      }
       if (format === '{{.Id}}|{{.State.Running}}') {
         return {
           exitCode: 0,
@@ -1762,7 +1766,6 @@ function fakeDockerExec(scenario: {
         containerState = { ...containerState, running: true }
         return { exitCode: 1, stdout: '', stderr: 'cannot remove a running container' }
       }
-      rmReturned = true
       if (containerState.rmFails) {
         const stderr = containerState.rmStderr ?? 'rm failed'
         // "No such container" rm-failures mean the container is in fact gone
@@ -1771,9 +1774,12 @@ function fakeDockerExec(scenario: {
         // "Removal in progress" leaves the container present (drain pending).
         if (stderr.toLowerCase().includes('no such container')) {
           containerState = { exists: false }
+        } else if (stderr.toLowerCase().includes('removal of container')) {
+          rmReturned = true
         }
         return { exitCode: 1, stdout: '', stderr }
       }
+      rmReturned = true
       // Exit 0 from `docker rm` does NOT mean the name is free under
       // OrbStack load — the daemon acknowledges the rm before draining. The
       // inspect block above already advances containerState to "gone" after
@@ -4491,6 +4497,100 @@ describe('start (composition)', () => {
     expect(calls[rmIdx]?.args).toEqual(['rm', 'a'.repeat(64)])
   })
 
+  test('warns, removes a stale container with unavailable logs, and launches its replacement', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: true, running: false },
+    })
+    const warnings: string[] = []
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      archiveLogs: async () => ({ ok: false, kind: 'unavailable', reason: 'terminal Docker state' }),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(calls).toContainEqual(expect.objectContaining({ args: ['rm', 'a'.repeat(64)] }))
+    expect(calls.some((call) => call.args[0] === 'run')).toBe(true)
+    expect(warnings).toEqual([expect.stringContaining('no new snapshot was captured')])
+  })
+
+  test('routes the unavailable-logs warning to onWarning on the streaming CLI default', async () => {
+    // given: the exact shape `typeclaw start`/`restart` use — streamOutput left
+    // at its true default AND a collector supplied, so the CLI can print the
+    // warning after its spinner settles instead of under a live one.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: true, running: false } })
+    const warnings: string[] = []
+    const stderrWrites: string[] = []
+    const write = spyOn(process.stderr, 'write')
+    write.mockImplementation((chunk: unknown) => {
+      stderrWrites.push(String(chunk))
+      return true
+    })
+
+    try {
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        onWarning: (warning) => warnings.push(warning),
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: noAutoUpgrade,
+        ...bypassVerify,
+        archiveLogs: async () => ({ ok: false, kind: 'unavailable', reason: 'terminal Docker state' }),
+      })
+
+      expect(result.ok).toBe(true)
+      expect(warnings).toEqual([expect.stringContaining('no new snapshot was captured')])
+      expect(stderrWrites.some((text) => text.includes('no new snapshot was captured'))).toBe(false)
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  test('writes the unavailable-logs warning to stderr when no collector is supplied', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: true, running: false } })
+    const stderrWrites: string[] = []
+    const write = spyOn(process.stderr, 'write')
+    write.mockImplementation((chunk: unknown) => {
+      stderrWrites.push(String(chunk))
+      return true
+    })
+
+    try {
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: noAutoUpgrade,
+        ...bypassVerify,
+        archiveLogs: async () => ({ ok: false, kind: 'unavailable', reason: 'terminal Docker state' }),
+      })
+
+      expect(result.ok).toBe(true)
+      expect(stderrWrites.some((text) => text.includes('no new snapshot was captured'))).toBe(true)
+    } finally {
+      write.mockRestore()
+    }
+  })
+
   test('preserves a stale stopped container when its logs cannot be archived', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
@@ -4507,7 +4607,7 @@ describe('start (composition)', () => {
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
-      archiveLogs: async () => ({ ok: false, reason: 'disk full' }),
+      archiveLogs: async () => ({ ok: false, kind: 'failed', reason: 'disk full' }),
     })
 
     expect(result.ok).toBe(false)
@@ -4797,7 +4897,7 @@ describe('start (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({
       imageExists: true,
-      container: { exists: true, running: false, rmFails: true, rmStderr: 'permission denied' },
+      container: { exists: true, running: false, rmFails: true, rmStderr: 'permission denied', status: 'dead' },
     })
 
     const result = await start({
@@ -4811,8 +4911,12 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toMatch(/could not be safely inspected or removed/)
+    if (!result.ok) {
+      expect(result.reason).toMatch(/could not be safely inspected or removed/)
+      expect(result.reason).toMatch(/marked this container dead.*busy mount or restart Docker/)
+    }
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+    expect(calls.some((call) => call.args.includes('-f') || call.args.includes('--force'))).toBe(false)
   })
 
   test('retries docker run after removing the non-running corpse that holds the name', async () => {
@@ -4933,13 +5037,67 @@ describe('start (composition)', () => {
       ensureDeps: noEnsureDeps,
       autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
-      archiveLogs: async () => ({ ok: false, reason: 'read-only filesystem' }),
+      archiveLogs: async () => ({ ok: false, kind: 'failed', reason: 'read-only filesystem' }),
     })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/logs could not be archived.*read-only filesystem.*preserving/i)
     expect(rmCalls).toBe(0)
     expect(runCalls).toBe(1)
+  })
+
+  test('retries a docker run conflict when the failed-run corpse has permanently unavailable logs', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const corpseId = 'c'.repeat(64)
+    let inspectCalls = 0
+    let runCalls = 0
+    let corpseExists = false
+    const warnings: string[] = []
+    const conflictStderr =
+      `docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "${corpseId}". ` +
+      'You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') {
+        inspectCalls++
+        if (inspectCalls <= 2 || !corpseExists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+        if (args.includes('{{.Id}}|{{.State.Running}}')) {
+          return { exitCode: 0, stdout: `${corpseId}|false\n`, stderr: '' }
+        }
+        return { exitCode: 0, stdout: 'false\n', stderr: '' }
+      }
+      if (args[0] === 'rm') {
+        corpseExists = false
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      if (args[0] === 'run') {
+        runCalls++
+        if (runCalls === 1) {
+          corpseExists = true
+          return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      archiveLogs: async () => ({ ok: false, kind: 'unavailable', reason: 'terminal Docker state' }),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(runCalls).toBe(2)
+    expect(warnings).toEqual([expect.stringContaining('no new snapshot was captured')])
   })
 
   test('does NOT remove a RUNNING same-name container when docker run reports conflict', async () => {

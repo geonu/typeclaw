@@ -101,6 +101,18 @@ export async function probeContainer(exec: DockerExec, name: string): Promise<Co
   return { kind: 'daemon-error', detail }
 }
 
+export async function describeUnremovableContainer(exec: DockerExec, containerRef: string): Promise<string | null> {
+  const probe = await probeContainer(exec, containerRef)
+  if (probe.kind !== 'status') return null
+  if (probe.status === 'removing') {
+    return 'Docker is still removing this container, but the removal is not draining. docker rm, including --force, cannot re-enter an in-flight removal. Restart Docker or OrbStack; Docker will restore the container as dead, and TypeClaw can remove it on the next start or restart.'
+  }
+  if (probe.status === 'dead') {
+    return 'Docker marked this container dead because it could not remove its filesystem. Resolve the busy mount or restart Docker, then retry.'
+  }
+  return null
+}
+
 function isLifeStatus(value: string): value is ContainerLifeStatus {
   return (
     value === 'running' ||

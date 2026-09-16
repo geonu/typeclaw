@@ -98,7 +98,9 @@ describe('composeStop events', () => {
     const { results } = await composeStop({ rootCwd: root }, { stop })
 
     expect(cwds).toEqual([join(root, 'broken')])
-    expect(results).toEqual([{ name: 'broken', ok: true, data: { ok: true, containerName: 'x', running: false } }])
+    expect(results).toEqual([
+      { name: 'broken', ok: true, data: { ok: true, containerName: 'x', running: false }, warnings: [] },
+    ])
   })
 
   test('maps a controller failure to a failed AgentResult', async () => {
@@ -107,7 +109,7 @@ describe('composeStop events', () => {
     const stop: Controller['stop'] = async () => ({ ok: false, reason: 'docker down' })
     const { results } = await composeStop({ rootCwd: root }, { stop })
 
-    expect(results).toEqual([{ name: 'alpha', ok: false, reason: 'docker down' }])
+    expect(results).toEqual([{ name: 'alpha', ok: false, reason: 'docker down', warnings: [] }])
   })
 
   test('maps a thrown controller error to a failed AgentResult', async () => {
@@ -118,7 +120,19 @@ describe('composeStop events', () => {
     }
     const { results } = await composeStop({ rootCwd: root }, { stop })
 
-    expect(results).toEqual([{ name: 'alpha', ok: false, reason: 'boom' }])
+    expect(results).toEqual([{ name: 'alpha', ok: false, reason: 'boom', warnings: [] }])
+  })
+
+  test('collects stop warnings in the per-agent result', async () => {
+    await makeAgent(root, 'alpha')
+    const stop: Controller['stop'] = async (options) => {
+      options.onWarning?.('dead logs unavailable')
+      return { ok: true, containerName: 'alpha', running: false }
+    }
+
+    const { results } = await composeStop({ rootCwd: root }, { stop })
+
+    expect(results[0]?.warnings).toEqual(['dead logs unavailable'])
   })
 
   test('emits no events when no agents are discovered', async () => {

@@ -4,6 +4,7 @@ import type { DockerExec, DockerExecResult } from './shared'
 import {
   buildCrashReason,
   createVerifyRunning,
+  describeUnremovableContainer,
   probeContainer,
   type ContainerLifeStatus,
   type VerifyRunningResult,
@@ -95,6 +96,41 @@ describe('probeContainer', () => {
     expect(result.kind).toBe('daemon-error')
     if (result.kind !== 'daemon-error') throw new Error('expected daemon-error')
     expect(result.detail).toMatch(/unrecognized status/)
+  })
+})
+
+describe('describeUnremovableContainer', () => {
+  test('describes an in-flight removal with the daemon-restart recovery', async () => {
+    const { exec } = scriptedExec({ inspect: [inspect('removing')] })
+
+    const result = await describeUnremovableContainer(exec, 'container-id')
+
+    expect(result).toContain('removal is not draining')
+    expect(result).toContain('cannot re-enter an in-flight removal')
+    expect(result).toContain('Restart Docker or OrbStack')
+    expect(result).toContain('next start or restart')
+  })
+
+  test('describes a dead container with filesystem recovery', async () => {
+    const { exec } = scriptedExec({ inspect: [inspect('dead')] })
+
+    const result = await describeUnremovableContainer(exec, 'container-id')
+
+    expect(result).toContain('marked this container dead')
+    expect(result).toContain('could not remove its filesystem')
+    expect(result).toContain('Resolve the busy mount or restart Docker, then retry')
+  })
+
+  test.each(['exited', 'running'] as const)('returns null for %s', async (status) => {
+    const { exec } = scriptedExec({ inspect: [inspect(status)] })
+
+    expect(await describeUnremovableContainer(exec, 'container-id')).toBeNull()
+  })
+
+  test('returns null when the status probe is unreadable', async () => {
+    const { exec } = scriptedExec({ inspect: [inspectDaemonError] })
+
+    expect(await describeUnremovableContainer(exec, 'container-id')).toBeNull()
   })
 })
 

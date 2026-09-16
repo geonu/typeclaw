@@ -265,7 +265,7 @@ describe('archiveContainerLogs', () => {
     },
   )
 
-  test('returns bounded useful stderr and removes temp output on docker failure', async () => {
+  test('returns failed with bounded useful stderr and removes temp output on docker failure', async () => {
     const capture: DockerLogArchiveRuntime['capture'] = async ({ output }) => {
       await output.write('incomplete\n')
       return {
@@ -279,9 +279,45 @@ describe('archiveContainerLogs', () => {
 
     const result = await archiveContainerLogs({ agentDir, containerId: CONTAINER_ID }, runtime(capture))
 
-    expect(result).toEqual({ ok: false, reason: 'docker logs exited with code 17: permission denied; detail' })
+    expect(result).toEqual({
+      ok: false,
+      kind: 'failed',
+      reason: 'docker logs exited with code 17: permission denied; detail',
+    })
     expect(await readdir(join(agentDir, '.typeclaw', 'logs'))).toEqual([])
   })
+
+  test.each([
+    'can not get logs from container which is dead or marked for removal',
+    'ERROR: CAN NOT GET LOGS FROM CONTAINER WHICH IS DEAD OR MARKED FOR REMOVAL; retry is futile',
+  ])('classifies terminal Docker log unavailability and cleans temp output: %s', async (stderrExcerpt) => {
+    const capture: DockerLogArchiveRuntime['capture'] = async ({ output }) => {
+      await output.write('partial')
+      return { exitCode: 1, overflowed: false, stderrExcerpt, timedOut: false }
+    }
+
+    const result = await archiveContainerLogs({ agentDir, containerId: CONTAINER_ID }, runtime(capture))
+
+    expect(result).toMatchObject({ ok: false, kind: 'unavailable' })
+    expect(await readdir(join(agentDir, '.typeclaw', 'logs'))).toEqual([])
+  })
+
+  test.each(['permission denied', 'arbitrary daemon failure'])(
+    'keeps unrelated docker logs stderr fatal: %s',
+    async (stderrExcerpt) => {
+      const capture: DockerLogArchiveRuntime['capture'] = async () => ({
+        exitCode: 1,
+        overflowed: false,
+        stderrExcerpt,
+        timedOut: false,
+      })
+
+      expect(await archiveContainerLogs({ agentDir, containerId: CONTAINER_ID }, runtime(capture))).toMatchObject({
+        ok: false,
+        kind: 'failed',
+      })
+    },
+  )
 
   test.each([
     {
@@ -306,7 +342,7 @@ describe('archiveContainerLogs', () => {
       }
       const result = await archiveContainerLogs({ agentDir, containerId: CONTAINER_ID }, runtime(capture))
 
-      expect(result).toEqual({ ok: false, reason: expected })
+      expect(result).toEqual({ ok: false, kind: 'failed', reason: expected })
       expect(await readdir(join(agentDir, '.typeclaw', 'logs'))).toEqual([])
     },
   )

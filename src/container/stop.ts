@@ -2,7 +2,7 @@ import { DEFAULT_LOG_RETENTION_DAYS, loadConfigSync } from '@/config'
 import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
 import { type AgentOperationLease, type WithAgentOperationLock, withAgentOperationLock } from './agent-operation-lock'
-import { archiveContainerLogs, type DockerLogArchiver } from './log-archive'
+import { archiveContainerLogs, dockerLogsUnavailableWarning, type DockerLogArchiver } from './log-archive'
 import {
   classifyRmStderr,
   containerNameFromCwd,
@@ -13,6 +13,7 @@ import {
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
+import { describeUnremovableContainer } from './verify-running'
 
 export type StopPlan = {
   containerName: string
@@ -26,6 +27,7 @@ export type StopOptions = {
   archiveLogs?: DockerLogArchiver
   operationLock?: WithAgentOperationLock
   operationLease?: AgentOperationLease
+  onWarning?: (warning: string) => void
 }
 
 export async function stop(options: StopOptions): Promise<StopResult> {
@@ -45,6 +47,7 @@ async function runStop({
   cwd,
   exec = defaultDockerExec,
   archiveLogs = archiveContainerLogs,
+  onWarning,
 }: StopOptions): Promise<StopResult> {
   const { containerName } = planStop(cwd)
 
@@ -89,10 +92,13 @@ async function runStop({
 
     const archive = await archiveLogs({ agentDir: cwd, containerId, retentionDays })
     if (!archive.ok) {
-      return {
-        ok: false,
-        reason: `Could not archive logs for container ${containerId}: ${archive.reason}. Preserving the Docker container as the source of truth.`,
+      if (archive.kind === 'failed') {
+        return {
+          ok: false,
+          reason: `Could not archive logs for container ${containerId}: ${archive.reason}. Preserving the Docker container as the source of truth.`,
+        }
       }
+      onWarning?.(dockerLogsUnavailableWarning(containerId))
     }
 
     // Containers run without `--rm`, so `docker stop` only stops them. Remove
@@ -123,19 +129,19 @@ async function runStop({
       }
       const kind = classifyRmStderr(rmResult.stderr)
       if (kind === null) {
-        return { ok: false, reason: `docker rm failed: ${sanitizeDockerStderr(rmResult.stderr) || 'no stderr'}` }
+        const reason = `docker rm failed: ${sanitizeDockerStderr(rmResult.stderr) || 'no stderr'}`
+        const diagnosis = await describeUnremovableContainer(exec, containerId)
+        return { ok: false, reason: diagnosis === null ? reason : `${reason} ${diagnosis}` }
       }
       if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
-        return {
-          ok: false,
-          reason: `Container ${containerName} is still being removed by docker after 10s.`,
-        }
+        const reason = `Container ${containerName} is still being removed by docker after 10s.`
+        const diagnosis = await describeUnremovableContainer(exec, containerId)
+        return { ok: false, reason: diagnosis === null ? reason : `${reason} ${diagnosis}` }
       }
     } else if (!(await waitForRemoval(exec, containerName))) {
-      return {
-        ok: false,
-        reason: `Container ${containerName} is still being removed by docker after 10s.`,
-      }
+      const reason = `Container ${containerName} is still being removed by docker after 10s.`
+      const diagnosis = await describeUnremovableContainer(exec, containerId)
+      return { ok: false, reason: diagnosis === null ? reason : `${reason} ${diagnosis}` }
     }
 
     return { ok: true, containerName, running }
