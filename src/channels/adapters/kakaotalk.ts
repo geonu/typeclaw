@@ -378,7 +378,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     recoveryEpisode = null
   }
 
-  const channelResolver = createKakaoChannelResolver({ client, logger })
+  const channelResolver = createKakaoChannelResolver({ client, logger, selfUserId: () => selfUserId })
   const authorResolver = createKakaoAuthorResolver({ client, logger })
   const membershipResolver = createKakaoMembershipResolver({
     client,
@@ -443,14 +443,13 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
           // The push event itself proves the chat exists, even when
           // getChats({all:true}) does not surface it (e.g. memo chats,
           // certain open chats, recently-joined groups that haven't
-          // propagated). Register a provisional @kakao-group entry (the
-          // strictest workspace bucket — narrowest engagement assumptions)
-          // so the message is no longer silently dropped as unknown_chat.
-          // The next real refresh upgrades the entry if the chat is
-          // actually a DM or open chat.
-          channelResolver.ingestProvisional(event.chat_id)
+          // propagated). Resolve the real kind from a per-chat member read
+          // so the message is no longer silently dropped as unknown_chat,
+          // falling back to the strictest @kakao-group bucket when that read
+          // yields nothing. The next real refresh re-confirms the entry.
+          const bucket = await channelResolver.ingestProvisional(event.chat_id)
           logger.warn(
-            `[kakaotalk] provisional chat=${event.chat_id} log_id=${event.log_id} bucket=@kakao-group reason=not_in_getchats`,
+            `[kakaotalk] provisional chat=${event.chat_id} log_id=${event.log_id} bucket=${bucket} reason=not_in_getchats`,
           )
         }
       }
