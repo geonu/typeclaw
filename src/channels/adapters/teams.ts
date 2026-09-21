@@ -24,6 +24,7 @@ import {
   type TeamsInboundEvent,
 } from './teams-classify'
 import { createTeamsEditMessageCallback } from './teams-edit'
+import { TEAMS_OUTBOUND_FORMAT } from './teams-format'
 import { ContainerTeamsClient } from './teams-id-token'
 import { decodeTeamsConversationKey } from './teams-key'
 
@@ -110,8 +111,14 @@ export function createOutboundCallback(deps: {
     try {
       const sent =
         decoded.kind === 'chat'
-          ? await client.sendChatMessage(decoded.chatId, text)
-          : await client.sendMessage(decoded.teamId, decoded.channelId, text, msg.thread ?? undefined)
+          ? await client.sendChatMessage(decoded.chatId, text, TEAMS_OUTBOUND_FORMAT)
+          : await client.sendMessage(
+              decoded.teamId,
+              decoded.channelId,
+              text,
+              msg.thread ?? undefined,
+              TEAMS_OUTBOUND_FORMAT,
+            )
       logger.info(`[teams] sent id=${sent.id} ${decoded.kind}=${conversationId}`)
       return { ok: true, messageId: sent.id, messageIds: [sent.id] }
     } catch (err) {

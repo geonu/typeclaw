@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import { TeamsError } from 'agent-messenger/teams'
-import type { TeamsListener, TeamsMessage, TeamsRealtimeMessage, TeamsUser } from 'agent-messenger/teams'
+import type {
+  TeamsListener,
+  TeamsMessage,
+  TeamsMessageFormat,
+  TeamsRealtimeMessage,
+  TeamsUser,
+} from 'agent-messenger/teams'
 
 import type { ChannelRouter } from '@/channels/router'
 import { channelsSchema } from '@/channels/schema'
@@ -56,6 +62,10 @@ function realtime(overrides: Partial<TeamsRealtimeMessage> = {}): TeamsRealtimeM
 }
 
 const CHANNEL_KEY = 'channel:team-guid:19:abc@thread.tacv2'
+
+// A Teams mention marker plus the bare characters Teams' HTML renderer would
+// otherwise swallow — the exact content whose rendering the format choice decides.
+const MARKUP_TEXT = '<at id="0">Alice</at> compare 1 < 2 && 3 > 2'
 
 function channelRealtime(overrides: Partial<TeamsRealtimeMessage> = {}): TeamsRealtimeMessage {
   return realtime({
@@ -158,16 +168,28 @@ function router(): TestRouter {
 type ClientOverrides = {
   chats?: TeamsChatInfo[]
   channelTeamMap?: Map<string, string>
-  sendChatMessage?: (chatId: string, content: string) => Promise<TeamsMessage>
-  sendMessage?: (teamId: string, channelId: string, content: string, rootMessageId?: string) => Promise<TeamsMessage>
+  sendChatMessage?: (chatId: string, content: string, format?: TeamsMessageFormat) => Promise<TeamsMessage>
+  sendMessage?: (
+    teamId: string,
+    channelId: string,
+    content: string,
+    rootMessageId?: string,
+    format?: TeamsMessageFormat,
+  ) => Promise<TeamsMessage>
   getChatMessages?: (chatId: string, limit?: number) => Promise<TeamsMessage[]>
   getMessages?: (teamId: string, channelId: string, limit?: number) => Promise<TeamsMessage[]>
   testAuth?: () => Promise<TeamsUser>
 }
 
 function fakeClient(overrides: ClientOverrides = {}) {
-  const sends: Array<{ chatId: string; content: string }> = []
-  const channelSends: Array<{ teamId: string; channelId: string; content: string; rootMessageId?: string }> = []
+  const sends: Array<{ chatId: string; content: string; format?: TeamsMessageFormat }> = []
+  const channelSends: Array<{
+    teamId: string
+    channelId: string
+    content: string
+    rootMessageId?: string
+    format?: TeamsMessageFormat
+  }> = []
   const client = {
     login: async () => {},
     testAuth: overrides.testAuth ?? (async () => SELF),
@@ -175,14 +197,20 @@ function fakeClient(overrides: ClientOverrides = {}) {
     buildChannelTeamMap: async () => overrides.channelTeamMap ?? new Map<string, string>(),
     sendChatMessage:
       overrides.sendChatMessage ??
-      (async (chatId: string, content: string) => {
-        sends.push({ chatId, content })
+      (async (chatId: string, content: string, format?: TeamsMessageFormat) => {
+        sends.push({ chatId, content, format })
         return teamsMessage({ id: 'sent', content })
       }),
     sendMessage:
       overrides.sendMessage ??
-      (async (teamId: string, channelId: string, content: string, rootMessageId?: string) => {
-        channelSends.push({ teamId, channelId, content, rootMessageId })
+      (async (
+        teamId: string,
+        channelId: string,
+        content: string,
+        rootMessageId?: string,
+        format?: TeamsMessageFormat,
+      ) => {
+        channelSends.push({ teamId, channelId, content, rootMessageId, format })
         return teamsMessage({ id: 'sent-ch', content })
       }),
     getChatMessages: overrides.getChatMessages ?? (async () => []),
@@ -221,7 +249,7 @@ describe('teams outbound', () => {
     const result = await cb(outbound({ text: 'hi' }))
 
     expect(result).toEqual({ ok: true, messageId: 'sent', messageIds: ['sent'] })
-    expect(sends).toEqual([{ chatId: 'chat-1', content: 'hi' }])
+    expect(sends).toEqual([{ chatId: 'chat-1', content: 'hi', format: 'text' }])
   })
 
   test('sends a channel key via sendMessage(teamId, channelId, rootMessageId)', async () => {
@@ -232,7 +260,41 @@ describe('teams outbound', () => {
 
     expect(result).toEqual({ ok: true, messageId: 'sent-ch', messageIds: ['sent-ch'] })
     expect(channelSends).toEqual([
-      { teamId: 'team-guid', channelId: '19:abc@thread.tacv2', content: 'deploying', rootMessageId: 'root-9' },
+      {
+        teamId: 'team-guid',
+        channelId: '19:abc@thread.tacv2',
+        content: 'deploying',
+        rootMessageId: 'root-9',
+        format: 'text',
+      },
+    ])
+  })
+
+  // Pins TEAMS_OUTBOUND_FORMAT at both send boundaries: without it an upstream
+  // default flip would silently turn relayed user text into live Teams markup.
+  test('passes format text for a chat send so Teams markup is not interpreted', async () => {
+    const { sends, client } = fakeClient()
+    const cb = createOutboundCallback({ client, logger: logger() })
+
+    await cb(outbound({ text: MARKUP_TEXT }))
+
+    expect(sends).toEqual([{ chatId: 'chat-1', content: MARKUP_TEXT, format: 'text' }])
+  })
+
+  test('passes format text for a channel send so Teams markup is not interpreted', async () => {
+    const { channelSends, client } = fakeClient()
+    const cb = createOutboundCallback({ client, logger: logger() })
+
+    await cb(outbound({ chat: CHANNEL_KEY, text: MARKUP_TEXT }))
+
+    expect(channelSends).toEqual([
+      {
+        teamId: 'team-guid',
+        channelId: '19:abc@thread.tacv2',
+        content: MARKUP_TEXT,
+        rootMessageId: undefined,
+        format: 'text',
+      },
     ])
   })
 
@@ -538,7 +600,7 @@ describe('createTeamsAdapter', () => {
     expect(adapter.isConnected()).toBe(false)
     expect(r.unregistered).toEqual([])
     await r.outboundCb!(outbound({ text: 'still available' }))
-    expect(sends).toEqual([{ chatId: 'chat-1', content: 'still available' }])
+    expect(sends).toEqual([{ chatId: 'chat-1', content: 'still available', format: 'text' }])
 
     await adapter.stop()
   })
