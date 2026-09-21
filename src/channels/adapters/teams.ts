@@ -19,11 +19,12 @@ import { describeError } from '../describe-error'
 import {
   classifyChannelInbound,
   classifyChatInbound,
-  normalizeTeamsText,
+  teamsEchoTextKey,
   type InboundDropReason,
   type TeamsInboundEvent,
 } from './teams-classify'
 import { createTeamsEditMessageCallback } from './teams-edit'
+import { TEAMS_OUTBOUND_FORMAT } from './teams-format'
 import { ContainerTeamsClient } from './teams-id-token'
 import { decodeTeamsConversationKey } from './teams-key'
 
@@ -110,8 +111,14 @@ export function createOutboundCallback(deps: {
     try {
       const sent =
         decoded.kind === 'chat'
-          ? await client.sendChatMessage(decoded.chatId, text)
-          : await client.sendMessage(decoded.teamId, decoded.channelId, text, msg.thread ?? undefined)
+          ? await client.sendChatMessage(decoded.chatId, text, TEAMS_OUTBOUND_FORMAT)
+          : await client.sendMessage(
+              decoded.teamId,
+              decoded.channelId,
+              text,
+              msg.thread ?? undefined,
+              TEAMS_OUTBOUND_FORMAT,
+            )
       logger.info(`[teams] sent id=${sent.id} ${decoded.kind}=${conversationId}`)
       return { ok: true, messageId: sent.id, messageIds: [sent.id] }
     } catch (err) {
@@ -168,7 +175,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
     self !== null ? { id: self.id, username: self.userPrincipalName ?? self.email ?? self.displayName } : null
 
   const reserveEcho = (chatId: string, text: string): (() => void) => {
-    const echo: SentEcho = { chatId, textKey: normalizeTeamsText(text), sentAt: now(), consumed: false }
+    const echo: SentEcho = { chatId, textKey: teamsEchoTextKey(text), sentAt: now(), consumed: false }
     sentEchoes.push(echo)
     if (sentEchoes.length > MAX_SENT_ECHOES) sentEchoes = sentEchoes.slice(-MAX_SENT_ECHOES)
     return () => {
@@ -179,7 +186,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
 
   const isSelfEcho = (event: TeamsInboundEvent): boolean => {
     const conversationId = echoConversationId(event)
-    const textKey = normalizeTeamsText(event.content)
+    const textKey = teamsEchoTextKey(event.content)
     const authorName = event.author.displayName.trim().toLocaleLowerCase()
     const selfName = (self?.displayName ?? '').trim().toLocaleLowerCase()
     const nowMs = now()
