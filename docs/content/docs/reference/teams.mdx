@@ -78,16 +78,16 @@ CLI: `typeclaw channel add teams` (interactive device-code login) and `typeclaw 
 
 ## Capabilities
 
-| Feature                 | Supported | Notes                                                                     |
-| ----------------------- | --------- | ------------------------------------------------------------------------- |
-| Outbound messages       | yes       | Chat and team-channel sends; channel sends support replying into a thread |
-| Reactions               | no        |                                                                           |
-| Typing indicator        | no        |                                                                           |
-| Channel-name resolution | no        |                                                                           |
-| Self identity           | yes       | Via self-echo fingerprinting — see [Quirks](#quirks)                      |
-| History                 | yes       | Chat and team-channel history                                             |
-| Attachments             | no        |                                                                           |
-| Membership              | no        |                                                                           |
+| Feature                 | Supported | Notes                                                                                                              |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ |
+| Outbound messages       | yes       | Chat and team-channel sends, plain text only — see [Quirks](#quirks); channel sends support replying into a thread |
+| Reactions               | no        |                                                                                                                    |
+| Typing indicator        | no        |                                                                                                                    |
+| Channel-name resolution | no        |                                                                                                                    |
+| Self identity           | yes       | Via self-echo fingerprinting — see [Quirks](#quirks)                                                               |
+| History                 | yes       | Chat and team-channel history                                                                                      |
+| Attachments             | no        |                                                                                                                    |
+| Membership              | no        |                                                                                                                    |
 
 ## Token renewal
 
@@ -114,6 +114,7 @@ When the id_token can't be minted (no `aad_refresh_token`, an expired/revoked re
 - **User-account, not a bot**: hears every chat and team-channel message the account can see, not just @mentions — engagement is governed by your `engagement.trigger` and match rules, not by a bot-mention model.
 - **Chats and channels both**: unlike most user adapters, Teams covers both 1:1/group chats and full team channels; channel messages carry `teamId`/`channelId` and parsed @mentions.
 - **Self-echo suppression**: the Teams user SDK has no self-identity boundary — `testAuth` returns the literal id `'ME'`, not a real MRI. Every successful send records a `(chat, normalized-text)` fingerprint, and a matching inbound arriving within a short window is dropped as the echo of our own send rather than routed as a new message.
+- **Outbound is plain text**: Teams stores every message as HTML, so the adapter HTML-escapes what the agent writes. Markdown is not converted and Teams markup — `<at id="…">` mentions, `<a href>`, `<b>` — renders literally rather than as live markup, on chat sends, channel sends, and edits alike. This is deliberate: agent output routinely relays text written by channel users, and nothing in TypeClaw's outbound contract lets a caller opt into markup. Native mentions would need a structured mention field, not a format switch.
 - **Realtime id_token is minted, not scraped**: the trouter socket needs an AAD Bearer id_token that the `agent-messenger` SDK would normally scrape from the Teams desktop app or a browser profile — neither of which exists in the container. TypeClaw mints it from the stored `aad_refresh_token` instead, and falls back to REST-only (send/read, no proactive inbound) when it can't. See [Realtime](#realtime-inbound).
 - **Short-lived tokens, manual refresh today**: `access_token` expires in 60–90 minutes; the adapter warns on expiry but does not yet auto-refresh the skypetoken, so a long-running session needs the token rotated with `typeclaw channel reauth teams` (or replaced by hand in `secrets.json#channels.teams`). (The AAD refresh trio IS consumed for the realtime id_token above.)
 - **Work vs personal accounts**: `account_type` distinguishes work/school tenants from personal Microsoft accounts; `region` records which AAD region issued the token.
