@@ -142,3 +142,24 @@ function isAddressedToBot(event: TeamsInboundEvent, self: TeamsUser, selfAliases
 export function normalizeTeamsText(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
+
+// Teams is the only adapter whose classifier never returns `self_author` — the
+// user SDK reports `'ME'` for every author, so the send/echo fingerprint is the
+// ONLY thing standing between the agent and answering its own message. That
+// makes the comparison worth hardening: we fingerprint what we handed the SDK,
+// but Teams stores messages as HTML, so the text comes back escaped-then-decoded
+// and the two sides are not the same string. The decode is also lossy in one
+// direction — it expands `&amp;` before `&lt;`, so a literal `&lt;` we wrote
+// returns as `<` — which without this would miss its own reservation and route
+// the agent's message back in as inbound. Decoding both sides identically makes
+// the comparison survive the round trip; on text holding no entities it is a
+// no-op. Order mirrors the SDK's decoder, and must keep mirroring it.
+export function teamsEchoTextKey(text: string): string {
+  const decoded = text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+  return normalizeTeamsText(decoded)
+}

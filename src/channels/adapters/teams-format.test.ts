@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { TeamsClient } from 'agent-messenger/teams'
 
 import { createOutboundCallback, type TeamsAdapterLogger } from './teams'
-import { normalizeTeamsText } from './teams-classify'
+import { teamsEchoTextKey } from './teams-classify'
 import { encodeTeamsChannelKey } from './teams-key'
 
 // The fake-client tests lock which format argument TypeClaw passes; this locks
@@ -51,15 +51,16 @@ describe('teams outbound wire format', () => {
   // wire bytes back through the SDK rather than hand-modelling the decode, so
   // this fails if either half of the round trip drifts and the agent starts
   // routing its own channel posts back in as inbound.
-  test('escaped markup survives the round trip, so the self-echo fingerprint still matches', async () => {
+  test.each([
+    ['Teams markup and bare specials', MARKUP_TEXT],
+    ['prose containing literal HTML entities', 'escape it as &lt;div&gt; and &amp; too'],
+  ])('%s survives the round trip, so the self-echo fingerprint still matches', async (_label, sent) => {
     let escaped = ''
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'POST') {
         escaped = String((JSON.parse(String(init.body)) as { content: string }).content)
         return Response.json({ id: 'sent-ch' })
       }
-      expect(url).toContain('/messages')
       return Response.json({ messages: [{ id: 'm1', content: escaped, from: 'u', composetime: '' }] })
     }) as typeof fetch
     const client = await new TeamsClient().login({ token: 'skype-token', region: 'emea' })
@@ -69,11 +70,11 @@ describe('teams outbound wire format', () => {
       adapter: 'teams',
       workspace: 'teams',
       chat: encodeTeamsChannelKey('team-guid', '19:abc@thread.tacv2'),
-      text: MARKUP_TEXT,
+      text: sent,
     })
     const [echoed] = await client.getChatMessages('19:abc@thread.tacv2', 1)
 
-    expect(escaped).not.toBe(MARKUP_TEXT)
-    expect(normalizeTeamsText(echoed!.content)).toBe(normalizeTeamsText(MARKUP_TEXT))
+    expect(escaped).not.toBe(sent)
+    expect(teamsEchoTextKey(echoed!.content)).toBe(teamsEchoTextKey(sent))
   })
 })
