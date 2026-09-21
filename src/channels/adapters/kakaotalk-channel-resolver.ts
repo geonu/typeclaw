@@ -1,4 +1,10 @@
-import { classifyKakaoChat, type KakaoChat, type KakaoChatKind, type KakaoTalkClient } from 'agent-messenger/kakaotalk'
+import {
+  classifyKakaoChat,
+  type KakaoChat,
+  type KakaoChatKind,
+  type KakaoMember,
+  type KakaoTalkClient,
+} from 'agent-messenger/kakaotalk'
 
 import type { ChannelKey, ChannelNameResolver, ResolvedChannelNames } from '@/channels/types'
 
@@ -17,14 +23,49 @@ export function kakaoWorkspaceForType(kind: KakaoChatKind): KakaoWorkspace {
 export type KakaoChatLookupValue = {
   workspace: KakaoWorkspace
   isDm: boolean
-  // True while the entry is a placeholder from `ingestProvisional` (a chat seen
-  // on an inbound push but not yet surfaced by getChats). Its `workspace` is a
-  // strict-bucket guess (@kakao-group), NOT the authoritative kind. Callers that
+  // True while the entry is a strict fallback guess (@kakao-group) — the chat
+  // is absent from getChats and its member roster proved nothing. Callers that
   // must know the real type decide per-feature: typing sends for provisional
   // entries (the @kakao-group guess is never @kakao-open, and a mis-guessed
   // OpenChat's linkless ACTION fails soft), while allow-rule enforcement keeps
-  // treating the strict bucket as authoritative until a real refresh upgrades it.
+  // treating the strict bucket as authoritative until a real refresh upgrades
+  // it.
   provisional: boolean
+}
+
+// What a member roster PROVES about a chat — never what it merely suggests.
+//
+// A roster read is only ever a SUBSET of the true membership: `getMembers`
+// merges GETMEM with a CHATONROOM fallback whose failure it swallows, and that
+// fallback can itself yield just `displayMembers`. So only conclusions that
+// survive adding unseen members are sound:
+//
+//   - an open marker present proves OpenChat — a subset cannot invent one
+//     (`open_token` / `open_profile_link_id` / `open_permission` are
+//     SDK-populated for OpenChat rooms only)
+//   - two or more counterparts proves not-a-DM — adding members keeps it true
+//
+// "Exactly one counterpart" proves NOTHING, because the remainder may simply be
+// unobserved. So a DM is never inferred here; callers keep the strict bucket.
+// Do NOT "restore" a `others.length <= 1 -> dm` branch: a truncated roster for a
+// large room would then be cached as an authoritative DM, relaxing both the
+// engagement ladder and `kakao:dm/*` allow-rule matching.
+export function provenKindFromMembers(
+  members: readonly KakaoChatMemberSignal[],
+  selfUserId: string | null,
+): Extract<KakaoChatKind, 'open' | 'group'> | null {
+  if (members.some(isOpenChatMember)) return 'open'
+  const others = members.filter((member) => member.user_id !== selfUserId)
+  return others.length >= 2 ? 'group' : null
+}
+
+export type KakaoChatMemberSignal = Pick<
+  KakaoMember,
+  'user_id' | 'open_token' | 'open_profile_link_id' | 'open_permission'
+>
+
+function isOpenChatMember(member: KakaoChatMemberSignal): boolean {
+  return member.open_token !== null || member.open_profile_link_id !== null || member.open_permission !== null
 }
 
 export type KakaoChannelResolver = {
@@ -34,18 +75,20 @@ export type KakaoChannelResolver = {
   // Register a chat we learned about from an inbound push event, used as a
   // fallback when `refresh()` did not surface it (e.g. memo chats, certain
   // open chats, or chats whose membership has not yet propagated to
-  // getChats({all:true})). Provisional entries default to @kakao-group —
-  // the strictest bucket, matching the history callback's existing fallback
-  // — so allow-rule enforcement stays strict. A subsequent real refresh
-  // upgrades the entry to its authoritative kind.
-  ingestProvisional: (chatId: string) => void
+  // getChats({all:true})). Upgrades the entry only to what a per-chat member
+  // read PROVES, and otherwise falls back to @kakao-group — the strictest
+  // bucket, matching the history callback's existing fallback — so allow-rule
+  // enforcement stays strict on chats the roster could not establish.
+  // Returns the bucket it settled on so callers can log the real outcome.
+  ingestProvisional: (chatId: string) => Promise<KakaoWorkspace>
 }
 
 export type KakaoChannelResolverOptions = {
-  client: Pick<KakaoTalkClient, 'getChats'>
+  client: Pick<KakaoTalkClient, 'getChats' | 'getMembers'>
   now?: () => number
   ttlMs?: number
   logger?: { warn: (msg: string) => void }
+  selfUserId?: () => string | null
 }
 
 type Entry = {
@@ -117,16 +160,43 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
     return { workspace: entry.workspace, isDm: entry.isDm, provisional: entry.provisional }
   }
 
-  const ingestProvisional = (chatId: string): void => {
-    const existing = cache.get(chatId)
-    if (existing !== undefined && existing.expiresAt > now()) return
+  const liveEntry = (chatId: string): Entry | null => {
+    const entry = cache.get(chatId)
+    return entry !== undefined && entry.expiresAt > now() ? entry : null
+  }
+
+  const provenKindFor = async (chatId: string): Promise<'open' | 'group' | null> => {
+    try {
+      const members = await options.client.getMembers(chatId)
+      return provenKindFromMembers(members, options.selfUserId?.() ?? null)
+    } catch (err) {
+      options.logger?.warn(`[kakaotalk] provisional member lookup failed chat=${chatId}: ${describeError(err)}`)
+      return null
+    }
+  }
+
+  const ingestProvisional = async (chatId: string): Promise<KakaoWorkspace> => {
+    const cached = liveEntry(chatId)
+    if (cached !== null) return cached.workspace
+
+    const kind = await provenKindFor(chatId)
+
+    // The member read was awaited, so a concurrent `refresh()` may have landed
+    // a getChats-authoritative entry meanwhile. Re-check instead of writing
+    // blind: clobbering it would replace a real classification with a weaker
+    // member-derived one — or with the strict fallback — for a whole TTL.
+    const current = liveEntry(chatId)
+    if (current !== null && !current.provisional) return current.workspace
+
+    const workspace = kind === null ? '@kakao-group' : kakaoWorkspaceForType(kind)
     cache.set(chatId, {
-      workspace: '@kakao-group',
+      workspace,
       isDm: false,
       chatName: null,
       expiresAt: now() + ttlMs,
-      provisional: true,
+      provisional: kind === null,
     })
+    return workspace
   }
 
   return { resolve, lookupChat, refresh, ingestProvisional }
