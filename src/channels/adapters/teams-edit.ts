@@ -3,6 +3,7 @@ import type { TeamsClient } from 'agent-messenger/teams'
 import type { EditMessageCallback, EditMessageResult } from '@/channels/types'
 
 import { describeError } from '../describe-error'
+import { TEAMS_OUTBOUND_FORMAT } from './teams-format'
 import { decodeTeamsConversationKey } from './teams-key'
 
 // The Teams user-account SDK only exposes an edit primitive for 1:1/group
@@ -24,7 +25,7 @@ export function createTeamsEditMessageCallback(deps: {
       return { ok: false, error: 'Teams channel messages cannot be edited', code: 'not-supported' }
     }
     try {
-      await deps.client.editChatMessage(decoded.chatId, req.messageId, req.text)
+      await deps.client.editChatMessage(decoded.chatId, req.messageId, req.text, TEAMS_OUTBOUND_FORMAT)
     } catch (err) {
       return { ok: false, error: describeError(err), code: classifyEditError(err) }
     }

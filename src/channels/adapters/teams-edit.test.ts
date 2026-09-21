@@ -39,6 +39,24 @@ describe('createTeamsEditMessageCallback', () => {
     expect(calls).toEqual([{ chatId: '19:chatabc@thread.v2', messageId: '1700000000000', content: 'edited body' }])
   })
 
+  // An edit replaces a message body, so it decides rendering exactly like a send
+  // does; pin it to the same plain-text contract instead of the SDK default.
+  it('passes format text so Teams markup in an edited body is not interpreted', async () => {
+    const formats: Array<string | undefined> = []
+    const cb = createTeamsEditMessageCallback({
+      client: {
+        editChatMessage: async (_chatId, messageId, content, format) => {
+          formats.push(format)
+          return { id: messageId, content } as never
+        },
+      },
+    })
+
+    await cb(req({ text: '<at id="0">Alice</at> compare 1 < 2 && 3 > 2' }))
+
+    expect(formats).toEqual(['text'])
+  })
+
   it('rejects a channel-keyed target as not-supported (SDK edits chats only)', async () => {
     let called = false
     const cb = createTeamsEditMessageCallback({
