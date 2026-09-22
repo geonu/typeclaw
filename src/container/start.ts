@@ -42,7 +42,14 @@ import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { type AgentOperationLease, type WithAgentOperationLock, withAgentOperationLock } from './agent-operation-lock'
 import { acquireManagedBuildCache, type ManagedBuildCacheLease } from './build-cache'
+import { COMPOSE_PROJECT } from './compose-project'
 import { archiveContainerLogs, dockerLogsUnavailableWarning, type DockerLogArchiver } from './log-archive'
+import { formatMemorySize, readDockerTotalMemory, resolveMemoryLimit } from './memory-limit'
+import {
+  decideMemoryOversubscription,
+  formatOversubscriptionWarning,
+  readRunningAgentMemoryClaims,
+} from './memory-oversubscription'
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
   buildxAvailable,
@@ -74,7 +81,6 @@ const DEV_SOURCE_CONTAINER_PATH = '/agent/node_modules/typeclaw'
 const BUN_LOCK_FILE = 'bun.lock'
 const DEPENDENCY_FILES = [PACKAGE_FILE, BUN_LOCK_FILE] as const
 const ENV_FILE = '.env'
-const COMPOSE_PROJECT = 'typeclaw'
 const CONTAINER_HOSTD_HOST = 'host.docker.internal'
 const HOST_GATEWAY_ALIAS = `${CONTAINER_HOSTD_HOST}:host-gateway`
 
@@ -89,6 +95,7 @@ export type StartPlan = {
   needsBuild: boolean
   hostPort: number
   tuiToken: string | null
+  memoryLimitBytes: number
 }
 
 export type PlanStartOptions = {
@@ -106,6 +113,12 @@ export type PlanStartOptions = {
   // Omitted when unavailable (native Windows and unusual JS hosts).
   hostIdentity?: { uid: number; gid: number } | null
   gitIdentity?: GitIdentity | null
+  // Total memory of the machine the CONTAINER runs on, used only to clamp the
+  // default memory limit down when it will not fit. On macOS and Windows that
+  // is the Docker VM, not the workstation, so start() reads it from the daemon
+  // rather than from os.totalmem(). Omitted by callers that have no exec (and
+  // by tests), in which case the default applies unclamped.
+  totalMemoryBytes?: number | undefined
 }
 
 export type HostDaemonControl = {
@@ -574,6 +587,7 @@ async function runStart({
 
     const publishHost = await resolvePublishHost(exec)
     const tuiToken = randomBytes(32).toString('base64url')
+    const totalMemoryBytes = await readDockerTotalMemory(exec)
     let plan = await planStart({
       cwd,
       hostPort,
@@ -584,6 +598,16 @@ async function runStart({
       tuiToken,
       platform,
       hostIdentity,
+      totalMemoryBytes,
+    })
+
+    await warnOnMemoryOversubscription({
+      exec,
+      containerName,
+      memoryLimitBytes: plan.memoryLimitBytes,
+      totalMemoryBytes,
+      onWarning,
+      streamOutput,
     })
 
     let built = false
@@ -675,6 +699,7 @@ async function runStart({
           tuiToken,
           platform,
           hostIdentity,
+          totalMemoryBytes,
         })
       }
     } catch (error) {
@@ -747,6 +772,12 @@ async function runStart({
         publishHost,
         tuiToken,
         platform,
+        // Every replan must carry the daemon total. planStart resolves the
+        // memory limit from it, so dropping it here silently replaces a
+        // clamped limit with the unconditional default right before
+        // `docker run` — the launch would exceed what the VM can honor while
+        // the already-emitted warning still described the clamped figure.
+        totalMemoryBytes,
       })
       run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName, archiveBeforeRemove)
     }
@@ -878,6 +909,7 @@ export async function planStart({
   platform = process.platform,
   hostIdentity = currentHostIdentity(),
   gitIdentity,
+  totalMemoryBytes,
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -885,6 +917,8 @@ export async function planStart({
   const devSourcePath = await detectDevSource(cwd)
   const cfg = await loadTypeclawConfig(cwd)
   const mounts = cfg.mounts
+  const memoryLimit = resolveMemoryLimit({ configured: cfg.resources.memory, totalMemoryBytes })
+  const memoryLimitArg = formatMemorySize(memoryLimit.bytes)
 
   // No `--rm`: a crashed container's logs MUST survive past exit. Lifecycle
   // cleanup archives them under host-stage <agent>/.typeclaw/logs/ before
@@ -969,6 +1003,21 @@ export async function planStart({
     '--name',
     containerName,
     '--shm-size=2g',
+    // `--memory-swap` equal to `--memory` disables swap for the container, and
+    // that equality is the load-bearing half. Without a cgroup limit at all,
+    // growth is charged to the host VM, and the guest kernel answers memory
+    // pressure by writing to swap: every vCPU ends up in direct reclaim
+    // (shrink_folio_list -> swap_writeout) while the OOM killer frees nothing
+    // reclaimable, and the VM livelocks instead of killing one process. With
+    // the limit the charge fails at the cgroup boundary and a single agent is
+    // killed. Letting the container swap would restore the original livelock
+    // inside the cgroup, which is why these are set as a pair.
+    //
+    // A cgroup limit also makes /dev/shm pages count against the container
+    // rather than the host, which matters because shm is not reclaimable by
+    // killing a process — see the --shm-size note above.
+    `--memory=${memoryLimitArg}`,
+    `--memory-swap=${memoryLimitArg}`,
     '--security-opt',
     'seccomp=unconfined',
     '--security-opt',
@@ -1117,7 +1166,34 @@ export async function planStart({
     needsBuild: forceBuild || !imageExists,
     hostPort,
     tuiToken,
+    memoryLimitBytes: memoryLimit.bytes,
   }
+}
+
+// Surfaces the arithmetic when every agent's cap together exceeds what Docker
+// actually has. Never blocks: a fleet that has run fine at a nominal
+// oversubscription must not be bricked by an upgrade, and a refused start is a
+// worse failure than a crowded host.
+async function warnOnMemoryOversubscription(options: {
+  exec: DockerExec
+  containerName: string
+  memoryLimitBytes: number
+  totalMemoryBytes: number | undefined
+  onWarning: ((warning: string) => void) | undefined
+  streamOutput: boolean
+}): Promise<void> {
+  const { exec, containerName, memoryLimitBytes, totalMemoryBytes, onWarning, streamOutput } = options
+  const running = await readRunningAgentMemoryClaims(exec)
+  const warning = decideMemoryOversubscription({
+    running,
+    incoming: { containerName, bytes: memoryLimitBytes },
+    totalMemoryBytes,
+  })
+  if (warning === null) return
+
+  const text = formatOversubscriptionWarning(warning).join('\n')
+  if (onWarning !== undefined) onWarning(text)
+  else if (streamOutput) process.stderr.write(`${text}\n`)
 }
 
 async function resolvePublishHost(exec: DockerExec): Promise<string> {

@@ -104,6 +104,7 @@ function successfulStart(dockerfileWarnings: string[]): Extract<StartResult, { o
       needsBuild: false,
       hostPort: 8973,
       tuiToken: null,
+      memoryLimitBytes: 6442450944,
     },
     containerId: 'container-id',
     built: false,

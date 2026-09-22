@@ -6,6 +6,7 @@ import type { KnownApi, Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
 import { channelsSchema, SEEDED_GITHUB_EVENT_ALLOWLISTS } from '@/channels/schema'
+import { parseMemorySize } from '@/container/memory-limit'
 import { commitSystemFileSync } from '@/git/system-commit'
 import { rolesConfigSchema } from '@/permissions/schema'
 import { secretFieldSchema } from '@/secrets/resolve'
@@ -498,6 +499,26 @@ export const sandboxSchema = z
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 
+// Per-container resource ceilings applied at `docker run`. Host stage only —
+// the container never reads this block; it reads the cgroup Docker created from
+// it (see src/run/resource-report.ts).
+//
+// `memory` is left undefined by default so the resolver owns the default and
+// can clamp it to the machine. Writing a concrete default here would bake a
+// number into every scaffolded typeclaw.json and freeze it there.
+export const resourcesSchema = z
+  .object({
+    memory: z
+      .string()
+      .refine((value) => parseMemorySize(value) !== null, {
+        message: 'resources.memory must be a docker size of at least 6m, such as "4g", "512m", or "1.5g"',
+      })
+      .optional(),
+  })
+  .default({})
+
+export type ResourcesConfig = z.infer<typeof resourcesSchema>
+
 // Host-stage `typeclaw compose` knobs. `exclude: true` skips this agent during
 // compose discovery (same effect as parking it under an `_`-prefixed dir, but
 // without renaming the folder). `monorepo` is a host-stage scaffolding hint.
@@ -801,6 +822,7 @@ export const configSchema = z
     portForward: portForwardSchema,
     network: networkSchema,
     sandbox: sandboxSchema,
+    resources: resourcesSchema,
     docker: dockerSchema,
     git: gitSchema,
     logs: logsSchema,
@@ -1037,6 +1059,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   portForward: 'restart-required',
   network: 'restart-required',
   sandbox: 'restart-required',
+  resources: 'restart-required',
   tunnels: 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
