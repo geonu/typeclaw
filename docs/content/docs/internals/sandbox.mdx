@@ -155,6 +155,18 @@ Both failure modes are quiet. A denied cancellation leaves a runaway sandbox; a 
 
 The default Docker profiles are calibrated for multi-tenant hosts. TypeClaw's outer container is single-tenant: the user owns the host, the agent folder is bind-mounted in, and runtime secrets already enter the container. Selecting permissive seccomp/AppArmor profiles drops outer AppArmor's mandatory-access-control restrictions over operations such as mount and ptrace and access to `/proc` and `/sys`. It does **not** remove Docker namespaces, the capability bounding set, cgroups, device restrictions, masked paths, or the inner per-call bwrap boundary. That inner boundary remains the load-bearing containment against prompt-injected commands. Replacing the outer defaults with tighter compatible profiles is valid; silently restoring docker-default is not, because it disables the authorized bash workflow wholesale.
 
+## `--memory` and the swap livelock
+
+`planStart()` also adds `--memory` and `--memory-swap` set to the **same** value. The equality is the load-bearing half: it disables swap for the container.
+
+Without a cgroup limit, growth inside one container is charged straight to the Docker VM. The guest kernel answers the pressure by writing to swap, every vCPU ends up in direct reclaim (`shrink_folio_list` → `swap_writeout`), and the OOM killer frees nothing reclaimable — much of the footprint is `/dev/shm` tmpfs, which a process kill cannot reclaim at all. The VM livelocks on `VM_FAULT_OOM leaked out to the #PF handler` instead of killing one process, and every container on the host dies with it. With the limit, the charge fails at the cgroup boundary and a single agent is killed with a legible cause. A limit also makes `/dev/shm` pages count against the container rather than the host.
+
+The value is a fixed 6 GiB, sized to hold the Bun runtime, the embedder during an index build, a headless Chrome on a heavy page, and whatever of the 2 GiB `/dev/shm` allowance Chrome touches. It is clamped **down** when the Docker VM cannot spare it (2 GiB of VM headroom, 1 GiB floor) and never scales **up** with a larger machine — a fraction-of-RAM rule would oversubscribe by the agent count on a shared host, and an ambient-dependent budget makes incidents unreproducible. The clamp reads the Docker daemon's own memory total, not the workstation's, which on macOS, Windows, and remote-daemon setups is a different number.
+
+There is no config knob. The failure this prevents needed a ceiling, not an option, and `typeclaw start` warns when the limits of all running agents together oversubscribe Docker's memory.
+
+`--memory` is create-time `HostConfig` state, so like `--init` it takes effect on the next container create — `typeclaw restart`, not `docker restart`.
+
 ## `--init` and the namespace-ucount leak
 
 `planStart()` also adds `--init` unconditionally. Docker puts its bundled `docker-init` (tini) at PID 1 and demotes the entrypoint shim to PID 2. This is a correctness requirement of the per-tool sandbox, not container hygiene.

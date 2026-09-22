@@ -917,7 +917,7 @@ export async function planStart({
   const devSourcePath = await detectDevSource(cwd)
   const cfg = await loadTypeclawConfig(cwd)
   const mounts = cfg.mounts
-  const memoryLimit = resolveMemoryLimit({ configured: cfg.resources.memory, totalMemoryBytes })
+  const memoryLimit = resolveMemoryLimit({ totalMemoryBytes })
   const memoryLimitArg = formatMemorySize(memoryLimit.bytes)
 
   // No `--rm`: a crashed container's logs MUST survive past exit. Lifecycle

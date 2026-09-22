@@ -20,39 +20,13 @@ const HOST_HEADROOM_BYTES = 2 * BYTES_PER_GIB
 // would trade a slow host for an agent that never starts.
 const MINIMUM_CONTAINER_MEMORY_BYTES = 1 * BYTES_PER_GIB
 
-// Docker refuses `--memory` below 6 MiB outright, so accepting a smaller value
-// here would produce a schema-valid config that can only ever fail at container
-// creation. Reject it where the operator can still see why.
-export const DOCKER_MINIMUM_MEMORY_BYTES = 6 * BYTES_PER_MIB
-
-const SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([bkmg])$/i
-
-const UNIT_MULTIPLIER: Record<string, number> = {
-  b: 1,
-  k: 1024,
-  m: BYTES_PER_MIB,
-  g: BYTES_PER_GIB,
-}
-
-// Docker's own size grammar (`512m`, `4g`, `1.5g`). Returns null rather than
-// throwing so the config schema can turn it into a field-level message.
-export function parseMemorySize(value: string): number | null {
-  const match = SIZE_PATTERN.exec(value.trim())
-  if (match === null) return null
-  const amount = Number(match[1])
-  const multiplier = UNIT_MULTIPLIER[match[2]!.toLowerCase()]
-  if (!Number.isFinite(amount) || multiplier === undefined) return null
-  const bytes = Math.floor(amount * multiplier)
-  return bytes >= DOCKER_MINIMUM_MEMORY_BYTES ? bytes : null
-}
-
 // Docker accepts a plain byte count, which avoids re-introducing rounding error
 // on the way back out of a value we already normalized.
 export function formatMemorySize(bytes: number): string {
   return String(Math.floor(bytes))
 }
 
-export type MemoryLimitSource = 'configured' | 'default' | 'clamped'
+export type MemoryLimitSource = 'default' | 'clamped'
 
 export type ResolvedMemoryLimit = {
   bytes: number
@@ -69,17 +43,12 @@ export type ResolvedMemoryLimit = {
 // unreproducible — the same agent behaves differently depending on what else
 // happened to be running when it started.
 //
-// An explicit operator value always wins outright, including one larger than
-// the machine: the operator may be sizing for a host they are about to resize,
-// and silently shrinking their stated intent would be its own surprise. The
-// oversubscription warning is where that gets surfaced.
-export function resolveMemoryLimit(options: {
-  configured?: string | undefined
-  totalMemoryBytes?: number | undefined
-}): ResolvedMemoryLimit {
-  const configured = options.configured === undefined ? null : parseMemorySize(options.configured)
-  if (configured !== null) return { bytes: configured, source: 'configured' }
-
+// There is deliberately no operator override. The incident this limit exists
+// for needed a ceiling, not a knob, and a config field nobody has asked for is
+// surface that has to be honored, documented, and migrated forever. If a real
+// workload ever proves 6 GiB too tight, that is the moment to add one — with a
+// use case attached.
+export function resolveMemoryLimit(options: { totalMemoryBytes?: number | undefined }): ResolvedMemoryLimit {
   const total = options.totalMemoryBytes
   if (total === undefined || !Number.isFinite(total) || total <= 0) {
     return { bytes: DEFAULT_CONTAINER_MEMORY_BYTES, source: 'default' }
