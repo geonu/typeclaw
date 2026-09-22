@@ -242,6 +242,58 @@ describe('startAgent', () => {
     // running stays null: startAgent threw, there is nothing to tear down.
   })
 
+  test('the resource sampler is torn down on a normal stop', async () => {
+    // given a sampler whose disposer we can observe
+    let stopped = 0
+    running = await startAgent({
+      port: 0,
+      attachTui: false,
+      cwd: testCwd,
+      loadCron: noCron,
+      startResourceSampler: () => () => {
+        stopped += 1
+      },
+    })
+    expect(stopped).toBe(0)
+
+    // when the agent stops normally
+    await running.stop()
+    running = null
+
+    // then the interval is cleared rather than left scanning /proc forever
+    expect(stopped).toBe(1)
+  })
+
+  test('the resource sampler is torn down when boot fails after it starts', async () => {
+    let stopped = 0
+    const failingChannelManager = (): ChannelManager => ({
+      router: createChannelRouter({ agentDir: testCwd, configForAdapter: () => undefined }),
+      start: async () => {
+        throw new Error('boot failure: sampler cleanup')
+      },
+      stop: async () => {},
+      reload: async () => ({ started: [], stopped: [], restarted: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+
+    // when boot throws after the sampler is already running, the caller never
+    // receives stop(), so boot-failure cleanup is the only chance to clear it
+    await expect(
+      startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: testCwd,
+        loadCron: noCron,
+        createChannelManager: failingChannelManager,
+        startResourceSampler: () => () => {
+          stopped += 1
+        },
+      }),
+    ).rejects.toThrow('boot failure: sampler cleanup')
+
+    expect(stopped).toBe(1)
+  })
+
   test('a second agent boot failure leaves a running agent fetch observer intact', async () => {
     // given a running agent A whose boot installed the codex fetch observer
     running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })

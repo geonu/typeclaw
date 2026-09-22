@@ -92,6 +92,7 @@ import { installFatalGuard } from './fatal-guard'
 import { installLlmFetchObserver } from './llm-fetch-observer'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 import { logResourceReport } from './resource-report'
+import { startResourceSampler } from './resource-sample'
 import { acquireSubagentCoalesceLease } from './subagent-coalescing'
 
 type BunServer = ReturnType<Server['start']>
@@ -136,6 +137,9 @@ export type StartAgentOptions = {
   // a refresh that holds the real secrets lock on a gate, proving the boot
   // barrier settles this before any session-producing consumer starts.
   refreshProviderOAuth?: (options: { agentDir: string; log: (message: string) => void }) => Promise<unknown>
+  // Injectable so a test can prove the sampler's disposer is wired into BOTH
+  // teardown paths without waiting out a real sampling interval.
+  startResourceSampler?: () => () => void
 }
 
 export type StartAgentResult = {
@@ -200,6 +204,7 @@ async function startAgentRuntime(
     exportClaudeCredentialsFile = exportClaudeCredentialsFileForAgent,
     exportGithubCliStore = exportGithubCliStoreForAgent,
     refreshProviderOAuth = refreshProviderOAuthForAgent,
+    startResourceSampler: startResourceSamplerFor = startResourceSampler,
   }: StartAgentOptions,
   registerBootCleanup: (cleanup: () => void | Promise<void>) => void,
 ): Promise<StartAgentResult> {
@@ -322,6 +327,16 @@ async function startAgentRuntime(
   // startup index build is itself an OOM path; if it kills the process, this
   // line must already be in the log so the ceiling is still recorded.
   logResourceReport(cwd)
+  // The boot line names the ceiling; this names the climb toward it. Without a
+  // series there is no way to tell a leak from a spike after the fact, which is
+  // exactly the question an OOM post-mortem opens with.
+  //
+  // Registered for boot-failure cleanup the instant it exists, and torn down by
+  // stop() on the normal path. `unref()` only keeps it from holding the process
+  // open; without an explicit clear, repeated start/stop cycles accumulate
+  // intervals that scan /proc and log after their runtime is gone.
+  const stopResourceSampler = startResourceSamplerFor()
+  registerBootCleanup(() => stopResourceSampler())
   const vectorStartupPromise = runVectorStartup(cwd)
   let pluginsLoaded: LoadPluginsResult
   try {
@@ -1082,6 +1097,7 @@ async function startAgentRuntime(
     // rejection cannot strand process-global listeners or plugin-owned handles
     // into the next `startAgent`.
     try {
+      stopResourceSampler()
       scheduler?.stop()
       cronConsumer.stop()
       subagentConsumer.stop()
