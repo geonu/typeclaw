@@ -36,6 +36,7 @@ import {
   type GithubCliProvisionResult,
   type ProvisionGithubCliStoreOptions,
 } from '@/secrets/provision-github-cli-store'
+import { SecretsBackend } from '@/secrets/storage'
 import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
@@ -794,11 +795,31 @@ async function refreshGithubCliStore(
   }
   if (refreshed) return null
 
+  // Only a failure that leaves an EXISTING store to go stale is worth an
+  // operator warning; with no store nothing regressed. This credential is
+  // OPTIONAL — authenticated `git push` and PR review ride the agent's own
+  // per-repo App token (`github.resolveTokenForRepo`, injected via GIT_ASKPASS
+  // by `github-cli-auth` and the backup runner), and the host store only backs
+  // `gh` invocations the broker cannot scope to a literal owner/repo. Warning
+  // unconditionally told every agent to run `gh auth login` for a capability
+  // most never use, citing a persisted store that did not exist.
+  if (!hasPersistedGithubCliStore(agentDir)) return null
+
   return (
     'typeclaw: warning: Could not refresh GitHub CLI credentials from the host. ' +
     'Keeping the previously persisted credential store. Run `gh auth login --hostname github.com` on the host, ' +
     'then restart TypeClaw.\n'
   )
+}
+
+// An unreadable or malformed secrets.json cannot prove the store is absent, so
+// it takes the warning — silence is reserved for a confirmed no-store agent.
+function hasPersistedGithubCliStore(agentDir: string): boolean {
+  try {
+    return new SecretsBackend(join(agentDir, 'secrets.json')).tryReadGithubCliSync() !== undefined
+  } catch {
+    return true
+  }
 }
 
 function resolveGithubCliDeniedRoots(cwd: string, config: Config): string[] {
