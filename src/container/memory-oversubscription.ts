@@ -77,11 +77,8 @@ export function formatOversubscriptionWarning(warning: OversubscriptionWarning):
 
   const remedy =
     warning.unbounded.length > 0
-      ? ['An unbounded agent can exhaust the host on its own. Restart it to apply', 'the configured limit.']
-      : [
-          'If they peak together the host can still exhaust. Lower `resources.memory`,',
-          'stop an agent, or give Docker more memory.',
-        ]
+      ? ['An unbounded agent can exhaust the host on its own. Restart it to apply', 'the current limit.']
+      : ['If they peak together the host can still exhaust. Stop an agent, or', 'give Docker more memory.']
 
   return [headline, ...roster, ...remedy]
 }

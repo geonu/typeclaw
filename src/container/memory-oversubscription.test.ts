@@ -108,7 +108,7 @@ describe('formatOversubscriptionWarning', () => {
     expect(text).toContain('8.0GiB')
     expect(text).toContain('alpha')
     expect(text).toContain('beta')
-    expect(text).toContain('resources.memory')
+    expect(text).toContain('give Docker more memory')
   })
 })
 
