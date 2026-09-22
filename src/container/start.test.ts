@@ -145,6 +145,7 @@ type ScaffoldedConfig = {
   }
   logs?: { retentionDays?: number }
   memory?: Record<string, unknown>
+  resources?: { memory?: string }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -158,6 +159,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
     ...(overrides.logs ? { logs: overrides.logs } : {}),
     ...(overrides.memory ? { memory: overrides.memory } : {}),
+    ...(overrides.resources ? { resources: overrides.resources } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -350,6 +352,32 @@ describe('planStart', () => {
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs).toContain('--shm-size=2g')
+  })
+
+  test('caps container memory with swap disabled so exhaustion kills one agent instead of livelocking the host', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    const memory = plan.runArgs.find((arg) => arg.startsWith('--memory='))
+    const memorySwap = plan.runArgs.find((arg) => arg.startsWith('--memory-swap='))
+    expect(memory).toBeDefined()
+    // Equal values are what disables swap. Swap is what turns an OOM into an
+    // unrecoverable reclaim livelock, so the pair must never drift apart.
+    expect(memorySwap).toBe(`--memory-swap=${memory?.slice('--memory='.length)}`)
+    expect(plan.memoryLimitBytes).toBeGreaterThan(0)
+  })
+
+  test('honors an operator memory limit over the default', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { resources: { memory: '3g' } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.memoryLimitBytes).toBe(3 * 1024 * 1024 * 1024)
+    expect(plan.runArgs).toContain(`--memory=${3 * 1024 * 1024 * 1024}`)
   })
 
   test('passes the host UID and GID to the container on POSIX so runtime writes keep host ownership', async () => {
@@ -1632,6 +1660,7 @@ function fakeDockerExec(scenario: {
   buildFails?: boolean
   buildStderr?: string
   daemonId?: string
+  daemonMemTotalBytes?: number
   managedBuilderCreateFails?: boolean
   managedBuilderRmFails?: boolean
   buildThrows?: boolean
@@ -1702,6 +1731,11 @@ function fakeDockerExec(scenario: {
       return scenario.buildxAvailable === false
         ? { exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' }
         : { exitCode: 0, stdout: 'buildx v0.0.0\n', stderr: '' }
+    }
+    if (args[0] === 'info' && args[2] === '{{.MemTotal}}') {
+      return scenario.daemonMemTotalBytes === undefined
+        ? { exitCode: 1, stdout: '', stderr: 'daemon memory unavailable' }
+        : { exitCode: 0, stdout: `${scenario.daemonMemTotalBytes}\n`, stderr: '' }
     }
     if (args[0] === 'info') {
       return scenario.daemonId === undefined
@@ -3016,7 +3050,10 @@ describe('start (composition)', () => {
     // The Dockerfile on disk must be BuildKit-free, or the legacy build chokes.
     expect(buildCall?.dockerfileSnapshot).not.toContain('# syntax=')
     expect(buildCall?.dockerfileSnapshot).not.toContain('--mount=type=cache')
-    expect(calls.some((c) => c.args[0] === 'info')).toBe(false)
+    // Narrowed to the daemon-identity probe the managed build cache uses.
+    // start() also runs `docker info --format {{.MemTotal}}` to size the
+    // container memory limit, which is unrelated to the build path.
+    expect(calls.some((c) => c.args[0] === 'info' && c.args[2] === '{{.ID}}')).toBe(false)
     expect(calls.some((c) => c.args[0] === 'buildx' && c.args[1] === 'rm')).toBe(false)
   })
 
@@ -4171,6 +4208,94 @@ describe('start (composition)', () => {
       expect(registrations).toHaveLength(2)
     },
   )
+
+  test('keeps the daemon-clamped memory limit across the hostd-refresh replan', async () => {
+    // given a 4 GiB Docker VM, which cannot afford the 6 GiB default and so
+    // clamps to 2 GiB after the 2 GiB host headroom
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: false },
+      daemonMemTotalBytes: 4 * 1024 * 1024 * 1024,
+    })
+
+    // when start replans at the run boundary to refresh hostd tokens
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      cliEntry: '/placeholder/cli.ts',
+      reuseCurrentHostDaemon: true,
+      currentHostDaemon: {
+        httpPort: 49999,
+        register: async () => ({ ok: true }),
+        deregister: async () => {},
+      },
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    // then the container actually launches with the clamp, not the
+    // unconditional default the replan would otherwise resolve
+    expect(result.ok).toBe(true)
+    const runCall = calls.filter((c) => c.args[0] === 'run').at(-1)
+    const expected = 2 * 1024 * 1024 * 1024
+    expect(runCall?.args).toContain(`--memory=${expected}`)
+    expect(runCall?.args).toContain(`--memory-swap=${expected}`)
+  })
+
+  test('keeps the daemon-clamped memory limit across the port-conflict retry replan', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+    const base = fakeDockerExec({
+      imageExists: true,
+      container: { exists: false },
+      daemonMemTotalBytes: 4 * 1024 * 1024 * 1024,
+    })
+    const calls = base.calls
+    let runs = 0
+    // given the first docker run losing a TOCTOU race for the host port
+    const exec: DockerExec = async (args, options) => {
+      if (args[0] === 'run') {
+        runs += 1
+        if (runs === 1) {
+          // Record the attempt without letting the fake create a container:
+          // a live corpse would make cleanup refuse the retry outright.
+          calls.push({ args, dockerfileSnapshot: null, env: options?.env })
+          return {
+            exitCode: 125,
+            stdout: '',
+            stderr:
+              'docker: Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:8973 failed: port is already allocated.',
+          }
+        }
+      }
+      return await base.exec(args, options)
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+    })
+
+    // then the retry launches with the clamp too
+    expect(result.ok).toBe(true)
+    expect(runs).toBeGreaterThan(1)
+    const runCall = calls.filter((c) => c.args[0] === 'run').at(-1)
+    const expected = 2 * 1024 * 1024 * 1024
+    expect(runCall?.args).toContain(`--memory=${expected}`)
+    expect(runCall?.args).toContain(`--memory-swap=${expected}`)
+  })
 
   test('uses only replacement hostd tokens in the final docker run', async () => {
     await writeDockerfile(root)
