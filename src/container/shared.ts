@@ -271,15 +271,40 @@ export function sanitizeDockerStderr(stderr: string): string {
   return lines.join('; ')
 }
 
-export type DockerAvailability = { ok: true } | { ok: false; reason: 'binary-missing' | 'daemon-down'; detail: string }
+export type DockerAvailability =
+  | { ok: true }
+  | { ok: false; reason: 'binary-missing' | 'daemon-down' | 'unresponsive'; detail: string }
+
+// A healthy `docker info` answers in well under a second; a refused connection
+// fails immediately. The only thing this budget can cut short is a daemon that
+// accepted the request and never answered — which is exactly the case we want
+// to report rather than wait out. Deliberately generous so a cold Docker
+// Desktop / OrbStack still lands inside it.
+export const DOCKER_AVAILABILITY_TIMEOUT_MS = 5_000
 
 // `docker info --format {{.ServerVersion}}` is the probe of choice because it
 // requires both the client AND a reachable daemon. `docker --version` would
 // miss the "Docker Desktop installed but not running" case, which is the
 // common failure mode on macOS.
-export async function checkDockerAvailable(exec: DockerExec = defaultDockerExec): Promise<DockerAvailability> {
-  const result = await exec(['info', '--format', '{{.ServerVersion}}'])
+//
+// The probe is time-bounded because an unresponsive daemon otherwise hangs it
+// forever: a host VM in an OOM livelock accepts the connection and never
+// replies, and `docker info` has no client-side deadline of its own. Every
+// Docker-dependent CLI command gates on this function, so an unbounded probe
+// means `status`, `start`, `stop`, `logs`, `tui` and `doctor` all wedge with no
+// output at all — the tool you reach for when the host is sick is the one that
+// hangs. Mirrors captureCrashLogs in ./verify-running: AbortSignal.timeout
+// plus an explicit `signal.aborted` check to tell a timeout from a failure.
+export async function checkDockerAvailable(
+  exec: DockerExec = defaultDockerExec,
+  timeoutMs: number = DOCKER_AVAILABILITY_TIMEOUT_MS,
+): Promise<DockerAvailability> {
+  const signal = AbortSignal.timeout(timeoutMs)
+  const result = await exec(['info', '--format', '{{.ServerVersion}}'], { signal })
   if (result.exitCode === 0) return { ok: true }
+  if (signal.aborted) {
+    return { ok: false, reason: 'unresponsive', detail: `docker info did not respond within ${timeoutMs}ms` }
+  }
   if (result.stderr === DOCKER_NOT_FOUND_STDERR) {
     return { ok: false, reason: 'binary-missing', detail: result.stderr }
   }
@@ -584,19 +609,21 @@ export type ContainerState = { exists: false } | { exists: true; running: boolea
 // State.Running boolean — not mere presence in `ps -a` — is what callers need
 // to distinguish a live agent from a corpse left over after a crash (which,
 // since we run without `--rm`, sticks around in `ps -a` until the next start).
-export async function inspectContainer(name: string): Promise<ContainerState> {
-  const bun = getBun()
-  if (!bun) return { exists: false }
-  const cmd = dockerCmd(['inspect', '--format', '{{.State.Running}}', name])
-  if (cmd === null) return { exists: false }
-  const proc = bun.spawn({
-    cmd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  if ((await proc.exited) !== 0) return { exists: false }
-  const out = (await new Response(proc.stdout).text()).trim()
-  return { exists: true, running: out === 'true' }
+// Goes through DockerExec rather than spawning directly so callers can bound it
+// and tests can inject it. Both matter for the diagnostic paths: an unresponsive
+// daemon accepts `docker inspect` and never answers, which would hang `doctor` —
+// the one command whose whole job is to report on a sick host.
+export async function inspectContainer(
+  name: string,
+  options: { signal?: AbortSignal; exec?: DockerExec } = {},
+): Promise<ContainerState> {
+  const exec = options.exec ?? defaultDockerExec
+  const result = await exec(
+    ['inspect', '--format', '{{.State.Running}}', name],
+    options.signal === undefined ? undefined : { signal: options.signal },
+  )
+  if (result.exitCode !== 0) return { exists: false }
+  return { exists: true, running: result.stdout.trim() === 'true' }
 }
 
 export function getBun(): { spawn: typeof Bun.spawn; which: typeof Bun.which } | undefined {
