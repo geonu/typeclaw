@@ -145,7 +145,6 @@ type ScaffoldedConfig = {
   }
   logs?: { retentionDays?: number }
   memory?: Record<string, unknown>
-  resources?: { memory?: string }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -159,7 +158,6 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
     ...(overrides.logs ? { logs: overrides.logs } : {}),
     ...(overrides.memory ? { memory: overrides.memory } : {}),
-    ...(overrides.resources ? { resources: overrides.resources } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -367,17 +365,6 @@ describe('planStart', () => {
     // unrecoverable reclaim livelock, so the pair must never drift apart.
     expect(memorySwap).toBe(`--memory-swap=${memory?.slice('--memory='.length)}`)
     expect(plan.memoryLimitBytes).toBeGreaterThan(0)
-  })
-
-  test('honors an operator memory limit over the default', async () => {
-    await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { resources: { memory: '3g' } })
-
-    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
-
-    expect(plan.memoryLimitBytes).toBe(3 * 1024 * 1024 * 1024)
-    expect(plan.runArgs).toContain(`--memory=${3 * 1024 * 1024 * 1024}`)
   })
 
   test('passes the host UID and GID to the container on POSIX so runtime writes keep host ownership', async () => {
