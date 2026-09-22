@@ -3,6 +3,7 @@ import {
   detectInstalledDockerApps,
   pickRuntimeToNudge,
   renderDockerUnavailableGuidance,
+  type DockerAppProbes,
   type DockerExec,
 } from '@/container'
 
@@ -16,15 +17,18 @@ export type DockerPreflightResult = { ok: true } | { ok: false; summary: string;
 // then hands the friendly, runtime-specific guidance back to the caller so each
 // command renders it in its own style (spinner vs console) — no process.exit
 // here, that belongs to the command.
-export async function preflightDocker(exec?: DockerExec): Promise<DockerPreflightResult> {
+export async function preflightDocker(exec?: DockerExec, probes?: DockerAppProbes): Promise<DockerPreflightResult> {
   const availability = exec ? await checkDockerAvailable(exec) : await checkDockerAvailable()
   if (availability.ok) return { ok: true }
 
   const detail = availability.reason === 'daemon-down' ? availability.detail : undefined
-  const installed = detectInstalledDockerApps()
-  const nudge = pickRuntimeToNudge(process.env, detail, installed)
+  // Probes are injectable so tests do not depend on which Docker runtimes
+  // happen to be installed on the machine running them.
+  const installed = detectInstalledDockerApps(probes)
+  const env = probes?.env ?? process.env
+  const nudge = pickRuntimeToNudge(env, detail, installed)
   const { summary, lines } = renderDockerUnavailableGuidance(availability, {
-    platform: process.platform,
+    platform: probes?.platform ?? process.platform,
     nudge,
     installed,
   })
