@@ -49,6 +49,9 @@ auth.json
 # Sisyphus working files (plans, scratchpads)
 .sisyphus
 
+# OhMyOpenCode working files (plans, drafts, evidence, notepads)
+.omo/
+
 # Local agent state created by tests / dev runs.
 # Anchored with a leading slash so they only match the dev-stage repo root,
 # never nested directories that share these names (`src/bundled-plugins/memory/`,
