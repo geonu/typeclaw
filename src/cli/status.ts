@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { type ContainerStatus, type DockerExec, resolveController } from '@/container'
+import { containerNameFromCwd, type ContainerStatus, type DockerExec, resolveController } from '@/container'
 import { isDaemonReachable, send } from '@/hostd'
 import type { StatusResult } from '@/hostd'
 import { findAgentDir } from '@/init'
@@ -13,9 +13,16 @@ export type HostdStatus =
   | { kind: 'not-registered'; reason: string }
   | { kind: 'registered'; cwd: string; forwardedPorts: number[] }
 
+// `docker-unavailable` is not a container state — it is the absence of an
+// answer. It exists so `status` can still report everything that does NOT
+// depend on Docker (agent dir, container name, host daemon, forwarded ports)
+// when the daemon is wedged. A diagnostic command that reports nothing at all
+// because the thing it diagnoses is broken is the least useful moment to lose.
+export type DockerUnavailableStatus = { kind: 'docker-unavailable'; containerName: string; summary: string }
+
 export type StatusReport = {
   cwd: string
-  container: ContainerStatus
+  container: ContainerStatus | DockerUnavailableStatus
   hostd: HostdStatus
 }
 
@@ -46,7 +53,22 @@ export async function runStatus(deps: RunStatusDeps = {}): Promise<void> {
   const cwd = deps.cwd ?? findAgentDir(process.cwd()) ?? process.cwd()
 
   const preflight = await (deps.preflight ?? preflightDocker)()
+  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
+  const write = deps.write ?? ((text: string) => process.stdout.write(text))
+
+  // Docker is unreachable: report what we can still learn without it rather
+  // than dying on the guidance alone. hostd is a separate process reached over
+  // its own socket, so its registration and forwarded ports stay readable — and
+  // during a wedged-daemon incident that is exactly the state worth seeing.
   if (!preflight.ok) {
+    const containerName = containerNameFromCwd(cwd)
+    const hostd = await (deps.fetchHostd ?? fetchHostdStatus)(containerName)
+    const container: DockerUnavailableStatus = {
+      kind: 'docker-unavailable',
+      containerName,
+      summary: preflight.summary,
+    }
+    write(`${formatStatus({ cwd, container, hostd }, { useColor })}\n`)
     ;(deps.onDockerUnavailable ?? defaultOnDockerUnavailable)(preflight)
     return
   }
@@ -54,14 +76,17 @@ export async function runStatus(deps: RunStatusDeps = {}): Promise<void> {
   const container = await resolveController().status({ cwd, exec: deps.exec })
   const hostd = await (deps.fetchHostd ?? fetchHostdStatus)(container.containerName)
 
-  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
-  const write = deps.write ?? ((text: string) => process.stdout.write(text))
   write(`${formatStatus({ cwd, container, hostd }, { useColor })}\n`)
 }
 
-function defaultOnDockerUnavailable(failure: Extract<DockerPreflightResult, { ok: false }>): never {
+// Sets `process.exitCode` instead of calling `process.exit()`: the degraded
+// report is written immediately before this, and an immediate exit can
+// terminate the process before a redirected or piped stdout has drained —
+// truncating the very output this path exists to produce. Letting runStatus
+// return lets the runtime flush and still exit non-zero.
+function defaultOnDockerUnavailable(failure: Extract<DockerPreflightResult, { ok: false }>): void {
   printDockerGuidance(failure)
-  process.exit(1)
+  process.exitCode = 1
 }
 
 async function fetchHostdStatus(containerName: string): Promise<HostdStatus> {
@@ -138,6 +163,13 @@ function appendContainerSection(lines: string[], report: StatusReport, p: Palett
   const container = report.container
   lines.push(`${p.bold('Container')}  ${container.containerName}`)
   lines.push(row('cwd', report.cwd))
+
+  if (container.kind === 'docker-unavailable') {
+    lines.push(row('state', p.red('unknown')))
+    lines.push(`  ${p.dim(container.summary)}`)
+    return
+  }
+
   lines.push(row('image', container.imageTag))
 
   if (container.kind === 'missing') {
