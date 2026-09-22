@@ -156,6 +156,47 @@ describe('renderDockerUnavailableGuidance', () => {
     expect(result.lines.join('\n')).toContain('https://docs.docker.com/get-docker/')
   })
 
+  test('binary-missing names the detected runtime instead of claiming Docker is absent', () => {
+    // given a host where OrbStack is installed but docker is off this PATH,
+    // the routine SSH / non-interactive-shell case
+    const result = renderDockerUnavailableGuidance(
+      { ok: false, reason: 'binary-missing', detail: 'docker: command not found in $PATH' },
+      { platform: 'darwin', nudge: null, installed: ['orbstack'] },
+    )
+
+    // then it must not send the operator off to install what they already have
+    expect(result.summary).not.toContain('Docker is not installed')
+    expect(result.summary).toContain('OrbStack')
+    expect(result.lines.join('\n')).toContain('PATH')
+    expect(result.lines.join('\n')).not.toContain('https://orbstack.dev')
+  })
+
+  test('unresponsive asks for a restart and never for a start', () => {
+    // given a daemon that is up but answering nothing
+    const result = renderDockerUnavailableGuidance(
+      { ok: false, reason: 'unresponsive', detail: 'docker info did not respond within 5000ms' },
+      { platform: 'darwin', nudge: 'orbstack', installed: ['orbstack'] },
+    )
+    const body = result.lines.join('\n')
+
+    // then "open the app" guidance would be a no-op; it must say restart
+    expect(result.summary).toContain('not responding')
+    expect(result.summary).toContain('restart')
+    expect(body).toContain('orb stop')
+    expect(body).not.toContain('Open OrbStack')
+    // and it must point at the recurring cause rather than only the symptom
+    expect(body).toContain('memory')
+  })
+
+  test('unresponsive falls back to generic restart guidance with no nudge', () => {
+    const result = renderDockerUnavailableGuidance(
+      { ok: false, reason: 'unresponsive', detail: 'docker info did not respond within 5000ms' },
+      { platform: 'linux', nudge: null, installed: [] },
+    )
+    expect(result.summary).toContain('not responding')
+    expect(result.lines.join('\n')).toContain('systemctl restart docker')
+  })
+
   test('daemon-down with orbstack nudge names the app and gives start steps', () => {
     const result = renderDockerUnavailableGuidance(
       { ok: false, reason: 'daemon-down', detail: 'unix:///home/user/.orbstack/run/docker.sock' },

@@ -13,6 +13,7 @@ import {
   refreshDockerfile,
   refreshGitignore,
   resolveHostPort,
+  type DockerAvailability,
   type DockerExec,
 } from '@/container'
 import { homeRoot, isDaemonReachable, send } from '@/hostd'
@@ -23,6 +24,7 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { detectWsl, isWindows, isWindowsDriveMount, type WslInfo } from '@/shared'
 
 import { apparmorSandbox } from './apparmor'
+import { boundedExec } from './bounded-exec'
 import { buildChannelChecks } from './channel-checks'
 import { agentFileOwnership, type FileOwnershipDeps } from './file-ownership'
 import { buildOperationalIncidentChecks } from './operational-incidents'
@@ -32,7 +34,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } & FileOwners
   const dockerExec = opts.dockerExec ?? defaultDockerExec
 
   return [
-    dockerDaemon(dockerExec),
+    dockerDaemon(boundedExec(dockerExec)),
     bunRuntime(),
     agentFolderInitialized(),
     agentFolderDockerfileTemplate(),
@@ -48,8 +50,8 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } & FileOwners
     hostdReachable(),
     hostdRegistration(),
     windowsBindMount(),
-    containerState(dockerExec),
-    containerHostPort(),
+    containerState(boundedExec(dockerExec)),
+    containerHostPort(dockerExec),
     ...buildOperationalIncidentChecks(),
     ...buildChannelChecks(),
   ]
@@ -65,17 +67,35 @@ function dockerDaemon(exec: DockerExec): DoctorCheck {
       if (result.ok) return { status: 'ok', message: 'docker info responded' }
       return {
         status: 'error',
-        message: result.reason === 'binary-missing' ? 'docker binary missing on $PATH' : 'docker daemon not reachable',
+        message: dockerDaemonMessage(result.reason),
         details: [result.detail],
-        fix:
-          result.reason === 'binary-missing'
-            ? { description: 'Install Docker (Docker Desktop, OrbStack, or docker-ce).' }
-            : {
-                description:
-                  'Start the Docker runtime (Docker Desktop, OrbStack, or `systemctl start docker`). If it is already running, check `docker context ls`, `DOCKER_CONTEXT`, and `DOCKER_HOST`.',
-              },
+        fix: { description: dockerDaemonFix(result.reason) },
       }
     },
+  }
+}
+
+type DockerUnavailableReason = Extract<DockerAvailability, { ok: false }>['reason']
+
+function dockerDaemonMessage(reason: DockerUnavailableReason): string {
+  switch (reason) {
+    case 'binary-missing':
+      return 'docker binary missing on $PATH'
+    case 'unresponsive':
+      return 'docker daemon accepted the request but never responded'
+    case 'daemon-down':
+      return 'docker daemon not reachable'
+  }
+}
+
+function dockerDaemonFix(reason: DockerUnavailableReason): string {
+  switch (reason) {
+    case 'binary-missing':
+      return 'Install Docker (Docker Desktop, OrbStack, or docker-ce), or if it is already installed, add its bin directory to PATH — a non-interactive or SSH shell often misses it.'
+    case 'unresponsive':
+      return 'Restart the Docker runtime (`orb stop` then reopen OrbStack, restart Docker Desktop, or `systemctl restart docker`). A daemon that answers nothing is usually host or VM memory exhaustion, so check memory pressure or it will recur.'
+    case 'daemon-down':
+      return 'Start the Docker runtime (Docker Desktop, OrbStack, or `systemctl start docker`). If it is already running, check `docker context ls`, `DOCKER_CONTEXT`, and `DOCKER_HOST`.'
   }
 }
 
@@ -451,7 +471,7 @@ function containerState(exec: DockerExec): DoctorCheck {
         return { status: 'skipped', message: 'docker unavailable (covered by docker.daemon-reachable)' }
       }
       const name = containerNameFromCwd(ctx.cwd)
-      const state = await inspectContainer(name)
+      const state = await inspectContainer(name, { exec })
       if (!state.exists) {
         return {
           status: 'info',
@@ -469,20 +489,25 @@ function containerState(exec: DockerExec): DoctorCheck {
   }
 }
 
-function containerHostPort(): DoctorCheck {
+function containerHostPort(exec: DockerExec): DoctorCheck {
   return {
     name: 'container.host-port-resolves',
     category: 'container',
     description: 'running container exposes its host port',
     applies: (ctx) => ctx.hasAgentFolder,
     async run(ctx) {
+      const bounded = boundedExec(exec)
+      const available = await checkDockerAvailable(bounded)
+      if (!available.ok) {
+        return { status: 'skipped', message: 'docker unavailable (covered by docker.daemon-reachable)' }
+      }
       const name = containerNameFromCwd(ctx.cwd)
-      const state = await inspectContainer(name)
+      const state = await inspectContainer(name, { exec: bounded })
       if (!state.exists || !state.running) {
         return { status: 'skipped', message: 'container not running' }
       }
       try {
-        const port = await resolveHostPort({ cwd: ctx.cwd })
+        const port = await resolveHostPort({ cwd: ctx.cwd, exec: bounded })
         return { status: 'ok', message: `host port ${port} -> container` }
       } catch (err) {
         return {

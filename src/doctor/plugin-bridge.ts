@@ -1,10 +1,15 @@
-import { resolveHostPort, resolveTuiToken } from '@/container'
+import { resolveHostPort, resolveTuiToken, type DockerExec } from '@/container'
 import type { ClientMessage, DoctorCheckPayload, DoctorFixPayload, ServerMessage } from '@/shared'
+
+import { boundedExec } from './bounded-exec'
 
 export type PluginBridgeOptions = {
   cwd: string
   url?: string
   timeoutMs?: number
+  // Injectable so a regression test can prove the late discovery path is
+  // bounded too, not just the static checks.
+  exec?: DockerExec
 }
 
 export type PluginBridgeFetchChecks = (opts: PluginBridgeOptions) => Promise<PluginBridgeChecksResult>
@@ -79,8 +84,15 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
   let url = opts.url
   if (url === undefined) {
     try {
-      const port = await resolveHostPort({ cwd: opts.cwd })
-      const token = await resolveTuiToken({ cwd: opts.cwd })
+      // Plugin discovery runs AFTER the static checks, so it is the last place
+      // a wedged daemon can still hang the command: `docker port` and
+      // `docker inspect` here would otherwise block with no deadline of their
+      // own, long after the earlier `docker info` probes succeeded.
+      // Wrap unconditionally rather than only defaulting: an injected exec is
+      // no safer than the default one, and the deadline is the invariant here.
+      const exec = boundedExec(opts.exec)
+      const port = await resolveHostPort({ cwd: opts.cwd, exec })
+      const token = await resolveTuiToken({ cwd: opts.cwd, exec })
       url = buildBridgeUrl(port, token)
     } catch (err) {
       return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }

@@ -145,6 +145,27 @@ describe('checkDockerAvailable', () => {
     })
   })
 
+  test('classifies a daemon that never answers as unresponsive', async () => {
+    // given a daemon that accepts the request and never replies, as a host VM
+    // in an OOM livelock does
+    const exec: DockerExec = (_args, options) =>
+      new Promise((resolve) => {
+        options?.signal?.addEventListener('abort', () => resolve({ exitCode: -1, stdout: '', stderr: '' }), {
+          once: true,
+        })
+      })
+
+    // when the probe runs with a short budget
+    const result = await checkDockerAvailable(exec, 10)
+
+    // then it reports unresponsive rather than hanging or blaming the daemon
+    expect(result).toEqual({
+      ok: false,
+      reason: 'unresponsive',
+      detail: 'docker info did not respond within 10ms',
+    })
+  })
+
   test('classifies any other non-zero exit as daemon-down', async () => {
     const exec: DockerExec = async () => ({
       exitCode: 1,

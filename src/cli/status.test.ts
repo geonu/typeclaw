@@ -239,4 +239,63 @@ describe('typeclaw status render flow', () => {
   test('does not exit the process when Docker is available', async () => {
     await expect(captureStatus()).resolves.toBeString()
   })
+
+  test('the default docker-unavailable path sets exitCode instead of exiting mid-write', async () => {
+    // given the real failure handler, which previously called process.exit(1)
+    // immediately after writing the report — truncating a piped stdout
+    const previousExitCode = process.exitCode
+    let out = ''
+    try {
+      await runStatus({
+        cwd,
+        preflight: async () => ({
+          ok: false,
+          summary: 'OrbStack is running but not responding. It needs a restart.',
+          guidance: ['Restart OrbStack, then retry.'],
+        }),
+        fetchHostd: async () => ({ kind: 'unreachable' }),
+        write: (text) => {
+          out += text
+        },
+      })
+
+      // then it returns normally with a non-zero exit code, and the report is
+      // fully written rather than cut short by a forced exit
+      expect(process.exitCode).toBe(1)
+      expect(out).toContain('Container')
+      expect(out).toContain('Port forwarding')
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test('still reports host daemon and forwarded ports when Docker is unavailable', async () => {
+    // given a wedged Docker daemon but a healthy host daemon — the exact state
+    // during a livelocked-VM incident, and the moment the report matters most
+    let out = ''
+    const guidance: string[] = []
+    await runStatus({
+      cwd,
+      preflight: async () => ({
+        ok: false,
+        summary: 'OrbStack is running but not responding. It needs a restart.',
+        guidance: ['Restart OrbStack, then retry: `orb stop`, then reopen OrbStack.'],
+      }),
+      fetchHostd: async () => ({ kind: 'registered', cwd, forwardedPorts: [8973] }),
+      write: (text) => {
+        out += text
+      },
+      onDockerUnavailable: (failure) => {
+        guidance.push(failure.summary)
+      },
+    })
+
+    // then the Docker-independent facts are still on screen, and the docker
+    // failure is named rather than silently swallowed
+    expect(out).toContain('Host daemon')
+    expect(out).toContain('8973')
+    expect(out).toContain('unknown')
+    expect(out).toContain('not responding')
+    expect(guidance).toEqual(['OrbStack is running but not responding. It needs a restart.'])
+  })
 })

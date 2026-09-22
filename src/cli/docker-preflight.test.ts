@@ -1,11 +1,27 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { DockerExec } from '@/container'
+import type { DockerAppProbes, DockerExec } from '@/container'
 
 import { preflightDocker } from './docker-preflight'
 
 function execReturning(exitCode: number, stderr = ''): DockerExec {
   return async () => ({ exitCode, stdout: exitCode === 0 ? '27.0.0' : '', stderr })
+}
+
+// Pin every detection input so the result does not depend on which Docker
+// runtimes are installed on the machine running the suite.
+const NOTHING_INSTALLED: DockerAppProbes = {
+  platform: 'darwin',
+  exists: () => false,
+  which: () => null,
+  env: {},
+}
+
+const ORBSTACK_INSTALLED: DockerAppProbes = {
+  platform: 'darwin',
+  exists: (path) => path === '/Applications/OrbStack.app',
+  which: () => null,
+  env: {},
 }
 
 describe('preflightDocker', () => {
@@ -24,11 +40,20 @@ describe('preflightDocker', () => {
     expect(result.guidance.length).toBeGreaterThan(0)
   })
 
-  test('binary-missing yields install guidance', async () => {
-    const result = await preflightDocker(execReturning(-1, 'docker: command not found in $PATH'))
+  test('binary-missing yields install guidance when nothing is installed', async () => {
+    const result = await preflightDocker(execReturning(-1, 'docker: command not found in $PATH'), NOTHING_INSTALLED)
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected failure')
     expect(result.summary).toBe('Docker is not installed.')
     expect(result.guidance.join('\n')).toContain('https://orbstack.dev')
+  })
+
+  test('binary-missing does not claim Docker is missing when a runtime is installed', async () => {
+    const result = await preflightDocker(execReturning(-1, 'docker: command not found in $PATH'), ORBSTACK_INSTALLED)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.summary).not.toContain('Docker is not installed')
+    expect(result.summary).toContain('OrbStack')
+    expect(result.guidance.join('\n')).toContain('PATH')
   })
 })

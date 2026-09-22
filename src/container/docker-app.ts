@@ -191,6 +191,41 @@ function startInstructions(app: DockerApp, platform: NodeJS.Platform): string[] 
   }
 }
 
+// Restart (not start) guidance for a daemon that is up but wedged. Kept
+// separate from startInstructions because the two are not interchangeable:
+// telling someone to open an app that is already open reads as a no-op and
+// costs them the diagnosis. A livelocked VM often ignores the graceful stop,
+// so each runtime's entry names the forceful fallback too.
+function restartInstructions(app: DockerApp | null, platform: NodeJS.Platform): string[] {
+  if (app === null) {
+    return platform === 'linux'
+      ? ['Restart the Docker daemon, then retry.', 'On most distros: `sudo systemctl restart docker`']
+      : ['Restart your Docker runtime, then retry.']
+  }
+  switch (app) {
+    case 'orbstack':
+      return [
+        'Restart OrbStack, then retry: `orb stop`, then reopen OrbStack.',
+        'A livelocked VM may ignore `orb stop`. If it hangs, quit OrbStack from the',
+        'menu bar (or kill its helper process), then reopen it.',
+      ]
+    case 'docker-desktop':
+      return [
+        'Restart Docker Desktop, then retry.',
+        platform === 'darwin'
+          ? 'Quit it from the menu bar (force quit if it will not exit), then reopen it.'
+          : 'Quit it from the tray (force quit if it will not exit), then reopen it.',
+      ]
+    case 'colima':
+      return ['Restart Colima, then retry: `colima stop && colima start`', 'If the stop hangs: `colima stop --force`']
+    case 'podman':
+      return [
+        'Restart the Podman machine, then retry: `podman machine stop && podman machine start`',
+        'If the stop hangs: `podman machine stop --force`',
+      ]
+  }
+}
+
 // Generic "start your daemon" guidance when we can't name the runtime. On Linux
 // the daemon is usually systemd-managed; elsewhere it's a GUI app.
 function genericStartInstructions(platform: NodeJS.Platform): string[] {
@@ -228,11 +263,50 @@ export function renderDockerUnavailableGuidance(
   const { platform, nudge, installed, retryHint } = options
 
   if (availability.reason === 'binary-missing') {
+    // Only claim "not installed" when nothing was actually detected. We probe
+    // the install locations separately, so a non-empty `installed` here means
+    // the runtime IS present and only the CLI is unreachable on this PATH —
+    // routine over SSH and in non-interactive shells, where the rc file that
+    // adds the runtime's bin dir never runs. Telling that operator to install
+    // Docker sends them down the wrong path entirely.
+    if (installed.length > 0) {
+      const names = installed.map(dockerAppLabel).join(', ')
+      return {
+        summary: `docker CLI not found on PATH (detected ${names}).`,
+        lines: [
+          `${names} appears to be installed, but no \`docker\` binary is on this shell's PATH.`,
+          'This is common over SSH and in non-interactive shells, where the shell',
+          "profile that adds the runtime's bin directory never runs.",
+          'Check `echo $PATH`, then start a login shell or add the runtime bin directory.',
+          ...(retryHint ? ['', retryHint] : []),
+        ],
+      }
+    }
     const lines = [...INSTALL_LINES]
     if (retryHint) {
       lines.push('', retryHint)
     }
     return { summary: 'Docker is not installed.', lines }
+  }
+
+  // The daemon accepted our request and never answered. This is NOT "start it"
+  // territory — it is already running, so start instructions actively mislead.
+  // The observed cause is host/VM memory exhaustion driving the guest kernel
+  // into an unrecoverable reclaim livelock, which only a runtime restart clears
+  // and which recurs until the memory pressure itself is found.
+  if (availability.reason === 'unresponsive') {
+    const label = nudge !== null ? dockerAppLabel(nudge) : 'Your Docker runtime'
+    const lines = [
+      ...restartInstructions(nudge, platform),
+      '',
+      'An unresponsive daemon is usually host or VM memory exhaustion, so it will',
+      'recur until the cause is found. After the restart, check what is consuming',
+      'memory before resuming work.',
+    ]
+    if (retryHint) {
+      lines.push('', retryHint)
+    }
+    return { summary: `${label} is running but not responding. It needs a restart.`, lines }
   }
 
   // daemon-down: the configured Docker endpoint refused the connection. We can
