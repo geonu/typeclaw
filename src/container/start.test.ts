@@ -2150,7 +2150,7 @@ describe('start (composition)', () => {
   test('warns and continues without replacing persisted GitHub CLI credentials when refresh fails', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const persisted = '{"githubCli":{"hosts":"existing-good-store"}}\n'
+    const persisted = '{"version":2,"githubCli":{"hosts":"existing-good-store"}}\n'
     await writeFile(join(root, 'secrets.json'), persisted)
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
@@ -2180,9 +2180,64 @@ describe('start (composition)', () => {
     }
   })
 
+  test('stays silent when a GitHub CLI refresh fails for an agent that never had a persisted store', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'secrets.json'), '{"version":2,"channels":{}}\n')
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const warnings: string[] = []
+
+    try {
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        streamOutput: false,
+        onWarning: (warning) => warnings.push(warning),
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: noAutoUpgrade,
+        ...bypassVerify,
+        provisionGithubCliStore: () => ({ ok: false, reason: 'sensitive-command-output' }),
+      })
+
+      expect(result.ok).toBe(true)
+      expect(warnings).toEqual([])
+      expect(stderr).not.toHaveBeenCalled()
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+
+  test('warns when a GitHub CLI refresh fails and secrets.json cannot be read at all', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'secrets.json'), 'not json\n')
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    const warnings: string[] = []
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      streamOutput: false,
+      onWarning: (warning) => warnings.push(warning),
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      provisionGithubCliStore: () => ({ ok: false, reason: 'sensitive-command-output' }),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(warnings).toEqual([expect.stringContaining('Could not refresh GitHub CLI credentials')])
+  })
+
   test('returns warnings instead of writing them while a parent renderer owns the terminal', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'secrets.json'), '{"version":2,"githubCli":{"hosts":"existing-good-store"}}\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
     const warnings: string[] = []
