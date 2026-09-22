@@ -1,3 +1,4 @@
+import type { DockerExec } from '@/container'
 import { findAgentDir } from '@/init'
 import type { DoctorCheckPayload } from '@/shared'
 
@@ -38,6 +39,10 @@ export type RunDoctorOptions = {
   cwd?: string
   only?: string[]
   fix?: boolean
+  // Docker executor used by BOTH the static checks and plugin discovery, so a
+  // test can drive the whole command against one wedged daemon and prove the
+  // real sequencing terminates — not just each half in isolation.
+  dockerExec?: DockerExec
   staticChecks?: DoctorCheck[]
   fetchPluginChecks?: PluginBridgeFetchChecks
   fetchPluginFix?: PluginBridgeFetchFix
@@ -49,10 +54,17 @@ export async function runDoctor(opts: RunDoctorOptions = {}): Promise<DoctorRunR
   const hasAgentFolder = findAgentDir(cwd) === cwd
   const ctx: CheckContext = { cwd, hasAgentFolder }
 
-  const staticChecks = (opts.staticChecks ?? buildStaticChecks()).filter((c) => isAllowed(c, opts.only, c.category))
+  const staticChecks = (
+    opts.staticChecks ?? buildStaticChecks(opts.dockerExec === undefined ? {} : { dockerExec: opts.dockerExec })
+  ).filter((c) => isAllowed(c, opts.only, c.category))
   const staticResults = await runStaticChecks(staticChecks, ctx)
 
-  const fetchPluginChecks = opts.fetchPluginChecks ?? defaultFetchPluginDoctorChecks
+  const fetchPluginChecks =
+    opts.fetchPluginChecks ??
+    ((bridgeOpts) =>
+      defaultFetchPluginDoctorChecks(
+        opts.dockerExec === undefined ? bridgeOpts : { ...bridgeOpts, exec: opts.dockerExec },
+      ))
   const pluginResults = await collectPluginChecks(fetchPluginChecks, ctx, opts.only)
 
   const initial = buildReport(ctx, staticResults, pluginResults)

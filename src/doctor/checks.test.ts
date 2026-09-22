@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { loadConfigSync } from '@/config'
+import type { DockerExec } from '@/container'
 import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -18,6 +19,8 @@ import {
   type WindowsSecretPermsDeps,
   type WslDriveMountDeps,
 } from './checks'
+import { runDoctor } from './index'
+import { fetchPluginDoctorChecks } from './plugin-bridge'
 import type { CheckContext } from './types'
 
 const agentCtx: CheckContext = { cwd: '/mnt/c/work/agent', hasAgentFolder: true }
@@ -237,4 +240,82 @@ describe('agent file ownership checks', () => {
     // then
     expect(result.status).toBe('ok')
   })
+})
+
+describe('doctor terminates against an unresponsive Docker daemon', () => {
+  // The incident this guards: a Docker VM in an OOM livelock accepts every
+  // connection and answers none. `doctor` is the command an operator reaches
+  // for at exactly that moment, so no check may block on it indefinitely.
+  // The daemon answers the availability probe and wedges immediately after, so
+  // gating on that probe is necessary but NOT sufficient — every later call has
+  // to carry its own deadline or the check blocks forever.
+  const wedgedCalls: string[] = []
+  const wedgesAfterInfo: DockerExec = (args, options) => {
+    wedgedCalls.push(args[0] ?? '')
+    if (args[0] === 'info') return Promise.resolve({ exitCode: 0, stdout: '29.4.0\n', stderr: '' })
+    return new Promise((resolve, reject) => {
+      const signal = options?.signal
+      if (signal === undefined) {
+        // An unbounded call would hang forever in production. Fail fast and
+        // loudly here instead of stalling the suite.
+        setTimeout(() => reject(new Error(`unbounded docker call: ${args.join(' ')}`)), 2_000).unref?.()
+        return
+      }
+      if (signal.aborted) {
+        resolve({ exitCode: -1, stdout: '', stderr: '' })
+        return
+      }
+      signal.addEventListener('abort', () => resolve({ exitCode: -1, stdout: '', stderr: '' }), { once: true })
+    })
+  }
+
+  test('every docker-touching check settles instead of blocking forever', async () => {
+    // given a daemon that accepts and never answers
+    const checks = buildStaticChecks({ dockerExec: wedgesAfterInfo }).filter(
+      (check) => check.category === 'docker' || check.category === 'container',
+    )
+    expect(checks.length).toBeGreaterThan(0)
+
+    // when every docker-touching check runs against it
+    const ctx = { cwd: process.cwd(), hasAgentFolder: true }
+    const results = await Promise.all(checks.map(async (check) => await check.run(ctx)))
+
+    // then all of them return a verdict rather than hanging
+    expect(results).toHaveLength(checks.length)
+    for (const result of results) {
+      expect(typeof result.status).toBe('string')
+    }
+  }, 30_000)
+
+  test('runDoctor itself terminates, sequencing static checks then plugin discovery', async () => {
+    // given the wedged daemon driven through runDoctor's REAL wiring — the
+    // earlier tests exercise each half in isolation, which is what let the
+    // unbounded discovery path survive a round of review
+    wedgedCalls.length = 0
+    const agentDir = mkdtempSync(join(tmpdir(), 'typeclaw-doctor-wedged-'))
+    writeFileSync(join(agentDir, 'typeclaw.json'), JSON.stringify({ models: { default: 'x/y' } }))
+    const result = await runDoctor({ cwd: agentDir, dockerExec: wedgesAfterInfo })
+
+    // then the whole command produces a report instead of hanging, the seam
+    // actually reached Docker (otherwise this proves nothing), and nothing in
+    // the report tripped the unbounded-call wire
+    expect(result.initial).toBeDefined()
+    expect(wedgedCalls.length).toBeGreaterThan(0)
+    expect(JSON.stringify(result.initial)).not.toContain('unbounded docker call')
+  }, 60_000)
+
+  test('plugin discovery is bounded too, so the full doctor run terminates', async () => {
+    // given the same wedged daemon. Plugin discovery runs AFTER the static
+    // checks, so it is the last place the command can still hang — and it
+    // resolves the host port and TUI token through Docker to find the bridge.
+    const result = await fetchPluginDoctorChecks({ cwd: process.cwd(), exec: wedgesAfterInfo, timeoutMs: 1_000 })
+
+    // then it reports unreachable instead of blocking forever. `unreachable`
+    // alone is too weak an assertion — dial() reports that for ANY failure,
+    // including the fixture's own unbounded-call tripwire — so the reason must
+    // show the call was actually deadlined rather than left to hang.
+    expect(result.kind).toBe('unreachable')
+    const reason = result.kind === 'unreachable' ? result.reason : ''
+    expect(reason).not.toContain('unbounded docker call')
+  }, 30_000)
 })
