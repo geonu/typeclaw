@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-import type { AuthInteraction } from '@earendil-works/pi-ai'
+import type { AuthInteraction, AuthPrompt } from '@earendil-works/pi-ai'
 import { ModelRuntime } from '@earendil-works/pi-coding-agent'
 
 import {
@@ -17,13 +17,14 @@ export type OAuthLoginResult = { ok: true } | { ok: false; reason: string }
 export type OAuthLoginRunner = (options: { cwd: string; model: ModelRef | string }) => Promise<OAuthLoginResult>
 
 // Wrap pi-ai's OAuth callbacks so the CLI doesn't have to know about the
-// upstream callback shape. The CLI sees four lifecycle events:
+// upstream callback shape. The CLI sees five lifecycle events:
 // (1) onAuth(url) — print the URL the user must visit
 // (2) onProgress(message) — show waiting/finalizing status
-// (3) onPrompt(prompt) — ask the user for a manual code if the browser flow
+// (3) onSelect(message, options) — choose a provider-defined option by ID
+// (4) onPrompt(prompt) — ask the user for a manual code if the browser flow
 //     can't reach the local callback server. Fires only after the local
 //     server gave up (bind error -> waitForCode resolves null).
-// (4) onManualCodeInput() — concurrent paste input that RACES the local
+// (5) onManualCodeInput() — concurrent paste input that RACES the local
 //     callback server. Required for cross-device flows: pi-ai's openai-codex
 //     OAuth hardcodes redirect_uri=http://localhost:1455/auth/callback, which
 //     resolves to the *browser's* machine. When the user runs `typeclaw init`
@@ -35,10 +36,13 @@ export type OAuthLoginRunner = (options: { cwd: string; model: ModelRef | string
 //     code first wins. parseAuthorizationInput on the upstream side accepts
 //     the full redirect URL, the bare `code=...&state=...` query string, or
 //     just the code value.
+export type OAuthSelectOption = Extract<AuthPrompt, { type: 'select' }>['options'][number]
+
 export type OAuthCallbacks = {
   onAuth: (url: string, instructions?: string) => void
   onProgress?: (message: string) => void
   onPrompt: (message: string, placeholder?: string) => Promise<string | null>
+  onSelect: (message: string, options: readonly OAuthSelectOption[]) => Promise<OAuthSelectOption['id'] | null>
   onManualCodeInput?: () => Promise<string>
 }
 
@@ -79,12 +83,23 @@ export function createOAuthInteraction(callbacks: OAuthCallbacks): AuthInteracti
       else if (event.type === 'device_code') callbacks.onAuth(event.verificationUri, `Enter code ${event.userCode}`)
     },
     prompt: async (prompt) => {
+      if (prompt.type === 'select') {
+        const value = await callbacks.onSelect(prompt.message, prompt.options)
+        // pi-ai 0.87 requires select prompts to resolve with an option ID
+        // (dist/auth/types.d.ts:153-155); reject stale/corrupt UI values as cancellation.
+        if (value === null || !prompt.options.some((option) => option.id === value)) {
+          throw new Error('Login cancelled by user')
+        }
+        return value
+      }
       if (prompt.type === 'manual_code' && callbacks.onManualCodeInput) return callbacks.onManualCodeInput()
-      const placeholder =
-        prompt.type === 'select' ? prompt.options.map((option) => option.label).join(', ') : prompt.placeholder
-      const value = await callbacks.onPrompt(prompt.message, placeholder)
-      if (value === null) throw new Error('Login cancelled by user')
-      return value
+      if (prompt.type === 'text' || prompt.type === 'secret' || prompt.type === 'manual_code') {
+        const value = await callbacks.onPrompt(prompt.message, prompt.placeholder)
+        if (value === null) throw new Error('Login cancelled by user')
+        return value
+      }
+      const unknownPrompt: never = prompt
+      throw new Error(`Unsupported OAuth prompt type: ${unknownPrompt}`)
     },
   }
 }

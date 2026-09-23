@@ -1,14 +1,15 @@
-import { isCancel, log, note, text } from '@clack/prompts'
+import { isCancel, log, note, select, text } from '@clack/prompts'
 
 import type { OAuthCallbacks } from '@/init/oauth-login'
 
 // Shared between `typeclaw init` (src/cli/init.ts) and `typeclaw provider
 // add/set` (src/cli/provider.ts). Both call into the same OAuth runner, so
 // they need to render the same UX: a note() box with the URL + cross-device
-// guidance, a `text()` prompt for the post-callback manual fallback, and a
-// concurrent `onManualCodeInput` prompt for users whose browser is on a
-// different host than the CLI. See src/init/oauth-login.ts for the contract
-// on each callback and why onManualCodeInput is required for cross-device.
+// guidance, a select() prompt for provider-defined choices, a text() prompt
+// for the post-callback manual fallback, and a concurrent onManualCodeInput
+// prompt for users whose browser is on a different host than the CLI. See
+// src/init/oauth-login.ts for the contract on each callback and why
+// onManualCodeInput is required for cross-device.
 //
 // Returns `{ callbacks, dispose }` rather than bare callbacks because of a
 // pi-ai contract gap: pi-ai races `onManualCodeInput()` against the local
@@ -61,6 +62,19 @@ export function buildOAuthCallbacks(providerName: string): OAuthCallbackHandle {
           message,
           signal,
           ...(placeholder !== undefined ? { placeholder } : {}),
+        })
+        if (isCancel(value)) return null
+        return value
+      },
+      onSelect: async (message, options) => {
+        const value = await select({
+          message,
+          options: options.map((option) => ({
+            value: option.id,
+            label: option.label,
+            hint: option.description,
+          })),
+          signal,
         })
         if (isCancel(value)) return null
         return value

@@ -23,20 +23,69 @@ describe('OAuth login runner', () => {
   })
 
   test('rejects an API-key-only provider before login', async () => {
-    const result = await makeOAuthLoginRunner({ onAuth: () => {}, onPrompt: async () => null })({
+    const result = await makeOAuthLoginRunner({
+      onAuth: () => {},
+      onPrompt: async () => null,
+      onSelect: async () => null,
+    })({
       cwd: root,
       model: 'openai/gpt-5.4-nano',
     })
     expect(result).toEqual({ ok: false, reason: expect.stringContaining('does not support OAuth') })
   })
+  test('returns the selected OpenAI Codex login method ID to pi-ai', async () => {
+    const options = [
+      { id: 'browser', label: 'Browser login (default)' },
+      { id: 'device_code', label: 'Device code login (headless)' },
+    ] as const
+
+    for (const expected of ['browser', 'device_code']) {
+      const interaction = createOAuthInteraction({
+        onAuth: () => {},
+        onPrompt: async () => {
+          throw new Error('select prompts must not use the text callback')
+        },
+        onSelect: async (_message, receivedOptions) => {
+          expect(receivedOptions).toEqual(options)
+          return expected
+        },
+      })
+
+      expect(await interaction.prompt({ type: 'select', message: 'Choose a method', options })).toBe(expected)
+    }
+  })
+
+  test('cancels login when the selection is cancelled or does not match an option ID', async () => {
+    const options = [{ id: 'browser', label: 'Browser login (default)' }] as const
+
+    for (const selected of [null, 'unknown-method']) {
+      const interaction = createOAuthInteraction({
+        onAuth: () => {},
+        onPrompt: async () => {
+          throw new Error('select prompts must not use the text callback')
+        },
+        onSelect: async () => selected,
+      })
+
+      await expect(interaction.prompt({ type: 'select', message: 'Choose a method', options })).rejects.toThrow(
+        'Login cancelled by user',
+      )
+    }
+  })
+
   test('forwards manual-code input only when provided', async () => {
     const supplied = createOAuthInteraction({
       onAuth: () => {},
       onPrompt: async () => 'fallback',
+      onSelect: async () => 'browser',
       onManualCodeInput: async () => 'manual',
     })
     expect(await supplied.prompt({ type: 'manual_code', message: 'paste' })).toBe('manual')
-    const absent = createOAuthInteraction({ onAuth: () => {}, onPrompt: async () => 'fallback' })
+    const absent = createOAuthInteraction({
+      onAuth: () => {},
+      onPrompt: async () => 'fallback',
+      onSelect: async () => 'browser',
+    })
     expect(await absent.prompt({ type: 'manual_code', message: 'paste' })).toBe('fallback')
   })
 
