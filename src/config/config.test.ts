@@ -321,6 +321,18 @@ describe('resolveModel', () => {
     })
   })
 
+  // pi's Fable 5 catalog entry carries allowedFallbackModels, which the
+  // Anthropic transport sends as server-side `fallbacks` (a different model
+  // served and billed). A dated alias takes catalog compat, so it must not
+  // inherit that list either.
+  test('never sends server-side fallbacks for a dated Fable alias', async () => {
+    expect(getBuiltinModel('anthropic', 'claude-fable-5').compat).toHaveProperty('allowedFallbackModels')
+    const fable = resolveModel('anthropic/claude-fable-5-20260801') as Model<'anthropic-messages'>
+    expect(fable.compat).not.toHaveProperty('allowedFallbackModels')
+    const payload = await captureAnthropicPayload(fable, 'high')
+    expect(payload).not.toHaveProperty('fallbacks')
+  })
+
   test('customModels metadata overrides catalog defaults for dated custom refs', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-resolve-model-'))
     try {
