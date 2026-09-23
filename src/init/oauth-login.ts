@@ -1,5 +1,8 @@
 import { join } from 'node:path'
 
+import type { AuthInteraction } from '@earendil-works/pi-ai'
+import { ModelRuntime } from '@earendil-works/pi-coding-agent'
+
 import {
   KNOWN_PROVIDERS,
   providerForModelRef,
@@ -52,23 +55,37 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
     }
 
     try {
-      const secrets = createSecretsStoreForAgent(join(cwd, 'secrets.json'))
-      await secrets.login(provider.oauthProviderId, {
-        onAuth: (info) => callbacks.onAuth(info.url, info.instructions),
-        onProgress: callbacks.onProgress,
-        onPrompt: async (prompt) => {
-          const value = await callbacks.onPrompt(prompt.message, prompt.placeholder)
-          if (value === null) {
-            throw new Error('Login cancelled by user')
-          }
-          return value
-        },
-        onManualCodeInput: callbacks.onManualCodeInput,
+      const modelRuntime = await ModelRuntime.create({
+        credentials: createSecretsStoreForAgent(join(cwd, 'secrets.json')),
+        modelsPath: null,
+        refreshOnCreate: false,
       })
+      await modelRuntime.login(provider.oauthProviderId, 'oauth', createOAuthInteraction(callbacks))
       return { ok: true }
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
+  }
+}
+
+// Isolate the pi 0.87 AuthInteraction adaptation so manual-code prompt
+// cancellation and callback forwarding remain behavior-testable without a
+// live provider login.
+export function createOAuthInteraction(callbacks: OAuthCallbacks): AuthInteraction {
+  return {
+    notify: (event) => {
+      if (event.type === 'auth_url') callbacks.onAuth(event.url, event.instructions)
+      else if (event.type === 'progress') callbacks.onProgress?.(event.message)
+      else if (event.type === 'device_code') callbacks.onAuth(event.verificationUri, `Enter code ${event.userCode}`)
+    },
+    prompt: async (prompt) => {
+      if (prompt.type === 'manual_code' && callbacks.onManualCodeInput) return callbacks.onManualCodeInput()
+      const placeholder =
+        prompt.type === 'select' ? prompt.options.map((option) => option.label).join(', ') : prompt.placeholder
+      const value = await callbacks.onPrompt(prompt.message, placeholder)
+      if (value === null) throw new Error('Login cancelled by user')
+      return value
+    },
   }
 }
 

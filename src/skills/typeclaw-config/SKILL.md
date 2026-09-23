@@ -435,8 +435,8 @@ Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if th
 
 **Model boundary:** this section documents operator-owned state; it is not an editing runbook for the agent. Model-driven tools must never read, create, modify, validate, or delete `.env`, `secrets.json`, or `auth.json`, even when the user supplies a value or an acknowledgement flag. Tell the operator to use the TypeClaw host-stage init/provider/channel commands and restart the container. Do not ask them to paste credentials into chat.
 
-- **`./secrets.json`** (canonical structured store): a `v2` envelope managed by `SecretsBackend` (wraps `pi-coding-agent`'s `AuthStorage`). Written by `typeclaw init`, the OAuth refresh path, and explicit user-driven rotation. Two top-level slices:
-  - `providers.*` — per-provider credentials. API-key providers store `{ type: 'api_key', key: <Secret> }`. OAuth providers store the `pi-coding-agent` token blob `{ type: 'oauth', access_token, refresh_token, expires_at, ... }`. The container auto-refreshes OAuth tokens with file locking; api-key writes only happen on explicit user-driven rotation.
+- **`./secrets.json`** (canonical structured store): a `v2` envelope managed by `SecretsBackend`, pi-ai's `CredentialStore` for `ModelRuntime`. Written by host-stage `typeclaw init`, container-stage OAuth refresh, and explicit user-driven rotation. Two top-level slices:
+  - `providers.*` — per-provider credentials. API-key providers store `{ type: 'api_key', key: <Secret> }`. OAuth providers store the pi-ai token record `{ type: 'oauth', access, refresh, expires, ... }`. The container auto-refreshes OAuth tokens under the file lock; api-key writes only happen on explicit user-driven rotation.
   - `channels.*` — per-adapter credentials, with named fields per adapter:
     - `discord-bot: { token: <Secret> }`
     - `slack-bot: { botToken: <Secret>, appToken: <Secret> }`

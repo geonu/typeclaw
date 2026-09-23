@@ -4,14 +4,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { defineTool as definePiTool, SessionManager } from '@mariozechner/pi-coding-agent'
+import { defineTool as definePiTool, SessionManager } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
 import { PLANNER_SYSTEM_PROMPT } from '@/bundled-plugins/planner/planner'
 import { SCOUT_SYSTEM_PROMPT } from '@/bundled-plugins/scout/scout'
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
-import { configSchema, type Models, resolveProfile, type ResolvedProfile, type ThinkingLevel } from '@/config'
+import { configSchema, type Models, resolveProfile, type ResolvedProfile } from '@/config'
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { ModelRef } from '@/config/providers'
 import { createHookBus, type PluginRegistry } from '@/plugin'
@@ -1704,7 +1704,7 @@ describe('resolveSessionThinkingLevel', () => {
   // Drive resolution through `resolveProfile` so the built-in per-profile
   // defaults materialized at config-parse time are exercised end-to-end, the
   // way a real session is created.
-  const resolveLevel = (models: Models, profile: string): ThinkingLevel | undefined =>
+  const resolveLevel = (models: Models, profile: string) =>
     resolveSessionThinkingLevel(models, resolveProfile(models, profile), REF)
 
   test('the profile`s own level wins over the default profile`s', () => {

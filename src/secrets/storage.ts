@@ -1,16 +1,11 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-import {
-  type AuthStorage,
-  type AuthStorageBackend,
-  AuthStorage as AuthStorageImpl,
-} from '@mariozechner/pi-coding-agent'
+import type { Credential, CredentialInfo, CredentialStore } from '@earendil-works/pi-ai'
 import lockfile from 'proper-lockfile'
 
 import { providerKeyDefaultEnv } from './defaults'
-import { registerXaiOAuthProvider } from './oauth-xai'
-import { resolveSecret, type Secret } from './resolve'
+import { resolveSecret } from './resolve'
 import {
   type Channels,
   type GithubCliSecrets,
@@ -35,108 +30,69 @@ const ASYNC_LOCK_OPTIONS = {
   stale: 30000,
 } as const
 
-// SecretsBackend bridges TypeClaw's on-disk envelope (v2: providers with
-// Secret-typed keys, channels with per-adapter field shapes) to upstream
-// `AuthStorage`'s flat `Record<provider, AuthCredential>` contract.
-//
-// READ (withLock's `current` parameter):
-//   - Parse the envelope, walk `providers`, resolve each api-key `Secret` to
-//     a flat string via env-wins (process.env wins over file value).
-//   - OAuth credentials pass through untouched.
-//   - Capture the resolved string for each provider into `readSnapshot` so
-//     the write path can detect "unchanged" without re-resolving (the env
-//     can change between read and write, and re-resolving would misclassify
-//     env mutations as credential mutations).
-//   - Hand AuthStorage a flat-shape JSON string. Upstream is none the wiser.
-//
-// WRITE (the `next` field):
-//   - AuthStorage hands back the full flat slice as JSON. We do NOT
-//     wholesale-replace the on-disk `providers` slice with this.
-//   - Instead, we DIFF at credential level against the prior envelope using
-//     the read-time `readSnapshot`:
-//       * Provider unchanged (flatKey === readSnapshot[providerId]) → preserve
-//         on-disk Secret bytes verbatim (no flatten, no rewrap). This is the
-//         idempotency rule that prevents OAuth-refresh from accidentally
-//         persisting env-resolved api-key values into the file.
-//       * Provider changed → rewrap as Secret, preserving any prior `env`
-//         field the user authored.
-//       * Provider added → write as string shorthand (no env binding).
-//       * Provider removed → actually remove (do NOT resurrect).
-//   - OAuth credentials stay flat strings in the envelope (no Secret
-//     wrapping) — they're not env-injectable.
-//   - Unknown credential `type` values pass through verbatim, in case
-//     upstream adds a third type in a future release.
-//   - Empty/missing `key` from AuthStorage on api-key is treated as no-op
-//     (preserve prior on-disk Secret if any). The schema requires non-empty
-//     `value`, so writing an empty key would corrupt the file at next read.
-//
-// Locking and durability mirror upstream's FileAuthStorageBackend: sync
-// busy-loop retry on ELOCKED to keep callers synchronous, 0o600 file, 0o700
-// parent, atomic temp+rename.
-export class SecretsBackend implements AuthStorageBackend {
+// CredentialStore is pi 0.87's provider write boundary. Its modify callback
+// runs under this file lock, so refresh and login remain serialized per
+// provider across processes while non-provider envelope slices stay intact.
+export class SecretsBackend implements CredentialStore {
   constructor(private readonly secretsPath: string) {}
 
-  withLock<T>(fn: (current: string | undefined) => { result: T; next?: string }): T {
-    this.ensureParentDir()
-    this.ensureFileExists()
-    let release: (() => void) | undefined
-    try {
-      release = this.acquireSyncLockWithRetry()
-      const envelope = this.readEnvelope()
-      const { flatJson, readSnapshot } = flattenProvidersForAuthStorage(envelope.providers, process.env)
-
-      const { result, next } = fn(flatJson)
-      if (next !== undefined) {
-        const merged = mergeProvidersIntoEnvelope(envelope, next, readSnapshot)
-        this.writeEnvelopeAtomic(merged)
-      }
-      return result
-    } finally {
-      release?.()
-    }
+  async read(providerId: string): Promise<Credential | undefined> {
+    if (!existsSync(this.secretsPath)) return undefined
+    return this.withProviderLock(() => toPiCredential(this.readEnvelope().providers[providerId], process.env))
   }
 
-  async withLockAsync<T>(fn: (current: string | undefined) => Promise<{ result: T; next?: string }>): Promise<T> {
+  async list(): Promise<readonly CredentialInfo[]> {
+    if (!existsSync(this.secretsPath)) return []
+    return this.withProviderLock(() =>
+      Object.entries(this.readEnvelope().providers)
+        .filter(([, credential]) => credential.type === 'api_key' || credential.type === 'oauth')
+        .map(([providerId, credential]) => ({ providerId, type: credential.type })),
+    )
+  }
+
+  async modify(
+    providerId: string,
+    fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+  ): Promise<Credential | undefined> {
     this.ensureParentDir()
     this.ensureFileExists()
     let release: (() => Promise<void>) | undefined
-    let lockCompromised = false
-    let lockCompromisedError: Error | undefined
-    const throwIfCompromised = (): void => {
-      if (lockCompromised) {
-        throw lockCompromisedError ?? new Error('Secrets store lock was compromised')
-      }
-    }
     try {
-      release = await lockfile.lock(this.secretsPath, {
-        ...ASYNC_LOCK_OPTIONS,
-        onCompromised: (err: Error) => {
-          lockCompromised = true
-          lockCompromisedError = err
-        },
-      })
-      throwIfCompromised()
+      release = await lockfile.lock(this.secretsPath, ASYNC_LOCK_OPTIONS)
       const envelope = this.readEnvelope()
-      const { flatJson, readSnapshot } = flattenProvidersForAuthStorage(envelope.providers, process.env)
-
-      const { result, next } = await fn(flatJson)
-      throwIfCompromised()
-      if (next !== undefined) {
-        const merged = mergeProvidersIntoEnvelope(envelope, next, readSnapshot)
-        this.writeEnvelopeAtomic(merged)
-      }
-      throwIfCompromised()
-      return result
+      const prior = envelope.providers[providerId]
+      const next = await fn(toPiCredential(prior, process.env))
+      if (next === undefined) return toPiCredential(prior, process.env)
+      const credential = fromPiCredential(next, prior, providerId, process.env)
+      this.writeEnvelopeAtomic({
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        providers: { ...envelope.providers, [providerId]: credential },
+      })
+      return toPiCredential(credential, process.env)
     } finally {
-      if (release) {
-        try {
-          await release()
-        } catch {
-          // Ignore unlock errors when the lock is compromised — there is
-          // nothing useful we can do, and surfacing the secondary error would
-          // mask the primary failure (mirrors upstream behaviour).
-        }
-      }
+      await release?.()
+    }
+  }
+
+  async delete(providerId: string): Promise<void> {
+    if (!existsSync(this.secretsPath)) return
+    await this.withProviderLock(() => {
+      const envelope = this.readEnvelope()
+      if (!(providerId in envelope.providers)) return
+      const { [providerId]: _removed, ...providers } = envelope.providers
+      this.writeEnvelopeAtomic({ ...envelope, providers })
+    })
+  }
+
+  private async withProviderLock<T>(fn: () => T): Promise<T> {
+    let release: (() => Promise<void>) | undefined
+    try {
+      release = await lockfile.lock(this.secretsPath, ASYNC_LOCK_OPTIONS)
+      return fn()
+    } finally {
+      await release?.()
     }
   }
 
@@ -177,12 +133,9 @@ export class SecretsBackend implements AuthStorageBackend {
       release?.()
     }
   }
-
-  // Returns a shallow snapshot of the `providers` slice. Used by post-init CLI
-  // commands (`typeclaw provider list/remove`, `typeclaw model list`) that need
-  // to inspect what's on disk without forcing AuthStorage's env-wins flatten —
-  // we want to show users which providers are file-backed vs env-overridden,
-  // and the flatten path collapses that distinction.
+  // Returns a shallow snapshot of providers for host-stage CLI inspection
+  // without resolving env overrides, so file-backed versus env-backed state
+  // remains visible to the operator.
   tryReadProvidersSync(): Providers {
     if (!existsSync(this.secretsPath)) return {}
     let release: (() => void) | undefined
@@ -328,13 +281,8 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
-  // Atomic provider credential write. Idempotent at the type level: callers
-  // pass the full `ProviderCredential` (api_key or oauth), and the entry is
-  // merged into `providers.<id>` verbatim — same shape the schema accepts on
-  // read. Used by `typeclaw provider add/set` to write api-key credentials
-  // without going through AuthStorage's flatten/unflatten round-trip.
-  // OAuth flows MUST continue to go through `AuthStorage.login()` so refresh
-  // tokens land in the correct shape; this method is api-key oriented.
+  // Host-stage CLI API-key write. OAuth login and refresh use CredentialStore
+  // through ModelRuntime so rotating token state remains serialized.
   writeProviderCredentialSync(providerId: string, credential: ProviderCredential): void {
     this.ensureParentDir()
     this.ensureFileExists()
@@ -538,9 +486,8 @@ export class SecretsBackend implements AuthStorageBackend {
   }
 }
 
-export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
-  registerXaiOAuthProvider()
-  return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
+export function createSecretsStoreForAgent(secretsPath: string): SecretsBackend {
+  return new SecretsBackend(secretsPath)
 }
 
 function newEmptyEnvelope(): SecretsFile {
@@ -551,134 +498,35 @@ function stringifyEnvelope(envelope: SecretsFile): string {
   return `${JSON.stringify(envelope, null, 2)}\n`
 }
 
-type ReadSnapshot = Map<string, string>
-
-// Build the flat shape AuthStorage expects, resolving Secret-typed api-key
-// keys to plain strings on the way out. Also capture each resolved api-key
-// value into a snapshot keyed by providerId; the write path uses this
-// snapshot (NOT a re-resolution against current process.env) to detect
-// untouched providers. OAuth and unknown types are passed through verbatim
-// and never enter the snapshot — they don't participate in env-wins.
-function flattenProvidersForAuthStorage(
-  providers: Providers,
+// Preserve an untouched API-key Secret object byte-for-byte. Only an explicit
+// non-empty credential mutation rewrites value while retaining an authored env
+// binding; empty keys remain a no-op because v2 forbids empty Secret values.
+function fromPiCredential(
+  next: Credential,
+  prior: ProviderCredential | undefined,
+  providerId: string,
   env: NodeJS.ProcessEnv,
-): { flatJson: string; readSnapshot: ReadSnapshot } {
-  const flat: Record<string, unknown> = {}
-  const readSnapshot: ReadSnapshot = new Map()
-  for (const [providerId, cred] of Object.entries(providers)) {
-    if (cred.type === 'api_key') {
-      const defaultEnv = providerKeyDefaultEnv(providerId)
-      const resolved = resolveSecret(cred.key, defaultEnv, env) ?? cred.key.value ?? ''
-      flat[providerId] = { type: 'api_key', key: resolved }
-      readSnapshot.set(providerId, resolved)
-    } else {
-      flat[providerId] = cred
-    }
+): ProviderCredential {
+  if (next.type === 'oauth') return next as ProviderCredential
+  if (!next.key) {
+    if (prior) return prior
+    throw new Error('Cannot persist an empty API key')
   }
-  return { flatJson: JSON.stringify(flat, null, 2), readSnapshot }
-}
-
-// Diff-and-preserve merge per the bridge idempotency rule. AuthStorage hands
-// back the full flat provider slice; we walk it credential-by-credential and
-// decide for each provider whether to:
-//   - preserve the prior on-disk Secret bytes verbatim (untouched provider,
-//     detected by comparing AuthStorage's flat value to the read-time
-//     snapshot, NOT a re-resolution against current env),
-//   - reconstruct as Secret with prior `env` preserved (api-key value changed),
-//   - write as new shape (provider added),
-// and we drop providers that disappeared from the flat slice (real removal).
-function mergeProvidersIntoEnvelope(
-  envelope: SecretsFile,
-  nextProvidersJson: string,
-  readSnapshot: ReadSnapshot,
-): SecretsFile {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(nextProvidersJson)
-  } catch (err) {
-    throw new Error(
-      `AuthStorage produced invalid JSON for the providers slice: ${err instanceof Error ? err.message : String(err)}`,
-    )
+  if (
+    prior?.type === 'api_key' &&
+    (resolveSecret(prior.key, providerKeyDefaultEnv(providerId), env) ?? prior.key.value) === next.key
+  ) {
+    return prior
   }
-  if (!isPlainObject(parsed)) {
-    throw new Error('AuthStorage produced a non-object providers slice')
-  }
-
-  const nextProviders: Providers = {}
-  for (const [providerId, raw] of Object.entries(parsed)) {
-    const reconstructed = reconstructProviderCredential(
-      raw,
-      envelope.providers[providerId],
-      readSnapshot.get(providerId),
-    )
-    if (reconstructed !== undefined) {
-      nextProviders[providerId] = reconstructed
-    }
-  }
-
   return {
-    ...envelope,
-    $schema: envelope.$schema ?? SCHEMA_REL,
-    version: SECRETS_FILE_VERSION,
-    providers: nextProviders,
+    type: 'api_key',
+    key: prior?.type === 'api_key' && prior.key.env ? { value: next.key, env: prior.key.env } : { value: next.key },
   }
 }
 
-function reconstructProviderCredential(
-  raw: unknown,
-  priorOnDisk: ProviderCredential | undefined,
-  resolvedAtRead: string | undefined,
-): ProviderCredential | undefined {
-  if (!isPlainObject(raw)) return undefined
-  const type = raw['type']
-
-  if (type === 'api_key') {
-    const flatKey = typeof raw['key'] === 'string' ? raw['key'] : ''
-
-    // Empty/missing key from AuthStorage on an api-key credential cannot
-    // round-trip: the schema requires `value` to be non-empty, so writing
-    // `{ value: '' }` would make the file unparseable on next read. Treat
-    // it as "no-op" and preserve the prior on-disk Secret if any. A real
-    // deletion comes through as the provider being absent from `next`,
-    // which is handled by the caller dropping it.
-    if (flatKey === '') {
-      if (priorOnDisk !== undefined) return priorOnDisk
-      return undefined
-    }
-
-    // Idempotency: if AuthStorage's flat key matches the resolved value
-    // captured at read time, the credential is untouched. Preserve the
-    // on-disk Secret verbatim — including any `env` binding and any string
-    // shorthand the user authored. Comparing against the read-time snapshot
-    // (not a re-resolution against current process.env) is what makes this
-    // safe against env mutations between read and write.
-    if (priorOnDisk && priorOnDisk.type === 'api_key' && resolvedAtRead === flatKey) {
-      return priorOnDisk
-    }
-
-    // Mutation path: rewrap as Secret, preserving the user's `env` binding
-    // when prior was also an api-key so the next boot's env-wins still
-    // consults the right variable.
-    if (priorOnDisk && priorOnDisk.type === 'api_key' && priorOnDisk.key.env !== undefined) {
-      return { type: 'api_key', key: { value: flatKey, env: priorOnDisk.key.env } satisfies Secret }
-    }
-
-    return { type: 'api_key', key: { value: flatKey } }
-  }
-
-  if (type === 'oauth') {
-    // OAuth credentials are not env-injectable. Pass through verbatim,
-    // preserving every upstream-controlled field (access, refresh, expires,
-    // and any future additions covered by the catchall).
-    return raw as ProviderCredential
-  }
-
-  // Unknown credential type. Pass through verbatim as a defensive measure
-  // against upstream adding a third type in a future release. Better to
-  // round-trip user data than drop it.
-  return raw as ProviderCredential
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function toPiCredential(credential: ProviderCredential | undefined, env: NodeJS.ProcessEnv): Credential | undefined {
+  if (!credential) return undefined
+  if (credential.type === 'oauth') return credential as Credential
+  const key = resolveSecret(credential.key, undefined, env) ?? credential.key.value
+  return key ? { type: 'api_key', key } : undefined
 }

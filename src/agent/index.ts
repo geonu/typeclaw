@@ -7,8 +7,8 @@ import {
   DefaultResourceLoader,
   defineTool as definePiTool,
   SessionManager,
-} from '@mariozechner/pi-coding-agent'
-import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
+} from '@earendil-works/pi-coding-agent'
+import type { AgentSession, ToolDefinition } from '@earendil-works/pi-coding-agent'
 
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
@@ -39,7 +39,6 @@ import type { ReloadRegistry } from '@/reload'
 import { resolveHiddenPaths } from '@/sandbox'
 import type { Stream } from '@/stream'
 
-import { applyAdaptiveThinkingCompat } from './adaptive-thinking-compat'
 import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
@@ -276,7 +275,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // `refOverride` lets the model-fallback helper pin a specific entry from
   // the chain when it recreates a session after the previous ref failed.
   const activeRef: ModelRef = options.refOverride ?? resolved.ref
-  const { authStorage, modelRegistry } = getAuthFor(providerForModelRef(activeRef))
+  // Provider auth owns both credentials and model resolution in Pi 0.87.
+  // Passing its ModelRuntime keeps every session request and compaction on the
+  // same configured provider runtime (sdk.d.ts:15-16; CHANGELOG 0.80.0).
+  const { modelRuntime } = await getAuthFor(providerForModelRef(activeRef))
   const sessionManager = options.sessionManager ?? SessionManager.inMemory()
 
   const materializedSkills =
@@ -353,7 +355,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     : undefined
   const sessionBudgetState = sessionBudget ? createBudgetState() : undefined
 
-  // The session's tool-name allowlist (pi 0.73 `tools:` is names, not tools).
+  // The session's tool-name allowlist is authoritative: with an explicit list,
+  // pi activates only listed builtins and custom tools (sdk.d.ts:35-47).
   // A subagent narrows to its declared refs; a non-subagent caller passes its
   // own explicit list (e.g. look-at's `[]`); everyone else leaves it undefined
   // so pi's default builtins apply. Implementations arrive via `customTools`;
@@ -514,10 +517,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const thinkingLevel = resolveSessionThinkingLevel(getConfig().models, resolved, activeRef)
   const { session } = await createAgentSession({
     model,
+    modelRuntime,
     sessionManager,
     settingsManager: createCompactionSettingsManager(model),
-    authStorage,
-    modelRegistry,
     resourceLoader,
     noTools: 'builtin',
     tools: intendedActiveToolNames,
@@ -531,7 +533,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // failed (and burning an unnecessary failover). Disabling it makes a soft error
   // a deterministic, typeclaw-owned signal. Compaction/context-overflow recovery
   // is independent (gated on compaction settings), so this does not disable those.
-  ;(session as { setAutoRetryEnabled?: (enabled: boolean) => void }).setAutoRetryEnabled?.(false)
+  session.setAutoRetryEnabled(false)
   const getAbortReason = () => abortHolder.reason
   const sessionWithAbortReason = Object.assign(session, { getAbortReason })
   const unsubLoopGuardTurn = attachLoopGuardTurnTracking(session.agent, () => {
@@ -552,13 +554,6 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       return converted
     }
   }
-
-  // Same seam, one hook later: layer the adaptive-thinking rewrite over pi's
-  // onPayload so Sonnet 5 / Fable 5 never receive the budget-based `thinking`
-  // payload the pinned pi-ai 0.73.x emits for them (a hard 400 — see
-  // adaptive-thinking-compat.ts). Covers every provider call path through the
-  // agent, including model switches mid-session.
-  applyAdaptiveThinkingCompat(session.agent)
 
   abortHolder.abort = (reason?: string) => {
     if (reason !== undefined) abortHolder.reason = reason

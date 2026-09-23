@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { Model } from '@mariozechner/pi-ai'
+import type { Model } from '@earendil-works/pi-ai'
 
 import {
   COMPACTION_ABSOLUTE_TRIGGER_TOKENS,

@@ -108,6 +108,11 @@ describe('configSchema models field', () => {
     expect(parsed.models.default).toEqual({ refs: modelRefList(VALID_MODEL), thinkingLevel: 'high' })
   })
 
+  test('accepts max as a per-profile thinkingLevel', () => {
+    const parsed = configSchema.parse({ models: { default: { model: VALID_MODEL_2, thinkingLevel: 'max' } } })
+    expect(parsed.models.default).toEqual({ refs: modelRefList(VALID_MODEL_2), thinkingLevel: 'max' })
+  })
+
   test('accepts a rich profile object with a models chain + thinkingLevel', () => {
     const parsed = configSchema.parse({
       models: { default: { models: [VALID_MODEL, VALID_MODEL_2], thinkingLevel: 'off' } },
@@ -250,10 +255,17 @@ describe('resolveModel', () => {
 
   // resolveModel templates an uncurated ref from its provider's first record.
   // Newer flagships must not change what older uncurated snapshots inherit.
-  test('does not give uncurated xai snapshots Grok 4.7 limits or effort opt-in', () => {
+  test("does not give uncurated xai snapshots Grok 4.7's limits", () => {
     const model = resolveModel('xai/grok-4.20-multi-agent-0309')
     expect(model.contextWindow).toBe(1000000)
-    expect(model.compat ?? {}).not.toHaveProperty('supportsReasoningEffort')
+    expect(model.maxTokens).toBeLessThan(KNOWN_PROVIDERS.xai.models['grok-4.7'].maxTokens)
+  })
+
+  test('uses the undated pi catalog metadata for a dated custom Sonnet 5 ref', () => {
+    const model = resolveModel('anthropic/claude-sonnet-5-20260701')
+    expect(model.api).toBe('anthropic-messages')
+    expect(model.compat).toMatchObject({ forceAdaptiveThinking: true })
+    expect(model.thinkingLevelMap).toEqual(KNOWN_PROVIDERS.anthropic.models['claude-sonnet-5'].thinkingLevelMap)
   })
 
   test('a formerly static OpenGateway ref still parses and resolves through the anchor transport', () => {

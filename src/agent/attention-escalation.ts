@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from '@mariozechner/pi-agent-core'
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 
 function normalize(text: string): string {
   return text
