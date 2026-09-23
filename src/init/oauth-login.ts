@@ -41,9 +41,14 @@ export type OAuthSelectOption = Extract<AuthPrompt, { type: 'select' }>['options
 export type OAuthCallbacks = {
   onAuth: (url: string, instructions?: string) => void
   onProgress?: (message: string) => void
-  onPrompt: (message: string, placeholder?: string) => Promise<string | null>
-  onSelect: (message: string, options: readonly OAuthSelectOption[]) => Promise<OAuthSelectOption['id'] | null>
-  onManualCodeInput?: () => Promise<string>
+  onPrompt: (message: string, placeholder?: string, signal?: AbortSignal) => Promise<string | null>
+  onSecret: (message: string, placeholder?: string, signal?: AbortSignal) => Promise<string | null>
+  onSelect: (
+    message: string,
+    options: readonly OAuthSelectOption[],
+    signal?: AbortSignal,
+  ) => Promise<OAuthSelectOption['id'] | null>
+  onManualCodeInput?: (signal?: AbortSignal) => Promise<string>
 }
 
 // Default runner: real OAuth flow against pi-ai. Tests inject a stub to skip
@@ -84,7 +89,7 @@ export function createOAuthInteraction(callbacks: OAuthCallbacks): AuthInteracti
     },
     prompt: async (prompt) => {
       if (prompt.type === 'select') {
-        const value = await callbacks.onSelect(prompt.message, prompt.options)
+        const value = await callbacks.onSelect(prompt.message, prompt.options, prompt.signal)
         // pi-ai 0.87 requires select prompts to resolve with an option ID
         // (dist/auth/types.d.ts:153-155); reject stale/corrupt UI values as cancellation.
         if (value === null || !prompt.options.some((option) => option.id === value)) {
@@ -92,9 +97,12 @@ export function createOAuthInteraction(callbacks: OAuthCallbacks): AuthInteracti
         }
         return value
       }
-      if (prompt.type === 'manual_code' && callbacks.onManualCodeInput) return callbacks.onManualCodeInput()
+      if (prompt.type === 'manual_code' && callbacks.onManualCodeInput) {
+        return await callbacks.onManualCodeInput(prompt.signal)
+      }
+      const callback = prompt.type === 'secret' ? callbacks.onSecret : callbacks.onPrompt
       if (prompt.type === 'text' || prompt.type === 'secret' || prompt.type === 'manual_code') {
-        const value = await callbacks.onPrompt(prompt.message, prompt.placeholder)
+        const value = await callback(prompt.message, prompt.placeholder, prompt.signal)
         if (value === null) throw new Error('Login cancelled by user')
         return value
       }

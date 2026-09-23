@@ -26,6 +26,7 @@ describe('OAuth login runner', () => {
     const result = await makeOAuthLoginRunner({
       onAuth: () => {},
       onPrompt: async () => null,
+      onSecret: async () => null,
       onSelect: async () => null,
     })({
       cwd: root,
@@ -44,6 +45,9 @@ describe('OAuth login runner', () => {
         onAuth: () => {},
         onPrompt: async () => {
           throw new Error('select prompts must not use the text callback')
+        },
+        onSecret: async () => {
+          throw new Error('select prompts must not use the secret callback')
         },
         onSelect: async (_message, receivedOptions) => {
           expect(receivedOptions).toEqual(options)
@@ -64,6 +68,9 @@ describe('OAuth login runner', () => {
         onPrompt: async () => {
           throw new Error('select prompts must not use the text callback')
         },
+        onSecret: async () => {
+          throw new Error('select prompts must not use the secret callback')
+        },
         onSelect: async () => selected,
       })
 
@@ -78,6 +85,7 @@ describe('OAuth login runner', () => {
       onAuth: () => {},
       onPrompt: async () => 'fallback',
       onSelect: async () => 'browser',
+      onSecret: async () => 'fallback-secret',
       onManualCodeInput: async () => 'manual',
     })
     expect(await supplied.prompt({ type: 'manual_code', message: 'paste' })).toBe('manual')
@@ -85,8 +93,30 @@ describe('OAuth login runner', () => {
       onAuth: () => {},
       onPrompt: async () => 'fallback',
       onSelect: async () => 'browser',
+      onSecret: async () => 'fallback-secret',
     })
     expect(await absent.prompt({ type: 'manual_code', message: 'paste' })).toBe('fallback')
+  })
+
+  test('routes secret prompts to the masked callback', async () => {
+    let textCalls = 0
+    let secretCalls = 0
+    const interaction = createOAuthInteraction({
+      onAuth: () => {},
+      onPrompt: async () => {
+        textCalls++
+        return 'visible'
+      },
+      onSecret: async () => {
+        secretCalls++
+        return 'masked'
+      },
+      onSelect: async () => 'browser',
+    })
+
+    expect(await interaction.prompt({ type: 'secret', message: 'API key' })).toBe('masked')
+    expect(secretCalls).toBe(1)
+    expect(textCalls).toBe(0)
   })
 
   test('passes a configured fake failure through unchanged', async () => {
