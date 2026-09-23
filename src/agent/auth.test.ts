@@ -213,4 +213,32 @@ describe('ModelRuntime credential resolution regressions', () => {
     expect((await coding.modelRuntime.getAuth('zai-coding'))?.auth.apiKey).toBe('coding')
     expect(zai.modelRuntime).not.toBe(coding.modelRuntime)
   })
+
+  // A reload (invalidateProviderAuthCache) can land while a creation is in
+  // flight. If that stale creation then fails, it must not evict the runtime a
+  // later caller already cached, or the next caller builds a second runtime
+  // that refreshes the same OAuth credential independently.
+  test('a stale failed creation does not evict the runtime cached after a reload', async () => {
+    process.env.FIREWORKS_API_KEY = 'runtime'
+    const healthyDir = await mkdtemp(join(tmpdir(), 'typeclaw-auth-healthy-'))
+    await writeFile(join(cwd, 'secrets.json'), '{ not json')
+    try {
+      // The secrets path is captured from cwd synchronously at creation, so
+      // the stale creation reads the corrupt file and the next one does not.
+      const stale = getAuthFor('fireworks')
+      const staleOutcome = stale.then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      invalidateProviderAuthCache()
+      process.chdir(healthyDir)
+      const current = getAuthFor('fireworks')
+      expect(await staleOutcome).toBeInstanceOf(Error)
+      await current
+      expect(getAuthFor('fireworks')).toBe(current)
+    } finally {
+      process.chdir(cwd)
+      await rm(healthyDir, { recursive: true, force: true })
+    }
+  })
 })

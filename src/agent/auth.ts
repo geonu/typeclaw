@@ -28,8 +28,9 @@ const cached = new Map<KnownProviderId, Promise<ProviderAuth>>()
 export function getAuthFor(providerId: KnownProviderId): Promise<ProviderAuth> {
   const existing = cached.get(providerId)
   if (existing) return existing
-  const created = createProviderAuth(providerId).catch((error) => {
-    cached.delete(providerId)
+  const created: Promise<ProviderAuth> = createProviderAuth(providerId).catch((error) => {
+    // Evict only this attempt: after a reload, a newer creation may own the key.
+    if (cached.get(providerId) === created) cached.delete(providerId)
     throw error
   })
   cached.set(providerId, created)
