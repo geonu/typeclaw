@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  type Api,
+  clampThinkingLevel,
+  getSupportedThinkingLevels,
+  type Model,
+  type ModelThinkingLevel,
+  streamSimple,
+} from '@mariozechner/pi-ai'
+
+import {
   defaultThinkingLevelForRef,
   isKnownModelRef,
   isOpenAiFamilyRef,
@@ -17,6 +26,33 @@ import {
   variantLabel,
   vendorForProviderId,
 } from './providers'
+
+// Builds the request a session at `level` sends, through the real transport,
+// and stops before any network I/O. Like pi-agent-core (agent.js:280), `off`
+// becomes an omitted `reasoning` option.
+async function captureRequest(
+  model: Model<Api>,
+  apiKey: string,
+  level: ModelThinkingLevel,
+): Promise<Record<string, unknown> | undefined> {
+  let payload: Record<string, unknown> | undefined
+  const stream = streamSimple(
+    model,
+    { messages: [{ role: 'user', content: 'ping', timestamp: 0 }] },
+    {
+      apiKey,
+      reasoning: level === 'off' ? undefined : level,
+      onPayload: (params) => {
+        payload = params as Record<string, unknown>
+        throw new Error('captured')
+      },
+    },
+  )
+  for await (const _event of stream) {
+    if (payload !== undefined) break
+  }
+  return payload
+}
 
 describe('KNOWN_PROVIDERS', () => {
   test('every provider model carries a baseUrl that matches the outer provider baseUrl', () => {
@@ -567,6 +603,20 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('zai-coding/glm-5.1')
   })
 
+  test('includes GPT-6 Sol and Luna for API-key and Codex OAuth routing', () => {
+    const refs = listKnownModelRefs()
+    const expected = [
+      ['openai/gpt-6-sol', 'openai'],
+      ['openai/gpt-6-luna', 'openai'],
+      ['openai-codex/gpt-6-sol', 'openai-codex'],
+      ['openai-codex/gpt-6-luna', 'openai-codex'],
+    ] as const
+    for (const [ref, providerId] of expected) {
+      expect(refs).toContain(ref)
+      expect(providerForModelRef(ref)).toBe(providerId)
+    }
+  })
+
   test('includes minimax model refs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('minimax/MiniMax-M3')
@@ -603,6 +653,36 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('anthropic/claude-opus-4-7')
     expect(refs).toContain('anthropic/claude-opus-4-8')
     expect(refs).toContain('anthropic/claude-fable-5')
+  })
+
+  test('sends every offered GPT-6 effort on the wire, off as none, and clamps minimal to low', async () => {
+    for (const model of [KNOWN_PROVIDERS.openai.models['gpt-6-sol'], KNOWN_PROVIDERS.openai.models['gpt-6-luna']]) {
+      expect(getSupportedThinkingLevels(model)).toContain('off')
+      expect(getSupportedThinkingLevels(model)).not.toContain('minimal')
+      expect(getSupportedThinkingLevels(model)).toContain('xhigh')
+      expect(clampThinkingLevel(model, 'minimal')).toBe('low')
+      for (const level of getSupportedThinkingLevels(model)) {
+        const payload = await captureRequest(model, 'sk-test', level)
+        expect(payload?.reasoning).toMatchObject({ effort: level === 'off' ? 'none' : level })
+      }
+    }
+  })
+
+  // pi 0.73.1's Codex transport drops `off` instead of sending effort none,
+  // so Codex GPT-6 must not offer `off`: every offered level carries an effort.
+  test('never lets Codex GPT-6 omit its reasoning effort', async () => {
+    const claims = { 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-test' } }
+    const apiKey = `e30.${btoa(JSON.stringify(claims))}.sig`
+    for (const id of ['gpt-6-sol', 'gpt-6-luna'] as const) {
+      const model = KNOWN_PROVIDERS['openai-codex'].models[id]
+      expect(getSupportedThinkingLevels(model)).not.toContain('off')
+      expect(clampThinkingLevel(model, 'off')).toBe('minimal')
+      for (const level of getSupportedThinkingLevels(model)) {
+        const payload = await captureRequest(model, apiKey, level)
+        expect(payload?.model).toBe(id)
+        expect(payload?.reasoning).toMatchObject({ effort: level === 'minimal' ? 'low' : level })
+      }
+    }
   })
 
   test('does not list the limited-availability claude-mythos-5', () => {

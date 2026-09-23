@@ -61,9 +61,16 @@ export const KNOWN_PROVIDERS = {
     auth: ['api-key'],
     apiKeyEnv: 'OPENAI_API_KEY',
     oauthProviderId: null,
-    // Costs and context windows mirror models.dev as of 2026-05-10. When
-    // refreshing, also rerun `scripts/generate-schema.ts` so typeclaw.schema.json
-    // picks up new enum values.
+    // Costs and context windows mirror models.dev as of 2026-05-10; the GPT-6
+    // Sol/Luna records mirror OpenAI's model docs as of 2026-09-22. GPT-6 bills
+    // cache writes at 1.25x input (GPT-5.x records keep cacheWrite 0). pi
+    // 0.73's Responses transports never report cache-write tokens
+    // (openai-responses-shared.js hardcodes cacheWrite: 0), so writes are
+    // costed as ordinary input and this rate stays unused until the transport
+    // reads cache_write_tokens. The >272K-input 2x/1.5x tier is not expressible
+    // in pi 0.73's cost shape either, so those records use the standard rate.
+    // When refreshing, also rerun `scripts/generate-schema.ts` so
+    // typeclaw.schema.json picks up new enum values.
     models: {
       // Default. Cheapest tool-calling reasoning model in the family;
       // available on every paid OpenAI account tier.
@@ -114,6 +121,37 @@ export const KNOWN_PROVIDERS = {
         cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
         contextWindow: 1050000,
         maxTokens: 128000,
+      },
+      // GPT-6 Sol and Luna (Sep 22 2026). `minimal` is not an API effort, so
+      // null makes pi clamp it to low; mapping xhigh preserves the strongest
+      // effort pi 0.73.1 can express (its ThinkingLevel has no `max`). Keep
+      // `openai-responses`: on Chat Completions these models only accept tools
+      // at effort `none`.
+      'gpt-6-sol': {
+        id: 'gpt-6-sol',
+        name: 'GPT-6 Sol',
+        api: 'openai-responses',
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        contextWindow: 1050000,
+        maxTokens: 128000,
+        thinkingLevelMap: { minimal: null, xhigh: 'xhigh' },
+      },
+      'gpt-6-luna': {
+        id: 'gpt-6-luna',
+        name: 'GPT-6 Luna',
+        api: 'openai-responses',
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+        contextWindow: 1050000,
+        maxTokens: 128000,
+        thinkingLevelMap: { minimal: null, xhigh: 'xhigh' },
       },
     },
   },
@@ -176,6 +214,39 @@ export const KNOWN_PROVIDERS = {
         cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
         contextWindow: 272000,
         maxTokens: 128000,
+      },
+      // GPT-6 Sol and Luna use the documented Codex backend limits. This map
+      // mirrors the @earendil-works/pi-ai 0.87.1 records except two levels
+      // pi 0.73.1 cannot deliver: `max`, which it cannot express, and `off`.
+      // Its Codex transport turns `off` into an omitted `reasoning` field
+      // (openai-codex-responses.js:217-221,252-260), so the backend would run
+      // its default effort instead of none. Unsupported `off` clamps to
+      // `minimal`, sent as low, the lowest effort the wire can carry.
+      'gpt-6-sol': {
+        id: 'gpt-6-sol',
+        name: 'GPT-6 Sol',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+        thinkingLevelMap: { off: null, minimal: 'low', xhigh: 'xhigh' },
+      },
+      'gpt-6-luna': {
+        id: 'gpt-6-luna',
+        name: 'GPT-6 Luna',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+        thinkingLevelMap: { off: null, minimal: 'low', xhigh: 'xhigh' },
       },
     },
   },
