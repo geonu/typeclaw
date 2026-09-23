@@ -141,6 +141,8 @@ class FakeSession {
   public onContinue: (() => void | Promise<void>) | undefined
   public continued = 0
   public contextRefreshes = 0
+  public isCompacting = false
+  public streamCalls = 0
 
   // Mirrors the real `AgentSession.agent` surface the router touches:
   // `agent.abort()` flips `agent.signal.aborted`. The router uses this as the
@@ -176,6 +178,7 @@ class FakeSession {
         this.controller.abort()
       },
       streamFunction: ((_model, _context, options) => {
+        this.streamCalls++
         recordMaxTokens(options?.maxTokens)
         return undefined as unknown as ReturnType<StreamFn>
       }) as StreamFn,
@@ -15097,6 +15100,22 @@ describe('ChannelRouter post-tool follow-up suppression', () => {
 
     expect(agent.signal.aborted).toBe(false)
     expect(session.lastStreamMaxTokens).toBeUndefined()
+  })
+
+  test('lets compaction preserve a terminal stop for the following assistant request', async () => {
+    const session = await liveSessionAfterRoute(await tempDir())
+    await session.agent.afterToolCall!(afterToolContext('channel_reply', { ok: true }, false))
+
+    session.isCompacting = true
+    await streamOnce(session)
+
+    expect(session.streamCalls).toBe(1)
+    expect(session.lastStreamMaxTokens).toBeUndefined()
+
+    session.isCompacting = false
+    await streamOnce(session)
+
+    expect(session.streamCalls).toBe(1)
   })
 
   test('preserves a prior afterToolCall result when adding terminal completion', async () => {

@@ -3294,14 +3294,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // value to remaining context (`buildBaseOptions`, simple-options.js:10-18), rather
   // than applying the removed 32k cap. See CHANNEL_MAX_OUTPUT_TOKENS for why.
   // Composes the existing streamFunction (pi's default `Models.streamSimple` unless a
-  // proxy was installed). Precedence: an explicit per-call `maxTokens` always wins;
-  // otherwise a one-shot `live.nextPromptMaxTokens` (set by the empty-turn
+  // proxy was installed). Compaction and branch-summary calls are excluded: pi 0.87.1
+  // invokes `agent.streamFunction` for compaction (pi-coding-agent
+  // dist/core/agent-session.js:1844) while `isCompacting` remains true
+  // (agent-session.js:927-932). They must retain pi's own stream options and cannot
+  // consume a channel turn's pending terminal stop or one-shot retry budget.
+  // Precedence for channel assistant calls: an explicit per-call `maxTokens` always
+  // wins; otherwise a one-shot `live.nextPromptMaxTokens` (set by the empty-turn
   // length-retry) is consumed and cleared so the raised budget applies to exactly one
   // stream call; otherwise the default backstop.
   const installChannelOutputCap = (live: LiveSession): void => {
     const { agent } = live.session
     const inner = agent.streamFunction
     agent.streamFunction = async (model, context, streamOptions) => {
+      if (live.session.isCompacting) return await inner(model, context, streamOptions)
       const pendingTerminalStop = live.pendingTerminalReplyStop
       if (pendingTerminalStop?.turnSeq === live.turnSeq && live.userStoppedTurnSeq !== pendingTerminalStop.turnSeq) {
         live.pendingTerminalReplyStop = null

@@ -203,7 +203,8 @@ describe('compaction request thinking', () => {
   // derives the summary budget as 0.8 x reserveTokens (compaction.js), and our
   // absolute trigger sets reserveTokens to nearly the whole window. On pi
   // 0.73.1 that sent max_tokens=748800 for Sonnet 4.6, whose limit is 64K.
-  // pi 0.87 clamps it to model.maxTokens.
+  // pi 0.87 clamps both summary budgets to model.maxTokens
+  // (pi-coding-agent dist/core/compaction/compaction.js:533,748).
   test.each([
     ['anthropic/claude-sonnet-4-6', false],
     ['anthropic/claude-sonnet-5', false],
@@ -250,6 +251,46 @@ describe('compaction request thinking', () => {
         })
         expect(request!.headers.get('anthropic-beta')).toContain('thinking-binding-controls-2026-08-01')
       }
+    } finally {
+      globalThis.fetch = previousFetch
+      await dispose()
+    }
+  })
+
+  // The channel router keeps its terminal-reply stop and output cap away from
+  // compaction by checking `session.isCompacting` inside `agent.streamFunction`
+  // (src/channels/router.ts installChannelOutputCap). That only works if pi
+  // routes the summary request through `agent.streamFunction` while the flag
+  // is set, so pin both halves on a real session.
+  test('routes the summary request through agent.streamFunction while isCompacting', async () => {
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'anthropic/claude-sonnet-5' } }),
+    )
+    reloadConfig(agentDir)
+    const sessionManager = SessionManager.inMemory(agentDir)
+    seedHistory(sessionManager, 'claude-sonnet-5')
+    const { session, dispose } = await createSessionWithDispose({
+      sessionManager,
+      systemPromptOverride: 'test compaction request',
+      tools: [],
+    })
+    const inner = session.agent.streamFunction
+    const compactingAtCall: boolean[] = []
+    session.agent.streamFunction = (model, context, options) => {
+      compactingAtCall.push(session.isCompacting)
+      return inner(model, context, options)
+    }
+    globalThis.fetch = (async () =>
+      new Response('{"error":{"message":"compaction probe"}}', {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    try {
+      await expect(session.compact()).rejects.toThrow(/compaction probe/)
+      expect(compactingAtCall.length).toBeGreaterThan(0)
+      expect(compactingAtCall.every(Boolean)).toBe(true)
     } finally {
       globalThis.fetch = previousFetch
       await dispose()
