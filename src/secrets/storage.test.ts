@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { isWindows } from '@/shared'
 
-import { SecretsBackend } from './storage'
+import { ASYNC_LOCK_OPTIONS, SecretsBackend } from './storage'
 
 const onWindows = isWindows()
 
@@ -46,6 +47,110 @@ describe('SecretsBackend CredentialStore', () => {
     expect(await backend.read('openai')).toEqual({ type: 'api_key', key: 'one' })
     expect(await backend.read('fireworks')).toEqual({ type: 'api_key', key: 'two' })
   })
+
+  test('rejects an already-aborted mutation before creating storage or calling its callback', async () => {
+    const backend = new SecretsBackend(path)
+    const controller = new AbortController()
+    controller.abort()
+    let callbackCalled = false
+
+    await expect(
+      backend.modify(
+        'openai',
+        async () => {
+          callbackCalled = true
+          return { type: 'api_key', key: 'must-not-write' }
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(controller.signal.reason)
+
+    expect(callbackCalled).toBe(false)
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('rejects a waiting mutation on abort without running it or leaking the lock', async () => {
+    const backend = new SecretsBackend(path)
+    const { promise: firstCanFinish, resolve: finishFirst } = Promise.withResolvers<void>()
+    const { promise: firstHasLock, resolve: firstLocked } = Promise.withResolvers<void>()
+    const first = backend.modify('openai', async () => {
+      firstLocked()
+      await firstCanFinish
+      return { type: 'api_key', key: 'first' }
+    })
+    await firstHasLock
+
+    const controller = new AbortController()
+    let waitingCallbackCalled = false
+    const waiting = backend.modify(
+      'fireworks',
+      async () => {
+        waitingCallbackCalled = true
+        return { type: 'api_key', key: 'must-not-write' }
+      },
+      { signal: controller.signal },
+    )
+    let waitingRejected = false
+    void waiting.catch(() => {
+      waitingRejected = true
+    })
+    controller.abort()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+
+    expect(waitingRejected).toBe(true)
+    expect(waitingCallbackCalled).toBe(false)
+    finishFirst()
+    await first
+    await expect(waiting).rejects.toBe(controller.signal.reason)
+    await expect(backend.modify('anthropic', async () => undefined)).resolves.toBeUndefined()
+    expect(waitingCallbackCalled).toBe(false)
+    expect(JSON.parse(await readFile(path, 'utf8')).providers).toEqual({
+      openai: { type: 'api_key', key: { value: 'first' } },
+    })
+  })
+
+  test('rejects a compromised provider lock without an uncaught exception or credential write', async () => {
+    const backend = new SecretsBackend(path, { ...ASYNC_LOCK_OPTIONS, stale: 2_000 })
+    const { promise: modifyCanContinue, resolve: continueModify } = Promise.withResolvers<void>()
+    const { promise: callbackHasStarted, resolve: callbackStarted } = Promise.withResolvers<void>()
+    let uncaughtError: Error | undefined
+    const captureUncaught = (error: Error): void => {
+      uncaughtError = error
+    }
+    process.on('uncaughtException', captureUncaught)
+
+    const modification = backend.modify('openai', async () => {
+      callbackStarted()
+      await modifyCanContinue
+      return { type: 'api_key', key: 'must-not-write' }
+    })
+    try {
+      await callbackHasStarted
+      await rm(`${path}.lock`, { recursive: true, force: true })
+      // proper-lockfile detects a removed lock from its real heartbeat
+      // (node_modules/proper-lockfile/lib/lockfile.js:109-122), whose fs
+      // callback fake timers cannot drive.
+      const { promise: heartbeatHasRun, resolve: heartbeatRan } = Promise.withResolvers<void>()
+      setTimeout(heartbeatRan, 3_000)
+      await heartbeatHasRun
+      continueModify()
+
+      let modificationError: unknown
+      try {
+        await modification
+      } catch (error) {
+        modificationError = error
+      }
+
+      expect(uncaughtError).toBeUndefined()
+      expect(modificationError).toMatchObject({ code: 'ECOMPROMISED' })
+      expect(await backend.read('openai')).toBeUndefined()
+    } finally {
+      continueModify()
+      process.off('uncaughtException', captureUncaught)
+      await modification.catch(() => undefined)
+    }
+  }, 10_000)
 
   test('returns complete snapshots while a writer holds the provider lock', async () => {
     const backend = new SecretsBackend(path)

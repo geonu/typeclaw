@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-import type { Credential, CredentialInfo, CredentialStore } from '@earendil-works/pi-ai'
+import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from '@earendil-works/pi-ai'
+import { operationSignal, raceWithAbortSignal } from '@earendil-works/pi-ai/utils/abort'
 import lockfile from 'proper-lockfile'
 
 import { providerKeyDefaultEnv } from './defaults'
@@ -25,74 +26,116 @@ const DIR_MODE = 0o700
 const SYNC_LOCK_RETRIES = 10
 const SYNC_LOCK_DELAY_MS = 20
 
-const ASYNC_LOCK_OPTIONS = {
+// `realpath: false` matches the sync lock, so both paths always contend on the
+// same `<secrets.json>.lock` even when secrets.json is a symlink; otherwise the
+// shared `stale` threshold below would not make them exclude each other.
+export const ASYNC_LOCK_OPTIONS = {
   retries: { retries: 10, factor: 2, minTimeout: 100, maxTimeout: 10000, randomize: true },
   stale: 30000,
+  realpath: false,
 } as const
 
+type AsyncLockOptions = Omit<typeof ASYNC_LOCK_OPTIONS, 'stale'> & { stale: number }
+
 // The pi CredentialStore contract requires the lock only around serialized
-// read-modify-write operations. Readers are lock-free snapshots: every writer
+// read-modify-write operations. Its reads are lock-free snapshots: every writer
 // publishes a complete envelope through writeEnvelopeAtomic's temp-file rename,
 // so they see either the old or new file. This also keeps request-time reads
 // available while an OAuth refresh holds the writer lock across network I/O.
 export class SecretsBackend implements CredentialStore {
-  constructor(private readonly secretsPath: string) {}
+  constructor(
+    private readonly secretsPath: string,
+    private readonly lockOptions: AsyncLockOptions = ASYNC_LOCK_OPTIONS,
+  ) {}
 
-  async read(providerId: string): Promise<Credential | undefined> {
+  async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
+    options?.signal?.throwIfAborted()
     if (!existsSync(this.secretsPath)) return undefined
     return toPiCredential(this.readEnvelope().providers[providerId], process.env)
   }
 
-  async list(): Promise<readonly CredentialInfo[]> {
+  async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
+    options?.signal?.throwIfAborted()
     if (!existsSync(this.secretsPath)) return []
     return Object.entries(this.readEnvelope().providers)
       .filter(([, credential]) => credential.type === 'api_key' || credential.type === 'oauth')
       .map(([providerId, credential]) => ({ providerId, type: credential.type }))
   }
 
-  async modify(
+  modify(
     providerId: string,
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+    options?: AuthOperationOptions,
   ): Promise<Credential | undefined> {
-    this.ensureParentDir()
-    this.ensureFileExists()
-    let release: (() => Promise<void>) | undefined
-    try {
-      release = await lockfile.lock(this.secretsPath, ASYNC_LOCK_OPTIONS)
-      const envelope = this.readEnvelope()
-      const prior = envelope.providers[providerId]
-      const next = await fn(toPiCredential(prior, process.env))
-      if (next === undefined) return toPiCredential(prior, process.env)
-      const credential = fromPiCredential(next, prior, providerId, process.env)
-      this.writeEnvelopeAtomic({
-        ...envelope,
-        $schema: envelope.$schema ?? SCHEMA_REL,
-        version: SECRETS_FILE_VERSION,
-        providers: { ...envelope.providers, [providerId]: credential },
+    const signal = operationSignal(options?.signal)
+    const operation = Promise.resolve().then(() => {
+      signal.throwIfAborted()
+      this.ensureParentDir()
+      this.ensureFileExists()
+      return this.withProviderLock(async (assertHeld) => {
+        signal.throwIfAborted()
+        const envelope = this.readEnvelope()
+        const prior = envelope.providers[providerId]
+        const next = await fn(toPiCredential(prior, process.env))
+        assertHeld()
+        signal.throwIfAborted()
+        if (next === undefined) return toPiCredential(prior, process.env)
+        const credential = fromPiCredential(next, prior, providerId, process.env)
+        this.writeEnvelopeAtomic({
+          ...envelope,
+          $schema: envelope.$schema ?? SCHEMA_REL,
+          version: SECRETS_FILE_VERSION,
+          providers: { ...envelope.providers, [providerId]: credential },
+        })
+        return toPiCredential(credential, process.env)
       })
-      return toPiCredential(credential, process.env)
-    } finally {
-      await release?.()
-    }
-  }
-
-  async delete(providerId: string): Promise<void> {
-    if (!existsSync(this.secretsPath)) return
-    await this.withProviderLock(() => {
-      const envelope = this.readEnvelope()
-      if (!(providerId in envelope.providers)) return
-      const { [providerId]: _removed, ...providers } = envelope.providers
-      this.writeEnvelopeAtomic({ ...envelope, providers })
     })
+    return raceWithAbortSignal(operation, signal)
   }
 
-  private async withProviderLock<T>(fn: () => T): Promise<T> {
+  delete(providerId: string, options?: AuthOperationOptions): Promise<void> {
+    const signal = operationSignal(options?.signal)
+    const operation = Promise.resolve().then(() => {
+      signal.throwIfAborted()
+      if (!existsSync(this.secretsPath)) return
+      return this.withProviderLock(() => {
+        signal.throwIfAborted()
+        const envelope = this.readEnvelope()
+        if (!(providerId in envelope.providers)) return
+        const { [providerId]: _removed, ...providers } = envelope.providers
+        this.writeEnvelopeAtomic({ ...envelope, providers })
+      })
+    })
+    return raceWithAbortSignal(operation, signal)
+  }
+
+  private async withProviderLock<T>(fn: (assertHeld: () => void) => T | Promise<T>): Promise<T> {
     let release: (() => Promise<void>) | undefined
+    let lockCompromised = false
+    let lockCompromisedError: Error | undefined
+    const assertHeld = (): void => {
+      if (lockCompromised) {
+        throw lockCompromisedError ?? new Error('Secrets store lock was compromised')
+      }
+    }
     try {
-      release = await lockfile.lock(this.secretsPath, ASYNC_LOCK_OPTIONS)
-      return fn()
+      release = await lockfile.lock(this.secretsPath, {
+        ...this.lockOptions,
+        onCompromised: (err: Error) => {
+          lockCompromised = true
+          lockCompromisedError = err
+        },
+      })
+      assertHeld()
+      const result = await fn(assertHeld)
+      assertHeld()
+      return result
     } finally {
-      await release?.()
+      if (release) {
+        try {
+          await release()
+        } catch {}
+      }
     }
   }
 
@@ -230,7 +273,7 @@ export class SecretsBackend implements CredentialStore {
     }
     try {
       release = await lockfile.lock(this.secretsPath, {
-        ...ASYNC_LOCK_OPTIONS,
+        ...this.lockOptions,
         onCompromised: (err: Error) => {
           lockCompromised = true
           lockCompromisedError = err
@@ -389,7 +432,7 @@ export class SecretsBackend implements CredentialStore {
     }
     try {
       release = await lockfile.lock(this.secretsPath, {
-        ...ASYNC_LOCK_OPTIONS,
+        ...this.lockOptions,
         onCompromised: (err: Error) => {
           lockCompromised = true
           lockCompromisedError = err
@@ -425,6 +468,10 @@ export class SecretsBackend implements CredentialStore {
     }
   }
 
+  // Seeding runs only when the file is absent, so steady-state calls do no
+  // I/O. Two processes seeding a first-ever store at once can still race; that
+  // window is accepted rather than publishing through link(), which some
+  // bind-mounted filesystems reject.
   private ensureFileExists(): void {
     if (!existsSync(this.secretsPath)) this.writeEnvelopeAtomic(newEmptyEnvelope())
   }
@@ -433,7 +480,7 @@ export class SecretsBackend implements CredentialStore {
     let lastError: unknown
     for (let attempt = 1; attempt <= SYNC_LOCK_RETRIES; attempt++) {
       try {
-        return lockfile.lockSync(this.secretsPath, { realpath: false })
+        return lockfile.lockSync(this.secretsPath, { realpath: false, stale: this.lockOptions.stale })
       } catch (error) {
         const code =
           typeof error === 'object' && error !== null && 'code' in error
@@ -523,6 +570,11 @@ function fromPiCredential(
   }
 }
 
+// The store returns what is persisted: read() after modify() yields the value
+// just written. Env-over-disk and OAuth-over-env precedence is applied once, by
+// the runtime overlay in src/agent/auth.ts (setRuntimeApiKey). Resolving the
+// provider's default env var here too would duplicate that policy and make a
+// store read return an ambient key instead of the stored one.
 function toPiCredential(credential: ProviderCredential | undefined, env: NodeJS.ProcessEnv): Credential | undefined {
   if (!credential) return undefined
   if (credential.type === 'oauth') return credential as Credential
