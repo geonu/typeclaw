@@ -248,6 +248,14 @@ describe('resolveModel', () => {
     expect(model.maxTokens).toBe(128000)
   })
 
+  // resolveModel templates an uncurated ref from its provider's first record.
+  // Newer flagships must not change what older uncurated snapshots inherit.
+  test('does not give uncurated xai snapshots Grok 4.7 limits or effort opt-in', () => {
+    const model = resolveModel('xai/grok-4.20-multi-agent-0309')
+    expect(model.contextWindow).toBe(1000000)
+    expect(model.compat ?? {}).not.toHaveProperty('supportsReasoningEffort')
+  })
+
   test('a formerly static OpenGateway ref still parses and resolves through the anchor transport', () => {
     const ref = 'opengateway/anthropic/claude-opus-4-8'
     const parsed = configSchema.parse({ models: { default: ref } })

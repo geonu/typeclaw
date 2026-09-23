@@ -685,6 +685,21 @@ describe('listKnownModelRefs', () => {
     }
   })
 
+  // Grok 4.7's record opts into reasoning_effort, which pi 0.73.1 withholds
+  // from xAI by default. Every offered level must reach the wire.
+  test('sends every offered Grok 4.7 effort as reasoning_effort', async () => {
+    const model = KNOWN_PROVIDERS.xai.models['grok-4.7']
+    expect(getSupportedThinkingLevels(model)).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(clampThinkingLevel(model, 'off')).toBe('low')
+    expect(clampThinkingLevel(model, 'minimal')).toBe('low')
+
+    for (const level of getSupportedThinkingLevels(model)) {
+      const payload = await captureRequest(model, 'xai-test', level)
+      expect(payload?.model).toBe('grok-4.7')
+      expect(payload?.reasoning_effort).toBe(level)
+    }
+  })
+
   test('does not list the limited-availability claude-mythos-5', () => {
     const refs = listKnownModelRefs()
     expect(refs).not.toContain('anthropic/claude-mythos-5')
@@ -693,6 +708,7 @@ describe('listKnownModelRefs', () => {
   test('includes the current xai Grok models', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('xai/grok-4.3')
+    expect(refs).toContain('xai/grok-4.7')
     expect(refs).toContain('xai/grok-4.20-0309-reasoning')
     expect(refs).toContain('xai/grok-4.20-0309-non-reasoning')
     expect(refs).toContain('xai/grok-build-0.1')

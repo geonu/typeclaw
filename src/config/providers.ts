@@ -608,8 +608,10 @@ export const KNOWN_PROVIDERS = {
   //
   // Costs and context windows mirror docs.x.ai/developers/models and the raw
   // /v1/models price fields as of 2026-06-08 (xAI quotes prices in cents per
-  // 100M tokens; e.g. grok-4.3 prompt 12500 = $1.25/1M). grok-4.3 is the
-  // flagship default; grok-build-0.1 is the coding-tuned model. The
+  // 100M tokens; e.g. grok-4.3 prompt 12500 = $1.25/1M); grok-4.7 mirrors
+  // docs.x.ai/developers/grok-4-7 and /pricing as of 2026-09-21. grok-4.7 is
+  // the flagship; grok-4.3 stays first as the template record for uncurated
+  // refs; grok-build-0.1 is the coding-tuned model. The
   // grok-4.20-0309 snapshots are pinned weights for reproducible runs.
   //
   // The earlier grok-4 / grok-4-fast / grok-code-fast-1 ids were RETIRED on
@@ -617,10 +619,10 @@ export const KNOWN_PROVIDERS = {
   // grok-4.3 / grok-build-0.1 rates, so they are intentionally NOT listed.
   //
   // cacheWrite is 0: xAI publishes no cache-write price (caching is implicit,
-  // billed only at the cacheRead rate). Models 1-4 also carry a long-context
-  // tier (2x rates above a 200k-token request); pi-ai's Model shape can't
-  // express tiered pricing, so the standard rate is used and the breakpoint is
-  // noted here. When refreshing, rerun `scripts/generate-schema.ts`.
+  // billed only at the cacheRead rate). Every model here also carries a
+  // long-context tier (2x rates above a 200k-token request); pi-ai's Model
+  // shape can't express tiered pricing, so the standard rate is used and the
+  // breakpoint is noted here. When refreshing, rerun `scripts/generate-schema.ts`.
   xai: {
     id: 'xai',
     name: 'xAI (Grok)',
@@ -640,6 +642,30 @@ export const KNOWN_PROVIDERS = {
         cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
         contextWindow: 1000000,
         maxTokens: 64000,
+      },
+      // Grok 4.7 takes reasoning_effort low/medium/high/xhigh on Chat
+      // Completions (docs.x.ai reasoning + chat-completions reference) and
+      // cannot disable reasoning. pi 0.73.1 withholds reasoning_effort from
+      // xAI by default (openai-completions `supportsReasoningEffort: !isGrok`);
+      // the compat flag opts this record in. Without it every level ran at
+      // xAI's default `high`. `off` and `minimal` clamp to `low`. It stays
+      // after grok-4.3 because resolveModel templates uncurated xai refs from
+      // the first record, and older snapshots must not inherit the flag.
+      'grok-4.7': {
+        id: 'grok-4.7',
+        name: 'Grok 4.7',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+        // xAI has no text-output limit; context bounds output. pi separately
+        // caps its default request max at 32K.
+        contextWindow: 500000,
+        maxTokens: 500000,
+        thinkingLevelMap: { off: null, minimal: null, xhigh: 'xhigh' },
+        compat: { supportsReasoningEffort: true },
       },
       'grok-4.20-0309-reasoning': {
         id: 'grok-4.20-0309-reasoning',
