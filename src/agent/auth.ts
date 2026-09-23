@@ -53,13 +53,19 @@ async function createProviderAuth(providerId: KnownProviderId): Promise<Provider
     modelRuntime.registerProvider(knownProvider.id, toRuntimeProviderConfig(knownProvider))
   }
 
+  const oauthProviders = new Set(
+    (await credentials.list())
+      .filter((credential) => credential.type === 'oauth')
+      .map((credential) => credential.providerId),
+  )
   for (const knownProvider of Object.values(KNOWN_PROVIDERS)) {
     if (!supportsApiKey(knownProvider) || !knownProvider.apiKeyEnv) continue
     const envKey = process.env[knownProvider.apiKeyEnv]
-    const stored = await credentials.read(knownProvider.id)
     // Runtime keys are memory-only. A persisted OAuth credential wins for
     // dual-auth providers and env values never leak into the v2 envelope.
-    if (envKey && stored?.type !== 'oauth') await modelRuntime.setRuntimeApiKey(knownProvider.id, envKey)
+    if (envKey && !oauthProviders.has(knownProvider.id)) {
+      await modelRuntime.setRuntimeApiKey(knownProvider.id, envKey)
+    }
   }
 
   if (process.env.NODE_ENV === 'test' && !hasAnyCredentialInEnv(provider.apiKeyEnv)) {

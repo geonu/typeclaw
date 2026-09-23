@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { SecretsBackend } from './storage'
+
+const onWindows = isWindows()
 
 describe('SecretsBackend CredentialStore', () => {
   let dir: string
@@ -42,6 +46,29 @@ describe('SecretsBackend CredentialStore', () => {
     expect(await backend.read('openai')).toEqual({ type: 'api_key', key: 'one' })
     expect(await backend.read('fireworks')).toEqual({ type: 'api_key', key: 'two' })
   })
+
+  test('returns complete snapshots while a writer holds the provider lock', async () => {
+    const backend = new SecretsBackend(path)
+    await backend.modify('openai', async () => ({ type: 'api_key', key: 'old' }))
+    await mkdir(`${path}.lock`)
+
+    const snapshot = Promise.all([backend.read('openai'), backend.list()])
+    try {
+      // A snapshot read must not wait for a writer's lock. With the old locked
+      // reader, this remains pending while proper-lockfile retries. Yield a
+      // bounded number of microtasks so immediately resolved snapshots settle.
+      let settled = false
+      void snapshot.then(() => {
+        settled = true
+      })
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(settled).toBe(true)
+      expect(await snapshot).toEqual([{ type: 'api_key', key: 'old' }, [{ providerId: 'openai', type: 'api_key' }]])
+    } finally {
+      await rm(`${path}.lock`, { recursive: true, force: true })
+      await snapshot
+    }
+  })
 })
 
 describe('v2 credential envelope regressions', () => {
@@ -63,7 +90,8 @@ describe('v2 credential envelope regressions', () => {
       channels: {},
       mcp: {},
     })
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    // NTFS mode bits are not meaningful on Windows; see #899.
+    if (!onWindows) expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
   test('storage failures reject rather than silently recording an internal error', async () => {

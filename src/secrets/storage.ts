@@ -30,24 +30,24 @@ const ASYNC_LOCK_OPTIONS = {
   stale: 30000,
 } as const
 
-// CredentialStore is pi 0.87's provider write boundary. Its modify callback
-// runs under this file lock, so refresh and login remain serialized per
-// provider across processes while non-provider envelope slices stay intact.
+// The pi CredentialStore contract requires the lock only around serialized
+// read-modify-write operations. Readers are lock-free snapshots: every writer
+// publishes a complete envelope through writeEnvelopeAtomic's temp-file rename,
+// so they see either the old or new file. This also keeps request-time reads
+// available while an OAuth refresh holds the writer lock across network I/O.
 export class SecretsBackend implements CredentialStore {
   constructor(private readonly secretsPath: string) {}
 
   async read(providerId: string): Promise<Credential | undefined> {
     if (!existsSync(this.secretsPath)) return undefined
-    return this.withProviderLock(() => toPiCredential(this.readEnvelope().providers[providerId], process.env))
+    return toPiCredential(this.readEnvelope().providers[providerId], process.env)
   }
 
   async list(): Promise<readonly CredentialInfo[]> {
     if (!existsSync(this.secretsPath)) return []
-    return this.withProviderLock(() =>
-      Object.entries(this.readEnvelope().providers)
-        .filter(([, credential]) => credential.type === 'api_key' || credential.type === 'oauth')
-        .map(([providerId, credential]) => ({ providerId, type: credential.type })),
-    )
+    return Object.entries(this.readEnvelope().providers)
+      .filter(([, credential]) => credential.type === 'api_key' || credential.type === 'oauth')
+      .map(([providerId, credential]) => ({ providerId, type: credential.type }))
   }
 
   async modify(
@@ -426,10 +426,7 @@ export class SecretsBackend implements CredentialStore {
   }
 
   private ensureFileExists(): void {
-    if (existsSync(this.secretsPath)) return
-    const seed = newEmptyEnvelope()
-    writeFileSync(this.secretsPath, stringifyEnvelope(seed), 'utf8')
-    chmodSync(this.secretsPath, FILE_MODE)
+    if (!existsSync(this.secretsPath)) this.writeEnvelopeAtomic(newEmptyEnvelope())
   }
 
   private acquireSyncLockWithRetry(): () => void {
@@ -470,7 +467,7 @@ export class SecretsBackend implements CredentialStore {
   }
 
   private writeEnvelopeAtomic(envelope: SecretsFile): void {
-    const tmp = `${this.secretsPath}.${process.pid}.${Date.now()}.tmp`
+    const tmp = `${this.secretsPath}.${process.pid}.${Date.now()}.${tempSequence++}.tmp`
     writeFileSync(tmp, stringifyEnvelope(envelope), { encoding: 'utf8', mode: FILE_MODE })
     try {
       renameSync(tmp, this.secretsPath)
@@ -489,6 +486,8 @@ export class SecretsBackend implements CredentialStore {
 export function createSecretsStoreForAgent(secretsPath: string): SecretsBackend {
   return new SecretsBackend(secretsPath)
 }
+
+let tempSequence = 0
 
 function newEmptyEnvelope(): SecretsFile {
   return { $schema: SCHEMA_REL, version: SECRETS_FILE_VERSION, providers: {}, channels: {}, mcp: {} }
