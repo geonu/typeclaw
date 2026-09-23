@@ -852,14 +852,17 @@ export function resolveModel(ref: KnownModelRef | ModelRef | string): Model<Know
   // endpoint that never accepts them.
   //
   // The exception is a ref that pi-ai's catalog already knows, exactly or as
-  // its undated `-YYYYMMDD` base, on the same transport. pi 0.87 reads some
+  // its undated `-YYYYMMDD` base, on the same transport. The catalog describes
+  // the MODEL, so its name, capabilities, limits, and pricing are the defaults;
+  // `customModels` remains the explicit per-field override. pi 0.87 reads some
   // behavior only from per-model metadata: e.g. Anthropic adaptive thinking is
-  // `compat.forceAdaptiveThinking` and is no longer inferred from the id. A
-  // dated `anthropic/claude-sonnet-5-20260701` would otherwise send budget
-  // thinking and get a 400. That entry's compat and thinkingLevelMap are used,
-  // minus `allowedFallbackModels` (see the Fable 5 record). Without a catalog
-  // match `thinkingLevelMap` is deliberately not carried: it varies per model
-  // even within one provider, so copying the template's would be a guess.
+  // `compat.forceAdaptiveThinking` and is no longer inferred from the id.
+  // Anthropic's streamSimple gates adaptive thinking on the resolved model's
+  // `reasoning` capability, so a dated Sonnet 5 alias must inherit that too.
+  // That entry's compat and thinkingLevelMap are used, minus
+  // `allowedFallbackModels` (see the Fable 5 record). Without a catalog match
+  // `thinkingLevelMap` is deliberately not carried: it varies per model even
+  // within one provider, so copying the template's would be a guess.
   const builtin = findBuiltinModel(providerId, modelId)
   const catalogMetadata = builtin !== undefined && builtin.api === template.api ? builtin : undefined
   let compat = template.compat
@@ -876,12 +879,12 @@ export function resolveModel(ref: KnownModelRef | ModelRef | string): Model<Know
     api: template.api,
     ...(compat !== undefined ? { compat } : {}),
     ...(catalogMetadata?.thinkingLevelMap !== undefined ? { thinkingLevelMap: catalogMetadata.thinkingLevelMap } : {}),
-    name: meta?.name ?? modelId,
-    reasoning: meta?.reasoning ?? false,
-    input: resolveCustomModelInput(meta?.input),
-    contextWindow: meta?.contextWindow ?? template.contextWindow,
-    maxTokens: meta?.maxTokens ?? template.maxTokens,
-    cost: resolveCustomModelCost(meta?.cost),
+    name: meta?.name ?? catalogMetadata?.name ?? modelId,
+    reasoning: meta?.reasoning ?? catalogMetadata?.reasoning ?? false,
+    input: resolveCustomModelInput(meta?.input, catalogMetadata?.input),
+    contextWindow: meta?.contextWindow ?? catalogMetadata?.contextWindow ?? template.contextWindow,
+    maxTokens: meta?.maxTokens ?? catalogMetadata?.maxTokens ?? template.maxTokens,
+    cost: resolveCustomModelCost(meta?.cost, catalogMetadata?.cost),
   }
 }
 
@@ -894,20 +897,26 @@ function findBuiltinModel(providerId: string, modelId: string): Model<KnownApi> 
     : (getBuiltinModel(providerId as never, undatedId as never) as Model<KnownApi> | undefined)
 }
 
-function resolveCustomModelInput(input: readonly string[] | undefined): Model<KnownApi>['input'] {
-  if (input === undefined) return ['text']
+function resolveCustomModelInput(
+  input: readonly string[] | undefined,
+  fallback: Model<KnownApi>['input'] | undefined,
+): Model<KnownApi>['input'] {
+  if (input === undefined) return fallback ?? ['text']
   const supported = input.filter(
     (value): value is Model<KnownApi>['input'][number] => value === 'text' || value === 'image',
   )
   return supported.length > 0 ? supported : ['text']
 }
 
-function resolveCustomModelCost(cost: CustomModelMeta['cost']): Model<KnownApi>['cost'] {
+function resolveCustomModelCost(
+  cost: CustomModelMeta['cost'],
+  fallback: Model<KnownApi>['cost'] | undefined,
+): Model<KnownApi>['cost'] {
   return {
-    input: cost?.input ?? 0,
-    output: cost?.output ?? 0,
-    cacheRead: cost?.cacheRead ?? 0,
-    cacheWrite: cost?.cacheWrite ?? 0,
+    input: cost?.input ?? fallback?.input ?? 0,
+    output: cost?.output ?? fallback?.output ?? 0,
+    cacheRead: cost?.cacheRead ?? fallback?.cacheRead ?? 0,
+    cacheWrite: cost?.cacheWrite ?? fallback?.cacheWrite ?? 0,
   }
 }
 
