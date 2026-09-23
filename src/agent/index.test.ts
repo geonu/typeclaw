@@ -18,6 +18,7 @@ import { createHookBus, type PluginRegistry } from '@/plugin'
 import { emptyRegistry } from '@/plugin/registry'
 import { createStream } from '@/stream'
 
+import { invalidateProviderAuthCache } from './auth'
 import {
   buildChannelTools,
   buildSubagentOrchestrationTools,
@@ -25,6 +26,7 @@ import {
   composeSystemPrompt,
   createOverrideResourceLoader,
   createResourceLoader,
+  createSessionWithDispose,
   deriveSystemPromptMode,
   formatRestartNotice,
   formatRestartNoticeOriginating,
@@ -1756,5 +1758,69 @@ describe('resolveSessionThinkingLevel', () => {
     const models = parseModels({ default: REF, vision: REF, 'cheap-batch': REF })
     expect(resolveLevel(models, 'vision')).toBeUndefined()
     expect(resolveLevel(models, 'cheap-batch')).toBeUndefined()
+  })
+})
+
+describe('default stream output budget', () => {
+  test('caps an ordinary high-output model request at 32K', async () => {
+    const previousCwd = process.cwd()
+    const previousFetch = globalThis.fetch
+    const previousApiKey = process.env.ANTHROPIC_API_KEY
+    let requestMaxTokens: number | undefined
+    process.chdir(agentDir)
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key'
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ models: { default: { model: 'anthropic/claude-sonnet-4-6' } } }),
+    )
+    reloadConfig(agentDir)
+    invalidateProviderAuthCache()
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestMaxTokens = (JSON.parse(String(init?.body)) as { max_tokens?: number }).max_tokens
+      return new Response(
+        [
+          'event: message_start',
+          'data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
+          '',
+          'event: content_block_start',
+          'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+          '',
+          'event: content_block_delta',
+          'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}',
+          '',
+          'event: content_block_stop',
+          'data: {"type":"content_block_stop","index":0}',
+          '',
+          'event: message_delta',
+          'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}',
+          '',
+          'event: message_stop',
+          'data: {"type":"message_stop"}',
+          '',
+        ].join('\n'),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as typeof fetch
+
+    try {
+      const { session, dispose } = await createSessionWithDispose({
+        sessionManager: SessionManager.inMemory(agentDir),
+        systemPromptOverride: 'test output cap',
+        tools: [],
+      })
+      try {
+        await session.prompt('reply briefly')
+        expect(requestMaxTokens).toBe(32_000)
+      } finally {
+        await dispose()
+      }
+    } finally {
+      globalThis.fetch = previousFetch
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = previousApiKey
+      invalidateProviderAuthCache()
+      __resetConfigForTesting()
+      process.chdir(previousCwd)
+    }
   })
 })

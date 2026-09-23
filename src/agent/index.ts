@@ -102,6 +102,13 @@ export { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
 
+// Pi AI 0.73.1 capped an unset output budget at 32K
+// (pi-ai dist/providers/simple-options.js:4). Pi 0.87.1 instead defaults to
+// the full model maximum before context clamping (dist/api/simple-options.js:17),
+// so preserve the former safe default at the session boundary. Explicit budgets
+// remain untouched for compaction and channel-specific output caps.
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32_000
+
 export type PluginSessionWiring = {
   registry: PluginRegistry
   hooks: HookBus
@@ -526,6 +533,20 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+
+  // Wrapping also means `agent.streamFunction !== streamSimple`, which puts pi's
+  // summarization auth on its lenient branch (agent-session.js:214-232): a
+  // failed compaction auth surfaces from the request rather than as pi's
+  // "Authentication failed … /login" message. Channel sessions already wrap
+  // this function, so every origin now behaves the same way.
+  const innerStreamFunction = session.agent.streamFunction
+  session.agent.streamFunction = async (requestModel, context, streamOptions) => {
+    const maxTokens =
+      streamOptions?.maxTokens ??
+      (requestModel.maxTokens > 0 ? Math.min(requestModel.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) : undefined)
+    return await innerStreamFunction(requestModel, context, { ...streamOptions, maxTokens })
+  }
+
   // typeclaw owns retry/fallback in its turn drivers, so the SDK's own
   // same-model auto-retry must be OFF. Leaving it on races typeclaw's
   // soft-error capture: the SDK can silently recover a `stopReason:'error'` turn
