@@ -47,7 +47,7 @@ class FakeSlackBotListener {
 function lifecycleRouter(): ChannelRouter {
   const noop = (): void => {}
   return {
-    route: async () => {},
+    route: async () => ({ kind: 'observed' as const }),
     executeCommand: async () => ({ kind: 'unknown-command' }),
     registerOutbound: noop,
     unregisterOutbound: noop,
