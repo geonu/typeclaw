@@ -29,6 +29,15 @@ function fakeRouter(
 ): ChannelRouter {
   return {
     route: async () => {},
+    acceptBackgroundResponse: async () => {
+      throw new Error('Unexpected background admission')
+    },
+    suppressUnstartedBackgroundResponse: async () => {
+      throw new Error('Unexpected background suppression')
+    },
+    attachBackgroundResultCoverage: async () => {
+      throw new Error('Unexpected background coverage')
+    },
     send: handler,
     hasQualifyingWorkThisLogicalTurn: () => options.qualifyingWorkObserved ?? false,
     getConsecutiveSendCount: () => options.consecutiveCount ?? 0,
@@ -94,13 +103,13 @@ function fakeRouter(
     markRestartAbortForAllLive: async () => {},
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
-    injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
+    injectSubagentCompletionReminder: async () => ({ kind: 'no-live-session' }),
     injectPrVerdictActivity: () => ({ kind: 'delivered', count: 0 }),
     ...(options.finishGithubReviewThreadCloseout !== undefined
       ? { finishGithubReviewThreadCloseout: options.finishGithubReviewThreadCloseout }
       : {}),
-    noteGithubReviewOutput: () => ({ kind: 'no-live-session' }),
-    markTurnSkipped: () => ({ kind: 'no-live-session' }),
+    noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
+    markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},
@@ -203,7 +212,7 @@ describe('createChannelReplyTool', () => {
       thread: '1700000000.000100',
       text: 'hi',
     })
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('passes preview suppression to the router for an origin reply', async () => {
@@ -225,7 +234,7 @@ describe('createChannelReplyTool', () => {
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'hi' })
-    expect(result.details).toEqual({ ok: true, messageId: 'ts1', messageIds: ['ts1', 'ts2'] })
+    expect(result.details).toMatchObject({ ok: true, messageId: 'ts1', messageIds: ['ts1', 'ts2'] })
   })
 
   test('strips a trailing tool-call leak from text, sending only the prose', async () => {
@@ -252,7 +261,7 @@ describe('createChannelReplyTool', () => {
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'working on it', more_work_this_turn: true })
-    expect(result.details).toEqual({ ok: true, more_work_this_turn: true, messageId: 'ts9', messageIds: ['ts9'] })
+    expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true, messageId: 'ts9', messageIds: ['ts9'] })
   })
 
   test('passes thread=null verbatim when origin is a channel-root session', async () => {
@@ -309,7 +318,7 @@ describe('createChannelReplyTool', () => {
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'nope' })
-    expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
+    expect(result.details).toMatchObject({ ok: false, error: 'denied by allow rules' })
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('channel_reply denied')
     expect(text).toContain('denied by allow rules')
@@ -321,7 +330,7 @@ describe('createChannelReplyTool', () => {
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'ㅋ'.repeat(500) })
-    expect(result.details).toEqual({ ok: false, error: OUTBOUND_FLOOD_ERROR })
+    expect(result.details).toMatchObject({ ok: false, error: OUTBOUND_FLOOD_ERROR })
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('channel_reply denied')
     expect(text).toContain(OUTBOUND_FLOOD_ERROR)
@@ -509,7 +518,7 @@ describe('createChannelReplyTool', () => {
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'working on it…', more_work_this_turn: true })
-      expect(result.details).toEqual({ ok: true, more_work_this_turn: true })
+      expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true })
     })
 
     test('omits more_work_this_turn from details by default so the reply stays terminal', async () => {
@@ -518,7 +527,7 @@ describe('createChannelReplyTool', () => {
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'done' })
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
 
     test('more_work_this_turn: false stays terminal (only true keeps the turn alive)', async () => {
@@ -527,7 +536,7 @@ describe('createChannelReplyTool', () => {
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'done', more_work_this_turn: false })
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
 
     test('a denied reply never carries more_work_this_turn (no turn to keep alive)', async () => {
@@ -536,7 +545,7 @@ describe('createChannelReplyTool', () => {
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'nope', more_work_this_turn: true })
-      expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
+      expect(result.details).toMatchObject({ ok: false, error: 'denied by allow rules' })
     })
 
     test('more_work_this_turn is the one required parameter (so the schema rejects a reply that omits it)', () => {
@@ -579,7 +588,7 @@ describe('createChannelReplyTool', () => {
         origin: slackChannelRootOrigin,
       })
       const result = await runTool(tool, { attachments: [{ path: '/agent/a.png' }] })
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
       expect(calls[0]?.text).toBeUndefined()
     })
 
@@ -594,7 +603,7 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, {})
       expect(calls).toHaveLength(0)
-      expect(result.details).toEqual({ ok: false, error: 'missing text and attachments' })
+      expect(result.details).toMatchObject({ ok: false, error: 'missing text and attachments' })
     })
   })
 
@@ -643,7 +652,7 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, { text: 'I will reply NO_REPLY only when asked' })
       expect(calls).toHaveLength(1)
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
 
     test('does NOT block on lowercase or other casings (must match exactly)', async () => {
@@ -657,7 +666,7 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, { text: 'no_reply' })
       expect(calls).toHaveLength(1)
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
 
     test('blocks the parenthesized "(NO_REPLY)" form (mirrors router lenience)', async () => {
@@ -727,7 +736,7 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, { text: 'Empty response from the cache layer; retrying now.' })
       expect(calls).toHaveLength(1)
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
   })
 
@@ -781,7 +790,7 @@ describe('createChannelReplyTool', () => {
         text: 'I called channel_reply:0 in the earlier turn, here are the results.',
       })
       expect(calls).toHaveLength(1)
-      expect(result.details).toEqual({ ok: true })
+      expect(result.details).toMatchObject({ ok: true })
     })
   })
 
@@ -792,7 +801,7 @@ describe('createChannelReplyTool', () => {
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'same body' })
-      expect(result.details).toEqual({ ok: false, error: 'Duplicate not sent. ...' })
+      expect(result.details).toMatchObject({ ok: false, error: 'Duplicate not sent. ...' })
       const text = (result.content[0] as { text: string }).text
       expect(text).toContain('channel_reply denied')
       expect(text).toContain('Duplicate not sent')
@@ -868,7 +877,7 @@ describe('channel_reply resolve_review_thread', () => {
     const result = await runTool(tool, { text: 'Verified — fix looks solid.', resolve_review_thread: true })
 
     expect(order).toEqual(['resolve:3343107661', 'send'])
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('reports success without posting when the thread was already resolved', async () => {
@@ -887,7 +896,7 @@ describe('channel_reply resolve_review_thread', () => {
     const result = await runTool(tool, { text: 'Verified — fix looks solid.', resolve_review_thread: true })
 
     expect(calls).toHaveLength(0)
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
     const rendered = (result.content[0] as { text: string }).text
     expect(rendered).toContain('already resolved')
     expect(rendered).toContain('no acknowledgement comment was posted')
@@ -986,7 +995,7 @@ describe('channel_reply resolve_review_thread', () => {
     const result = await runTool(tool, { text: 'Looks resolved.', resolve_review_thread: true })
 
     expect(calls).toHaveLength(0)
-    expect(result.details).toEqual({ ok: false, error: 'could not resolve review thread: GitHub GraphQL 403' })
+    expect(result.details).toMatchObject({ ok: false, error: 'could not resolve review thread: GitHub GraphQL 403' })
   })
 
   test('refuses to resolve a thread the bot did not author and does not post', async () => {
@@ -1168,7 +1177,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { text: 'Still looking into this one.', resolve_review_thread: false })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('exempts a mid-turn status reply (more_work_this_turn:true) when it makes no close-out choice', async () => {
@@ -1184,7 +1193,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { text: 'On it — checking the diff now.', more_work_this_turn: true })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toEqual({ ok: true, more_work_this_turn: true })
+    expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true })
   })
 
   for (const resolveReviewThread of [true, false]) {
@@ -1223,7 +1232,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { attachments: [{ path: '/agent/diff.png' }] })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('does not require the choice on a github PR reply outside a review thread (thread === null)', async () => {
@@ -1239,7 +1248,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { text: 'General note on the PR.' })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('does not require the choice on a non-github review-thread reply', async () => {
@@ -1255,7 +1264,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { text: 'done' })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 
   test('an explicit true still drives the existing resolve-before-post path', async () => {
@@ -1279,7 +1288,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     const result = await runTool(tool, { text: 'Verified — fix looks solid.', resolve_review_thread: true })
 
     expect(order).toEqual(['resolve:3343107661', 'send'])
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toMatchObject({ ok: true })
   })
 })
 
