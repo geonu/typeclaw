@@ -23,7 +23,7 @@ import {
 import { InboundJournal } from './inbound-journal'
 import { RecoveryDispatcher } from './recovery-dispatcher'
 import { RecoveryOutbox } from './recovery-outbox'
-import { createChannelRouter, SESSION_GRACE_HARD_TTL_MS, SESSION_IDLE_MS } from './router'
+import { createChannelRouter, SESSION_GRACE_HARD_TTL_MS, SESSION_IDLE_MS, TURN_FAILED_REACTION_EMOJI } from './router'
 import { defaultHistoryConfig } from './schema'
 import type { ChannelKey, InboundMessage, OutboundCallback } from './types'
 
@@ -612,8 +612,8 @@ async function debtFixture(
   })
   // Message ID → admitted input ID: a settled row keeps only a minimal tombstone.
   const admitted = new Map<string, string>()
-  const route = async (text: string): Promise<string> => {
-    const event = inbound(text)
+  const route = async (text: string, over: Partial<InboundMessage> = {}): Promise<string> => {
+    const event = inbound(text, over)
     const receipt = await router.route(event)
     if (receipt.kind === 'accepted') admitted.set(event.externalMessageId, receipt.inputId)
     return event.externalMessageId
@@ -1810,6 +1810,98 @@ test('a provider-error notice settles only the generation it captured before sen
   }
 })
 
+// A retry-and-see failure answers with a warning reaction instead of a notice. The landed
+// reaction is the turn's terminal answer, so it carries the same settlement contract.
+function registerWarningReaction(f: Awaited<ReturnType<typeof debtFixture>>) {
+  const reactions: string[] = []
+  const gate: { held?: { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } } = {}
+  f.router.registerReaction(f.key.adapter, async (request) => {
+    if (request.emoji === TURN_FAILED_REACTION_EMOJI && gate.held !== undefined) {
+      gate.held.entered.resolve()
+      await gate.held.release.promise
+    }
+    reactions.push(request.emoji)
+    return { ok: true }
+  })
+  return {
+    reactions,
+    hold: () => {
+      const held = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() }
+      gate.held = held
+      return held
+    },
+  }
+}
+
+const TURN_FAILURES = [
+  {
+    name: 'a transient provider failure',
+    fail: (session: ParentSession) => session.failProvider('Codex error: server_is_overloaded'),
+  },
+  {
+    name: 'an exhausted empty turn',
+    fail: (session: ParentSession) => session.finish('', 'length'),
+  },
+] as const
+
+for (const failure of TURN_FAILURES) {
+  test(`${failure.name} answered by a warning reaction settles the request but never a consumed child result`, async () => {
+    const f = await debtFixture()
+    try {
+      const parent = f.sessions[0]!
+      const warning = registerWarningReaction(f)
+      parent.onPrompt = async () => {
+        await f.accept('lookup')
+        await f.complete('lookup')
+        await f.router.attachBackgroundResultCoverage({ parentSessionId: 'parent-1', taskId: 'lookup' })
+        failure.fail(parent)
+      }
+      const request = await f.route('조회 결과 요약해줘.', { reactionRef: { adapter: f.key.adapter, value: 'r-1' } })
+      await f.flush()
+
+      // The reaction is the answer: no chat line, the request closes as delivered.
+      expect(warning.reactions).toContain(TURN_FAILED_REACTION_EMOJI)
+      expect(f.sent).toEqual([])
+      expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
+      // The consumed result was not answered by a failure and stays owed on its own.
+      const child = (await f.childRow('lookup'))!
+      expect(child.phase).toBe('notice-owned')
+      const notices = await f.outbox.list()
+      expect(notices.flatMap((notice) => notice.covers.map((cover) => cover.id))).toEqual([child.obligationId])
+
+      // A reboot re-imports only the child notice; the answered request gets no duplicate.
+      expect(await f.reboot()).toBe(notices.length)
+      const recovered = await new RecoveryOutbox(f.dir).list()
+      expect(recovered.map((notice) => notice.deliveryId)).toEqual(notices.map((notice) => notice.deliveryId))
+    } finally {
+      await f.cleanup()
+    }
+  })
+}
+
+test('a warning reaction settles only the generation it captured before reacting', async () => {
+  const f = await debtFixture()
+  try {
+    const parent = f.sessions[0]!
+    const warning = registerWarningReaction(f)
+    const held = warning.hold()
+    parent.onPrompt = async () => parent.failProvider('Codex error: server_is_overloaded')
+    const request = await f.route('Summarize the incident.', { reactionRef: { adapter: f.key.adapter, value: 'r-1' } })
+    const draining = f.flush()
+    await held.entered.promise
+    // /stop decides the request while the reaction is still in flight.
+    await f.route('/stop')
+    held.release.resolve()
+    await draining
+
+    expect(warning.reactions).toContain(TURN_FAILED_REACTION_EMOJI)
+    expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'intentionally-suppressed' } })
+    expect(await f.outbox.list()).toEqual([])
+  } finally {
+    await f.cleanup()
+  }
+})
+
 test('/stop after a promise-only turn suppresses the live-turn-ended notice before it is sent', async () => {
   const f = await debtFixture()
   let dispatcher: RecoveryDispatcher | undefined
@@ -1975,7 +2067,7 @@ function interruptNoticeImport(outbox: RecoveryOutbox, published: boolean) {
 interface DeferredNoticeFixture {
   sessions: ParentSession[]
   deferToChild: (session: ParentSession, taskId: string) => void
-  route: (text: string) => Promise<string>
+  route: (text: string, over?: Partial<InboundMessage>) => Promise<string>
   flush: () => Promise<void>
   consumeThenDefer: (request?: string) => Promise<string | undefined>
   running: Map<string, number>

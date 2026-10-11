@@ -187,6 +187,17 @@ generations once the send is confirmed. It never settles consumed or fetched
 background results. A failed or no-op send settles nothing, and a settlement
 write failure is logged without replaying the turn; the debt stays owed.
 
+A retry-and-see failure answers with a `warning` (⚠️) reaction on the turn's
+triggering message instead of a chat line. These are transport drops, observer
+stalls, network or 5xx blips, and provider overloads (`isTransientProviderFailure`
+in `src/agent/provider-error.ts`), plus the exhausted empty-turn fallback ("I got
+stuck…"). A landed reaction settles the same owned inbound refs the notice would.
+Auth, billing, quota, model-config, rate or usage limits, and unclassified
+failures keep the text notice, because someone has to act on them. Any adapter
+that can't render the reaction (GitHub's fixed set, reaction-less platforms) or
+whose reaction call fails also falls back to the text notice. The operator log
+line is unchanged.
+
 When a logical turn ends with owed coverage and no provable continuation (no
 queued retry, no running child the coverage is deferred on, nothing queued),
 the router transfers that coverage at once to a **live-turn-ended** notice in

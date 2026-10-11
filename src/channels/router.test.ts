@@ -100,6 +100,7 @@ import {
   StaleLiveSessionError,
   stripThinkBlocks,
   TOOL_CALL_LEAK_NUDGE,
+  TURN_FAILED_REACTION_EMOJI,
   TURN_CAP_ERROR,
   WILLINGNESS_NUDGE,
   type ChannelRouter,
@@ -121,6 +122,7 @@ import type {
   OutboundMessage,
   ReactionRequest,
   ReactionRef,
+  ReactionResult,
   SendResult,
 } from './types'
 import { fallbackChannelAccountIdentity } from './types'
@@ -11916,6 +11918,82 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(sent.some((t) => /unauthorized/i.test(t) && /API key/i.test(t))).toBe(true)
     expect(sent.some((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
     expect(logs.some((m) => /empty_turn_retry/.test(m))).toBe(false)
+  })
+
+  describe('turn-failed reaction', () => {
+    const REACTION_REF = { adapter: 'discord-bot' as const, value: 'failed-msg' }
+
+    async function failingTurnRouter(
+      errorMessage: string | null,
+      reactionResult: ReactionResult = { ok: true },
+      over: Partial<InboundMessage> = {},
+    ): Promise<{ sent: string[]; reactions: ReactionRequest[] }> {
+      const dir = await tempDir()
+      const sent: string[] = []
+      const reactions: ReactionRequest[] = []
+      const { router, sessions } = makeRouter(dir)
+      router.registerOutbound('discord-bot', async (msg) => {
+        sent.push(msg.text ?? '')
+        return { ok: true }
+      })
+      router.registerReaction('discord-bot', async (req) => {
+        reactions.push(req)
+        return reactionResult
+      })
+
+      await router.route(inbound({ text: '이거 확인해줘', reactionRef: REACTION_REF, ...over }))
+      sessions[0]!.onPrompt = () => {
+        if (errorMessage === null) {
+          sessions[0]!.setAssistantText('')
+          return
+        }
+        sessions[0]!.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage } })
+        sessions[0]!.setAssistantMidTurn('', 'error')
+      }
+      await router.__testing!.flushDebounce(KEY)
+      return { sent, reactions: reactions.filter((r) => r.emoji === TURN_FAILED_REACTION_EMOJI) }
+    }
+
+    test('a transient provider failure reacts ⚠️ on the triggering message instead of posting a notice', async () => {
+      const { sent, reactions } = await failingTurnRouter('transient server_is_overloaded')
+
+      expect(reactions).toHaveLength(1)
+      expect(reactions[0]).toMatchObject({ chat: 'c1', reactionRef: REACTION_REF })
+      expect(sent).toEqual([])
+    })
+
+    test('falls back to the text notice when the adapter cannot render the reaction', async () => {
+      const { sent, reactions } = await failingTurnRouter('transient server_is_overloaded', {
+        ok: false,
+        error: 'unsupported emoji',
+        code: 'unsupported',
+      })
+
+      expect(reactions).toHaveLength(1)
+      expect(sent).toEqual([`⚠️ ${softErrorNotice('transient server_is_overloaded')}`])
+    })
+
+    test('an operator-actionable failure keeps the text notice and adds no reaction', async () => {
+      const { sent, reactions } = await failingTurnRouter('401 Unauthorized')
+
+      expect(reactions).toEqual([])
+      expect(sent.some((t) => /unauthorized/i.test(t) && /API key/i.test(t))).toBe(true)
+    })
+
+    test('a rate limit keeps the text notice so the cause stays visible', async () => {
+      const { sent, reactions } = await failingTurnRouter('429 Too Many Requests: rate limit reached')
+
+      expect(reactions).toEqual([])
+      expect(sent.some((t) => /rate-limited/i.test(t))).toBe(true)
+    })
+
+    test('an exhausted empty turn reacts ⚠️ instead of posting the "I got stuck" fallback', async () => {
+      // given: a cold-start solo turn, the shape that exhausts empty-turn retries
+      const { sent, reactions } = await failingTurnRouter(null, { ok: true }, { isBotMention: false })
+
+      expect(reactions).toHaveLength(1)
+      expect(sent).not.toContain(EMPTY_TURN_FALLBACK_TEXT)
+    })
   })
 
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {

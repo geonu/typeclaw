@@ -355,6 +355,22 @@ export function isRetryableSameRef(raw: string): boolean {
   return TRANSPORT_FAILURE.test(raw) || OBSERVER_TIMEOUT.test(raw) || NETWORK_OR_5XX.test(raw)
 }
 
+// Failures a user can only answer with "try again": a dropped transport, an
+// observer stall, a network/5xx blip, or a provider overload. Channels mark
+// these with a reaction instead of posting a notice. Rate/usage limits are
+// excluded even though they say "try again shortly": they can last hours, and
+// a bare reaction on every message would hide why the agent stopped
+// answering. Account-wide faults stay out via `isRetryableSameRef` and
+// NON_FAILOVER_FAULT.
+const OVERLOAD = /overloaded|service.?unavailable|\b503\b/i
+const RATE_OR_USAGE_LIMIT = /usage.?limit|rate.?limit|too many requests|\b429\b/i
+
+export function isTransientProviderFailure(raw: string): boolean {
+  if (RATE_OR_USAGE_LIMIT.test(raw)) return false
+  if (isRetryableSameRef(raw)) return true
+  return !NON_FAILOVER_FAULT.test(raw) && !CONTEXT_OVERFLOW.test(raw) && OVERLOAD.test(raw)
+}
+
 export function detectProviderError(message: unknown): DetectedProviderError | null {
   if (typeof message !== 'object' || message === null) return null
   const m = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown }
