@@ -80,6 +80,7 @@ const EMOJI_UNICODE: Record<string, string> = {
   raised_hands: '🙌',
   zipper_mouth_face: '🤐',
   hourglass_flowing_sand: '⏳',
+  warning: '⚠️',
 }
 
 function resolveEmoji(emoji: string): string | null {
