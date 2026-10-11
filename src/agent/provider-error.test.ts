@@ -12,6 +12,7 @@ import {
   isRetryableSameRef,
   isObserverTtfbTimeout,
   isThrottleOrOverload,
+  isTransientProviderFailure,
   subscribeProviderErrors,
   type LocalFailureMarkerOptions,
   wrapTransformContextWithLocalFailureMarker,
@@ -374,6 +375,29 @@ describe('isFailoverWorthy', () => {
     const result = detectHardProviderError(new Error('session expired: api key expired'))
     expect(result?.safeMessage).toMatch(/unauthorized|API key/i)
     expect(result?.safeMessage).not.toMatch(/session\/transport failure|dropped/i)
+  })
+})
+
+describe('isTransientProviderFailure', () => {
+  test.each([
+    'Codex error: {"error":{"code":"server_is_overloaded"}}',
+    '503 Service Unavailable',
+    'socket hang up',
+    '502 Bad Gateway',
+  ])('treats %p as a retry-and-see failure', (raw) => {
+    expect(isTransientProviderFailure(raw)).toBe(true)
+  })
+
+  test.each([
+    '401 Unauthorized',
+    '429 insufficient quota',
+    '429 Too Many Requests',
+    'You have hit your ChatGPT usage limit (team plan).',
+    'billing hard limit reached',
+    'context_length_exceeded',
+    'something unexpected happened',
+  ])('keeps %p out so its cause stays visible', (raw) => {
+    expect(isTransientProviderFailure(raw)).toBe(false)
   })
 })
 
