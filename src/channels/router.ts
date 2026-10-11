@@ -10,7 +10,12 @@ import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '
 import { resolveFallbackChain } from '@/agent/model-fallback'
 import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
-import { detectHardProviderError, isFailoverWorthy, subscribeProviderErrors } from '@/agent/provider-error'
+import {
+  detectHardProviderError,
+  isFailoverWorthy,
+  isTransientProviderFailure,
+  subscribeProviderErrors,
+} from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -232,6 +237,10 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 export const MAX_CHANNEL_SENDS_PER_TURN = 10
 export const ENGAGE_REACTION_EMOJI = 'eyes'
 export const CONTINUATION_REACTION_EMOJI = 'hourglass_flowing_sand'
+// Marks the triggering message of a turn that failed for a reason the user can
+// only answer by retrying, in place of a chat notice. Adapters that cannot
+// render it (GitHub's fixed set, reaction-less platforms) get the text notice.
+export const TURN_FAILED_REACTION_EMOJI = 'warning'
 // Best-effort "zipping it / going quiet" ack dropped on the triggering message
 // when the model disengages (channel_disengage); fire-and-forget like engage :eyes:.
 export const DISENGAGE_REACTION_EMOJI = 'zipper_mouth_face'
@@ -246,6 +255,8 @@ const DISENGAGE_REACTION_EMOJI_OVERRIDES: Partial<Record<AdapterId, string>> = {
 export function disengageReactionEmojiFor(adapter: AdapterId): string {
   return DISENGAGE_REACTION_EMOJI_OVERRIDES[adapter] ?? DISENGAGE_REACTION_EMOJI
 }
+
+type PendingProviderError = { turnSeq: number; safeMessage: string; transient: boolean }
 
 type SilentAckReason = 'github_review_output' | 'awaiting_background_child'
 
@@ -1368,7 +1379,7 @@ type LiveSession = {
   // turn-end finally posts `safeMessage` ONLY if no reply landed, else discards.
   // First error per turn wins. Keyed by `turnSeq` so a stale record from a
   // crashed prior turn can't leak into the next.
-  pendingProviderError: { turnSeq: number; safeMessage: string } | null
+  pendingProviderError: PendingProviderError | null
   destroyed: boolean
   // Set by tearDownAllLive when a reload/roles/auth swap wants to recreate this
   // session but a turn is mid-flight. Aborting now would strand the in-flight
@@ -3316,7 +3327,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
         if (live.pendingProviderError?.turnSeq === live.turnSeq) return
-        live.pendingProviderError = { turnSeq: live.turnSeq, safeMessage: err.safeMessage }
+        live.pendingProviderError = {
+          turnSeq: live.turnSeq,
+          safeMessage: err.safeMessage,
+          transient: isTransientProviderFailure(err.message),
+        }
       })
       live.unsubTodoOutcome = created.session.subscribe((event: unknown) => {
         const usage = extractTurnUsage(event)
@@ -4095,6 +4110,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.emptyTurnFallbackTurn = live.turnSeq
     try {
       const inboundCoverage = await captureInboundResultCoverage(live.sessionId)
+      if (await reactTurnFailed(live)) {
+        await recordLandedBackgroundResponse(live, 'empty-turn-fallback', [], inboundCoverage)
+        return
+      }
       const result = await send(
         {
           adapter: live.key.adapter,
@@ -4826,7 +4845,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // a false-failure notice above the retry's eventual reply — the same defect
     // one logical turn later.
     if (retryQueued) {
-      live.pendingProviderError = { turnSeq: live.turnSeq + 1, safeMessage: pending.safeMessage }
+      live.pendingProviderError = { ...pending, turnSeq: live.turnSeq + 1 }
       return
     }
     live.pendingProviderError = null
@@ -4842,6 +4861,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       inboundCoverage = await captureInboundResultCoverage(live.sessionId)
     } catch (error) {
       logger.error(`[channels] ${live.keyId}: provider-error notice coverage capture failed: ${describeError(error)}`)
+    }
+    // Only a retry-and-see failure collapses to a reaction. Auth, billing,
+    // quota, model-config, rate limits, and unclassified failures keep the text
+    // notice: someone has to act on them, and a bare ⚠️ would hide the cause.
+    if (pending.transient && (await reactTurnFailed(live))) {
+      logger.warn(`[channels] ${live.keyId}: provider-error marked with reaction notice="${pending.safeMessage}"`)
+      if (inboundCoverage.length > 0) {
+        await recordLandedBackgroundResponse(live, 'provider-error-notice', [], inboundCoverage)
+      }
+      return
     }
     const result = await send(
       {
@@ -5519,7 +5548,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // this turnSeq by subscribeProviderErrors (first-detected wins).
           const hardProviderError = detectHardProviderError(err)
           if (hardProviderError !== null && live.pendingProviderError?.turnSeq !== live.turnSeq) {
-            live.pendingProviderError = { turnSeq: live.turnSeq, safeMessage: hardProviderError.safeMessage }
+            live.pendingProviderError = {
+              turnSeq: live.turnSeq,
+              safeMessage: hardProviderError.safeMessage,
+              transient: isTransientProviderFailure(hardProviderError.message),
+            }
           }
           live.consecutiveSends.clear()
           live.lastSentText.clear()
@@ -9107,6 +9140,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           `[channels] disengage-react threw adapter=${live.key.adapter} chat=${live.key.chat}: ${describeError(err)}`,
         )
       })
+  }
+
+  // Answers a failed turn with a reaction on its triggering message instead of
+  // a chat line; in busy rooms the old text notices outnumbered real replies.
+  // False when there is nothing reactable or the adapter refused, so the caller
+  // falls back to its text notice and the user is never left with silence.
+  const reactTurnFailed = async (live: LiveSession): Promise<boolean> => {
+    const reactionRef = live.currentTurnReactionRef
+    if (reactionRef === null) return false
+    const result = await react({
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+      reactionRef,
+      emoji: TURN_FAILED_REACTION_EMOJI,
+    })
+    if (!result.ok && result.code !== 'unsupported') {
+      logger.info(`[channels] ${live.keyId}: turn-failed reaction failed, posting notice: ${result.error}`)
+    }
+    return result.ok
   }
 
   const armSilentTurnAck = (live: LiveSession, reason: SilentAckReason): void => {
