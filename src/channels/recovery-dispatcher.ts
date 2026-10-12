@@ -3,7 +3,11 @@ import type { RecoveryRecord } from './continuity-types'
 import type { InboundJournal } from './inbound-journal'
 import type { RecoveryOutbox } from './recovery-outbox'
 import type { ChannelRouter } from './router'
-import { channelKeyId, RecoveryTransportError, type ChannelKey } from './types'
+import { channelKeyId, RecoveryTransportError, type ChannelKey, type RecoveryRedelivery } from './types'
+
+// Bounds how long a restart notice waits for an adapter still deciding whether it re-admitted the
+// interrupted work (GitHub's boot reconcile pass), so a stuck pass delays the notice, never loses it.
+const REDELIVERY_WAIT_MS = 5 * 60_000
 
 /** Transport-only recovery; each destination progresses independently. */
 export class RecoveryDispatcher {
@@ -175,6 +179,12 @@ export class RecoveryDispatcher {
           await this.outbox.suppress(record.deliveryId, 'coverage-resolved', crypto.randomUUID())
           continue
         }
+        const redelivery = this.redelivery(record, now)
+        if (redelivery === 'pending') continue
+        if (redelivery === 'redelivered' && this.options.inboundJournal) {
+          await this.suppressRedelivered(record, this.options.inboundJournal)
+          continue
+        }
       } catch (error) {
         this.options.onError?.(error)
         continue
@@ -321,6 +331,26 @@ export class RecoveryDispatcher {
         )
       }
     }
+  }
+
+  /** Only a never-attempted restart notice over inbound rows can be superseded by adapter redelivery. */
+  private redelivery(record: RecoveryRecord, now: number): RecoveryRedelivery {
+    const journal = this.options.inboundJournal
+    if (!journal || record.cause !== undefined || record.attempts > 0 || !this.router.recoveryRedelivery)
+      return 'not-redelivered'
+    const eventKinds = journal.noticeEventKinds(record)
+    if (!eventKinds) return 'not-redelivered'
+    const answer = this.router.recoveryRedelivery(record, eventKinds)
+    return answer === 'pending' && now - record.createdAt >= REDELIVERY_WAIT_MS ? 'not-redelivered' : answer
+  }
+
+  private async suppressRedelivered(record: RecoveryRecord, journal: InboundJournal): Promise<void> {
+    const decisionId = crypto.randomUUID()
+    const suppress = () => journal.suppressNoticeCoverage(record, { decisionId, reason: 'adapter-redelivered' })
+    const source = this.options.backgroundObligations
+    if (source) await source.withTargetLane(record.target, suppress)
+    else await suppress()
+    await this.outbox.suppress(record.deliveryId, 'adapter-redelivered', decisionId)
   }
 
   async suppressParent(target: ChannelKey, parentSessionId: string): Promise<void> {
