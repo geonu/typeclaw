@@ -303,7 +303,14 @@ export type RecoveryAdapterCallbacks = {
   accountIdentity: (workspace?: string) => Promise<string | undefined>
   cachedAccountIdentity?: (workspace?: string) => string | undefined
   reconcile: (record: RecoveryRecord) => Promise<RecoveryReconcileResult>
+  /**
+   * Whether this adapter has already re-admitted the interrupted work itself, so the restart
+   * notice would be wrong. `pending` defers the notice while that answer is still being decided.
+   */
+  redelivery?: (record: RecoveryRecord, eventKinds: readonly string[]) => RecoveryRedelivery
 }
+
+export type RecoveryRedelivery = 'redelivered' | 'pending' | 'not-redelivered'
 
 export type OutboundMessage = {
   adapter: AdapterId

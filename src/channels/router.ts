@@ -164,7 +164,12 @@ import type {
   TypingCallback,
 } from './types'
 import { channelKeyId, fallbackChannelAccountIdentity } from './types'
-import type { RecoveryAdapterCallbacks, RecoveryReconcileResult, SendOptions as TransportSendOptions } from './types'
+import type {
+  RecoveryAdapterCallbacks,
+  RecoveryReconcileResult,
+  RecoveryRedelivery,
+  SendOptions as TransportSendOptions,
+} from './types'
 import { createWaitingReactionCoordinator, type WaitingReactionHandle } from './waiting-reactions'
 
 export const INITIAL_DEBOUNCE_MS = 600
@@ -1502,6 +1507,7 @@ export type ChannelRouter = {
   getRecoveryAccountIdentity: (adapter: ChannelKey['adapter'], workspace?: string) => Promise<string | undefined>
   validateRecovery: (record: RecoveryRecord) => Promise<RecoveryFailure | undefined>
   reconcileRecovery: (record: RecoveryRecord) => Promise<RecoveryReconcileResult>
+  recoveryRedelivery?: (record: RecoveryRecord, eventKinds: readonly string[]) => RecoveryRedelivery
   setRecoveryStopHandler: (handler: (target: ChannelKey, parentSessionId: string) => Promise<void>) => void
   // Reaction support is opt-in per adapter: an adapter that never calls
   // registerReaction makes `react` resolve to `code: 'unsupported'`, and
@@ -9265,6 +9271,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
   const reconcileRecovery = async (record: RecoveryRecord): Promise<RecoveryReconcileResult> =>
     recoveryAdapters.get(record.target.adapter)?.reconcile(record) ?? { status: 'unreconcilable' }
+  const recoveryRedelivery = (record: RecoveryRecord, eventKinds: readonly string[]): RecoveryRedelivery =>
+    recoveryAdapters.get(record.target.adapter)?.redelivery?.(record, eventKinds) ?? 'not-redelivered'
   const setRecoveryStopHandler = (handler: (target: ChannelKey, parentSessionId: string) => Promise<void>): void => {
     recoveryStopHandler = handler
   }
@@ -9283,6 +9291,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getRecoveryAccountIdentity,
     validateRecovery,
     reconcileRecovery,
+    recoveryRedelivery,
     setRecoveryStopHandler,
     getConsecutiveSendCount,
     hasQualifyingWorkThisLogicalTurn,

@@ -390,6 +390,15 @@ function storedSlackMessageKey(row: JournalRow) {
     eventKind: tuple[4],
   })
 }
+function storedEventKind(identity: string): string | undefined {
+  let tuple: unknown
+  try {
+    tuple = JSON.parse(identity)
+  } catch {
+    return undefined
+  }
+  return Array.isArray(tuple) && tuple.length === 6 && typeof tuple[4] === 'string' && tuple[4] ? tuple[4] : undefined
+}
 /** The closed form of a full row: identity, terminal state and fences only. */
 function tombstone(row: JournalRow): ClosedInboundRecord {
   const messageKey = storedSlackMessageKey(row)
@@ -1561,6 +1570,18 @@ export class InboundJournal {
       if ((await this.background.validateNotice(record)) === 'open') open = true
     }
     return open ? 'open' : 'resolved'
+  }
+  /** Admission event kinds of a notice covering only open inbound rows; undefined for any other coverage. */
+  noticeEventKinds(record: RecoveryRecord): string[] | undefined {
+    const kinds: string[] = []
+    for (const cover of record.covers) {
+      const row = cover.store === 'inbound' ? this.rows.get(cover.id) : undefined
+      if (!row || row.phase === 'closed') return undefined
+      const kind = storedEventKind(row.identity)
+      if (kind === undefined) return undefined
+      kinds.push(kind)
+    }
+    return kinds.length ? kinds : undefined
   }
   async acknowledgeNotice(record: RecoveryRecord) {
     if (!['delivered', 'suppressed'].includes(record.state)) return
