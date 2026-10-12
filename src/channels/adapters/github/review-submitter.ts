@@ -28,6 +28,7 @@ export function createGithubReviewSubmitter(deps: {
   token: (context?: GithubAuthContext) => Promise<string>
   allowApprove: () => boolean
   accountIdentity?: () => Promise<string | undefined>
+  onReviewPosted?: (posted: { repo: string; prNumber: number; headSha: string; state: VerifiedReviewState }) => void
   fetchImpl?: typeof fetch
 }): ReviewSubmitter {
   const fetchImpl = deps.fetchImpl ?? fetch
@@ -82,6 +83,12 @@ export function createGithubReviewSubmitter(deps: {
     if (!posted.ok) return posted
     const verified = await verifyReview(fetchImpl, token, target, posted.reviewId, event)
     if (!verified.ok) return { ...verified, submitted: true }
+    deps.onReviewPosted?.({
+      repo: `${target.owner}/${target.repo}`,
+      prNumber: target.prNumber,
+      headSha: stable.headSha,
+      state: verified.state,
+    })
     return {
       ok: true,
       reviewId: verified.reviewId,
@@ -264,11 +271,11 @@ async function verifyReview(
   target: ReviewTarget,
   reviewId: number,
   event: SubmitReviewRequest['event'],
-): Promise<{ ok: true; reviewId: number; state: string } | (SubmitReviewResult & { ok: false })> {
+): Promise<{ ok: true; reviewId: number; state: VerifiedReviewState } | (SubmitReviewResult & { ok: false })> {
   const response = await githubFetch(fetchImpl, token, `${pullUrl(target)}/reviews/${reviewId}`)
   if (!response.ok) return responseError(response, 'GitHub review verify')
   const body = await readJson<{ id?: unknown; state?: unknown }>(response)
-  const expectedState =
+  const expectedState: VerifiedReviewState =
     event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : 'COMMENTED'
   if (body?.id !== reviewId || body.state !== expectedState) {
     return {
@@ -341,5 +348,6 @@ function anchorKey(path: string, line: number, side: 'LEFT' | 'RIGHT'): string {
   return `${path}\0${side}\0${line}`
 }
 
+type VerifiedReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'
 type PullResponse = { head?: { sha?: unknown } }
 type PullFilesResponse = Array<{ filename?: unknown; patch?: unknown }>

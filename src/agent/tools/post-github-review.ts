@@ -1,6 +1,7 @@
 import { Type } from '@earendil-works/pi-ai'
 import { defineTool } from '@earendil-works/pi-coding-agent'
 
+import { githubReviewChecks } from '@/channels/github-review-check'
 import {
   recordReview,
   recordReviewOutput,
@@ -99,6 +100,7 @@ export function createPostGithubReviewTool(options: {
                 body: params.body,
                 comments: (params.comments ?? []).map(toReviewFinding),
                 logger,
+                ...(params.head_sha !== undefined ? { reviewedHeadSha: params.head_sha } : {}),
               })
               fallbackLanded = fallback.landed
               return fallback.result
@@ -191,6 +193,7 @@ async function postDuplicateRequestChangesComment(args: {
   body: string
   comments: readonly ReviewFinding[]
   logger: ChannelToolLogger
+  reviewedHeadSha?: string
 }) {
   const coverage = await captureCoverage(args.router, args.sessionId)
   const result = await args.router.send(
@@ -217,6 +220,14 @@ async function postDuplicateRequestChangesComment(args: {
     state: 'COMMENT',
     ...coverage,
   })
+  // The comment republishes a verdict GitHub already holds as a standing
+  // CHANGES_REQUESTED, so the review check completes with that verdict.
+  void (args.reviewedHeadSha !== undefined
+    ? githubReviewChecks.reviewPosted(
+        { repo: args.origin.workspace, pullRequest: args.prNumber, headSha: args.reviewedHeadSha },
+        'CHANGES_REQUESTED',
+      )
+    : githubReviewChecks.completePostingReviews(args.origin.workspace, args.prNumber, 'CHANGES_REQUESTED'))
 
   const details: PostGithubReviewDetails = {
     ok: true,
