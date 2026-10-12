@@ -57,6 +57,7 @@ import {
   zodToToolParameters,
 } from './plugin-tools'
 import { PROACTIVE_NEXT_STEP_NUDGE } from './proactive-next-step-nudge'
+import { promptCacheKeyForOrigin, withPromptCacheKey } from './prompt-cache-key'
 import { wrapTransformContextWithLocalFailureMarker } from './provider-error'
 import { createReloadTool } from './reload-tool'
 import type { RestartHandoffOrigin } from './restart-handoff'
@@ -555,7 +556,19 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     const maxTokens =
       streamOptions?.maxTokens ??
       (requestModel.maxTokens > 0 ? Math.min(requestModel.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) : undefined)
-    return await innerStreamFunction(requestModel, context, { ...streamOptions, maxTokens })
+    const promptCacheKey = promptCacheKeyForOrigin(getOrigin())
+    const onPayload =
+      promptCacheKey === undefined
+        ? streamOptions?.onPayload
+        : async (payload: unknown, payloadModel: typeof requestModel) => {
+            const next = (await streamOptions?.onPayload?.(payload, payloadModel)) ?? payload
+            return withPromptCacheKey(next, promptCacheKey)
+          }
+    return await innerStreamFunction(requestModel, context, {
+      ...streamOptions,
+      maxTokens,
+      ...(onPayload ? { onPayload } : {}),
+    })
   }
 
   // typeclaw owns retry/fallback in its turn drivers, so the SDK's own
