@@ -99,7 +99,7 @@ function githubConfig(
     webhookPort: 0,
     eventAllowlist: ['issue_comment.created', 'pull_request.opened'],
     repos: [...repos],
-    review: { on: 'review_requested', approve: true },
+    review: { on: 'review_requested', approve: true, check: false },
   }
   if (webhookUrl !== null) config.webhookUrl = webhookUrl
   return config
@@ -1347,7 +1347,7 @@ describe('createGithubAdapter lifecycle', () => {
     function reviewConfig(on: 'opened' | 'review_requested' | 'off') {
       return (): ChannelAdapterConfig & GithubAdapterConfig => {
         const config = githubConfig(['acme/widgets'])
-        config.review = { on, approve: true }
+        config.review = { on, approve: true, check: false }
         return config
       }
     }
@@ -1645,7 +1645,7 @@ describe('createGithubAdapter lifecycle', () => {
         let reviewOn: 'opened' | 'off' = 'opened'
         const configRef = (): ChannelAdapterConfig & GithubAdapterConfig => {
           const config = githubConfig(['acme/widgets'])
-          config.review = { on: reviewOn, approve: true }
+          config.review = { on: reviewOn, approve: true, check: false }
           return config
         }
         const handlers: Array<() => void> = []

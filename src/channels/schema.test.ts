@@ -109,7 +109,7 @@ describe('channelsSchema', () => {
 
   test('github review defaults to { on: review_requested, approve: true } when omitted', () => {
     const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
-    expect(parsed.github?.review).toEqual({ on: 'review_requested', approve: true })
+    expect(parsed.github?.review).toEqual({ on: 'review_requested', approve: true, check: true })
   })
 
   test('github review.on defaults to review_requested', () => {
