@@ -9,7 +9,7 @@ import { LegacyBackgroundHandoffReader } from '@/channels/background-handoff'
 import { createLegacyRecoveryNotice } from '@/channels/background-handoff'
 import { BackgroundObligationStore } from '@/channels/background-obligations'
 import type { BackgroundAcceptance } from '@/channels/background-obligations'
-import { RECOVERY_NOTICE_TEXT } from '@/channels/continuity-types'
+import { RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from '@/channels/continuity-types'
 import type { RecoveryRecord } from '@/channels/continuity-types'
 import { InboundJournal } from '@/channels/inbound-journal'
 import type { InboundAdmission } from '@/channels/inbound-journal'
@@ -236,7 +236,9 @@ test('two admitted inputs and a compatible child recover as one notice, one send
 
   const { sent, errors } = await dispatch(booted, { sends: 1 })
   expect(errors).toEqual([])
-  expect(sent).toEqual([{ deliveryId: notice.deliveryId, chat: room.chat, text: RECOVERY_NOTICE_TEXT }])
+  expect(sent).toEqual([
+    { deliveryId: notice.deliveryId, chat: room.chat, text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }) },
+  ])
   for (const id of [claimed, queued])
     expect(booted.inboundJournal.get(id)).toMatchObject({
       phase: 'closed',

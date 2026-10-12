@@ -420,7 +420,7 @@ export const STRANDED_TOOLUSE_CONTINUATION_NUDGE = [
 // because the turn thrashed the send path). Replaces the historical silent
 // drop so the human is never left staring at dead air after a degenerate turn.
 export const EMPTY_TURN_FALLBACK_TEXT =
-  "⚠️ I got stuck putting together a reply and couldn't finish. Could you rephrase or try again?"
+  "I got stuck putting together a reply and couldn't finish. Could you rephrase or try again?"
 export const GITHUB_REVIEW_THREAD_CLOSEOUT_FALLBACK_TEXT =
   "I wasn't able to complete this follow-up. Leaving this thread open for manual review."
 // Distinct from EMPTY_TURN_RETRY_NUDGE: that one diagnoses budget exhaustion
@@ -4884,7 +4884,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         workspace: live.key.workspace,
         chat: live.key.chat,
         thread: live.key.thread,
-        text: `⚠️ ${pending.safeMessage}`,
+        text: pending.safeMessage,
       },
       { source: 'system', outputKind: 'meta' },
     ).catch((sendErr) => {

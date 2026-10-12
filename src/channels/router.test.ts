@@ -11395,6 +11395,10 @@ describe('ChannelRouter typing indicator', () => {
 // The redacted channel notice the classifier picks for a soft error with this
 // raw text, so these router tests follow the classifier instead of pinning its
 // wording.
+// Every redacted provider notice opens with one of these; the notices carry no alarm emoji.
+const PROVIDER_NOTICE =
+  /^(The (connection to the )?upstream LLM provider|The assistant turn failed|TypeClaw could not prepare)/
+
 function softErrorNotice(errorMessage: string): string {
   return detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage })!.safeMessage
 }
@@ -11970,7 +11974,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
       })
 
       expect(reactions).toHaveLength(1)
-      expect(sent).toEqual([`⚠️ ${softErrorNotice('transient server_is_overloaded')}`])
+      expect(sent).toEqual([softErrorNotice('transient server_is_overloaded')])
     })
 
     test('an operator-actionable failure keeps the text notice and adds no reaction', async () => {
@@ -12065,7 +12069,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     // then: exactly one redacted rate-limit notice, no raw text, no "I got stuck"
     const notices = sent.filter((t) => /rate-limited/i.test(t))
     expect(notices).toHaveLength(1)
-    expect(notices[0]).toContain('⚠️')
+    expect(notices[0]).not.toContain('⚠️')
     expect(sent.some((t) => /All tokens/.test(t))).toBe(false)
     expect(sent.some((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
   })
@@ -12102,7 +12106,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     // then
     const notices = sent.filter((t) => /stopped responding|timed out/i.test(t))
     expect(notices).toHaveLength(1)
-    expect(notices[0]).toContain('⚠️')
+    expect(notices[0]).not.toContain('⚠️')
     expect(sent.some((t) => /observer timeout/.test(t))).toBe(false)
   })
 
@@ -12135,8 +12139,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     await router.route(inbound({ text: 'hello?' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then: no ⚠️ notice for an internal bug — channels are not spammed
-    expect(sent.some((t) => t.includes('⚠️'))).toBe(false)
+    // then: no notice for an internal bug — channels are not spammed
+    expect(sent).toEqual([])
   })
 
   test('fires session.end on stop() before disposing each live session', async () => {
@@ -17465,7 +17469,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
 
     expect(sessions[0]!.continued).toBe(1)
     expect(sent[0]).toBe('찾아볼게.')
-    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((text) => PROVIDER_NOTICE.test(text))).toHaveLength(1)
     expect(sent[1]).toMatch(/connection to the upstream LLM provider dropped/i)
     expect(sent[1]).not.toContain('raw-detail')
     expect(sent[1]).not.toContain('second-raw-detail')
@@ -17503,7 +17507,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
 
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sent[0]).toBe('찾아볼게.')
-    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((text) => PROVIDER_NOTICE.test(text))).toHaveLength(1)
     expect(sent[1]).toMatch(/connection to the upstream LLM provider dropped/i)
     expect(sent[1]).not.toContain('reminder-raw-detail')
   })
@@ -17535,7 +17539,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     await router.__testing!.flushDebounce(KEY)
 
     expect(sent.slice(0, 2)).toEqual(['찾아볼게.', "Still checking… I'll keep checking."])
-    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((text) => PROVIDER_NOTICE.test(text))).toHaveLength(1)
     expect(sent[2]).toMatch(/connection to the upstream LLM provider dropped/i)
     expect(sent[2]).not.toContain('status-raw-detail')
   })
@@ -17563,7 +17567,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     await router.__testing!.flushDebounce(KEY)
 
     expect(sent).toContain('Recovered answer from the existing tool results.')
-    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(0)
+    expect(sent.filter((text) => PROVIDER_NOTICE.test(text))).toHaveLength(0)
   })
 
   test('provider notices preserve an outstanding promise across a reminder-only iteration', async () => {
@@ -17602,7 +17606,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     await router.__testing!.flushDebounce(KEY)
 
     expect(sessions[0]!.prompts).toHaveLength(2)
-    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(2)
+    expect(sent.filter((text) => PROVIDER_NOTICE.test(text))).toHaveLength(2)
   })
 
   test('stays quiet when the dropped turn already ran tools and promised nothing further', async () => {
@@ -17634,7 +17638,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
 
     // then: nothing public, but the operator keeps both the raw cause and an
     // explicit record that a notice was withheld.
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(0)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(0)
     expect(logs.some((m) => /LLM call failed: WebSocket closed 1006/.test(m))).toBe(true)
     expect(logs.some((m) => /provider_error_notice_suppressed reason=tool_activity_this_turn/.test(m))).toBe(true)
   })
@@ -17662,7 +17666,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     }
     await router.__testing!.flushDebounce(KEY)
 
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(1)
     expect(sent.some((t) => /connection to the upstream LLM provider dropped/i.test(t))).toBe(true)
     expect(logs.some((m) => /provider_error_notice_suppressed reason=tool_activity_this_turn/.test(m))).toBe(false)
   })
@@ -17690,7 +17694,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
       sessions[0]!.setAssistantMidTurn('', 'error')
     }
     await router.__testing!.flushDebounce(KEY)
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(0)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(0)
 
     await router.route(inbound({ text: '다시 시도해줘', externalMessageId: 'm-second' }))
     sessions[0]!.onPrompt = () => {
@@ -17702,7 +17706,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     }
     await router.__testing!.flushDebounce(KEY)
 
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(1)
   })
 
   test('does not carry tool activity into a finished-subagent completion wake', async () => {
@@ -17726,7 +17730,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
       sessions[0]!.setAssistantText('NO_REPLY')
     }
     await router.__testing!.flushDebounce(KEY)
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(0)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(0)
 
     // when: the completion wake arrives and its prompt dies on the provider
     sessions[0]!.onPrompt = () => {
@@ -17743,12 +17747,12 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
       ok: true,
       durationMs: 5_000,
     })
-    await waitFor(() => sent.some((t) => t.startsWith('⚠️')))
+    await waitFor(() => sent.some((t) => PROVIDER_NOTICE.test(t)))
 
     // then: the wake ran as its own logical turn and its death is visible
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sessions[0]!.prompts[1]).toContain('bg_reviewer')
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(1)
     expect(logs.some((m) => /provider_error_notice_suppressed reason=tool_activity_this_turn/.test(m))).toBe(false)
   })
 
@@ -17784,7 +17788,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     await router.__testing!.flushDebounce(KEY)
 
     expect(promptAttempt).toBeGreaterThan(1)
-    expect(sent.filter((t) => t.startsWith('⚠️'))).toHaveLength(0)
+    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(0)
     expect(logs.some((m) => /provider_error_notice_suppressed reason=tool_activity_this_turn/.test(m))).toBe(true)
   })
 
@@ -17832,7 +17836,7 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     expect(sessions[0]!.continued).toBe(1)
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sent).toEqual(['찾아볼게.', '지난 기록은 이 내용이야.'])
-    expect(sent.some((text) => text.startsWith('⚠️'))).toBe(false)
+    expect(sent.some((text) => PROVIDER_NOTICE.test(text))).toBe(false)
   })
 
   test('suppresses a provider error after a final reply follows the more_work_this_turn:true progress reply', async () => {
