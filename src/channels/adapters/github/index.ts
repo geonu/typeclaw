@@ -1,7 +1,12 @@
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
-import type { ChannelSelfIdentityResolver, InboundMessage, RouteReceipt } from '@/channels/types'
+import type {
+  ChannelSelfIdentityResolver,
+  InboundMessage,
+  RecoveryAdapterCallbacks,
+  RouteReceipt,
+} from '@/channels/types'
 import { resolveSecret } from '@/secrets/resolve'
 import type { GithubSecretsBlock } from '@/secrets/schema'
 
@@ -155,9 +160,19 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   // does NOT mutate process.env.GH_TOKEN. App credentials stay behind this
   // repo-scoped resolver instead of entering the ambient process environment.
   const authToken = (context?: GithubAuthContext) => auth.token(context)
-  const recoveryCallbacks = createGithubRecoveryCallbacks(auth, fetchImpl, () =>
-    selfId !== null ? `github:${selfId}` : undefined,
-  )
+  // The boot reconcile pass re-admits review work a restart killed, so a restart notice for an
+  // interrupted review would wrongly tell the author it was dropped. Only a replay the router
+  // newly accepted counts: a duplicate may be the very admission that was interrupted.
+  let firstReconcilePending = true
+  const reconcileReplayedPrs = new Set<string>()
+  const recoveryCallbacks: RecoveryAdapterCallbacks = {
+    ...createGithubRecoveryCallbacks(auth, fetchImpl, () => (selfId !== null ? `github:${selfId}` : undefined)),
+    redelivery: (record, eventKinds) => {
+      if (!eventKinds.every((kind) => REVIEW_TRIGGER_EVENT_KINDS.has(kind))) return 'not-redelivered'
+      if (reconcileReplayedPrs.has(prReplayKey(record.target.workspace, record.target.chat))) return 'redelivered'
+      return firstReconcilePending ? 'pending' : 'not-redelivered'
+    },
+  }
   const outbound = withOutboundAccount(
     createGithubOutboundCallback({
       token: authToken,
@@ -256,6 +271,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   return {
     async start(): Promise<void> {
       if (started) return
+      firstReconcilePending = true
+      reconcileReplayedPrs.clear()
       const self = await auth.getSelf()
       selfId = String(self.id)
       selfLogin = self.login
@@ -412,6 +429,12 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // is live-reloadable, so a periodic tick must honor a change to `off`
       // (reconcileOpenPrs short-circuits on `off`) instead of scanning forever.
       const reconcileGeneration = lifecycleGeneration
+      const routeReconcileReplay = async (message: InboundMessage): Promise<RouteReceipt> => {
+        const receipt = await routeInbound(message)
+        if (receipt.kind === 'accepted' && reconcileGeneration === lifecycleGeneration)
+          reconcileReplayedPrs.add(prReplayKey(message.workspace, message.chat))
+        return receipt
+      }
       const runReconcile = (store: ReconcileCooldownStore): Promise<unknown> =>
         reconcileOpenPrs({
           repos,
@@ -419,7 +442,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           selfLogin,
           authType: options.secrets.auth.type,
           token: authToken,
-          route: routeInbound,
+          route: routeReconcileReplay,
           logger,
           isBotInTeam,
           fetchImpl,
@@ -428,12 +451,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         }).catch((err: unknown) => {
           logger.warn(`[github] reconcile pass failed: ${describeError(err)}`)
         })
+      if (loadedReconcileCooldownStore === null) firstReconcilePending = false
       if (loadedReconcileCooldownStore !== null) {
         // Detached on purpose: the pass awaits each replay's router receipt, and
         // routing can depend on boot progress that itself waits for this start()
         // to resolve. Awaiting it here stalled boot before tunnels started, so
         // webhooks never registered and no PR was reviewed.
-        void runReconcile(loadedReconcileCooldownStore)
+        void runReconcile(loadedReconcileCooldownStore).finally(() => {
+          if (reconcileGeneration === lifecycleGeneration) firstReconcilePending = false
+        })
         const reconcileIntervalMs = options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS
         if (reconcileIntervalMs > 0) {
           reconcileTimer = setIntervalFn(() => void runReconcile(loadedReconcileCooldownStore), reconcileIntervalMs)
@@ -657,4 +683,15 @@ function logDeregistrationOutcome(
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+const REVIEW_TRIGGER_EVENT_KINDS: ReadonlySet<string> = new Set([
+  'pull_request:opened',
+  'pull_request:ready_for_review',
+  'pull_request:review_requested',
+  'pull_request:reconcile',
+])
+
+function prReplayKey(workspace: string, chat: string): string {
+  return `${canonicalGithubRepo(workspace)}#${chat}`
 }

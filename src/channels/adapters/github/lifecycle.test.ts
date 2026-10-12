@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 import type { AgentSession } from '@/agent'
 import { InboundJournal } from '@/channels/inbound-journal'
+import { createRecoveryNotice } from '@/channels/recovery-notice'
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
 import type { GithubSecretsBlock } from '@/secrets/schema'
@@ -1723,6 +1724,17 @@ describe('createGithubAdapter lifecycle', () => {
       return router
     }
 
+    function reviewNotice(chat: string) {
+      return createRecoveryNotice({
+        target: { adapter: 'github', workspace: 'acme/widgets', chat, thread: null },
+        accountIdentity: 'github:1',
+        principal: { kind: 'channel', adapter: 'github', workspace: 'acme/widgets', chat },
+        covers: [{ store: 'inbound', id: chat, generation: 1 }],
+        recoveryGeneration: 'boot',
+        transferId: chat,
+      })
+    }
+
     function admittedChat(record: unknown): string | undefined {
       if (typeof record !== 'object' || record === null || !('type' in record) || record.type !== 'admitted') return
       if (!('changes' in record) || !Array.isArray(record.changes)) return
@@ -1755,11 +1767,12 @@ describe('createGithubAdapter lifecycle', () => {
             reconcileIntervalMs: 0,
           })
           await adapter.start()
-          return async () => {
+          const stop = async () => {
             await adapter.stop()
             await router.stop()
             await journal.close()
           }
+          return { stop, router }
         }
 
         // given a journal that fails right after writing PR #7's admission line
@@ -1774,9 +1787,9 @@ describe('createGithubAdapter lifecycle', () => {
 
         // when the first runtime reconciles both open PRs
         const logger = recordingLogger()
-        const stopFirst = await start(failingJournal, logger)
+        const first = await start(failingJournal, logger)
         await waitUntil(() => logger.messages.some((m) => m.includes('PR #8 replay failed')))
-        await stopFirst()
+        await first.stop()
 
         // then PR #7's rejected admission did not stop PR #8, and neither
         // unadmitted replay holds a cooldown
@@ -1786,16 +1799,80 @@ describe('createGithubAdapter lifecycle', () => {
 
         // when a restarted runtime reopens the journal and reconciles again
         receipts.length = 0
-        const stopSecond = await start(new InboundJournal(routerDir))
+        const second = await start(new InboundJournal(routerDir))
         await waitUntil(() => receipts.length === 2)
-        await stopSecond()
+        await waitUntil(
+          () => second.router.recoveryRedelivery?.(reviewNotice('pr:9'), ['pull_request:opened']) !== 'pending',
+        )
 
         // then the admission written before the failure dedupes PR #7, PR #8 is
         // admitted now, and both replays keep their cooldown
         expect(receipts).toEqual(['pr:7:duplicate', 'pr:8:accepted'])
+        // and only the newly accepted replay supersedes a restart notice: the
+        // duplicate may be the very admission a restart interrupted
+        expect(second.router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:opened'])).toBe(
+          'not-redelivered',
+        )
+        expect(second.router.recoveryRedelivery?.(reviewNotice('pr:8'), ['pull_request:opened'])).toBe('redelivered')
+        await second.stop()
         expect(await coolingDown(reconcileDir, 700)).toBe(true)
         expect(await coolingDown(reconcileDir, 800)).toBe(true)
       } finally {
+        await rm(reconcileDir, { recursive: true, force: true })
+      }
+    })
+
+    test('restart notices for an interrupted review wait for the boot pass and yield to a PR it re-admitted', async () => {
+      const reconcileDir = await mkdtemp(join(tmpdir(), 'gh-reconcile-lifecycle-'))
+      const routerDir = join(reconcileDir, 'router')
+      const journal = new InboundJournal(routerDir)
+      const receipts: string[] = []
+      const router = journaledRouter(routerDir, journal, receipts)
+      const adapter = createGithubAdapter({
+        router,
+        configRef: reviewConfig('opened'),
+        secrets: patSecrets(),
+        agentDir: reconcileDir,
+        logger: silentLogger(),
+        fetchImpl: unreviewedPrFetch([7]).fetch,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+        tokenRefreshIntervalMs: 0,
+        reconcileIntervalMs: 0,
+      })
+      try {
+        // given the boot reconcile replay of PR #7 is held before the router answers
+        const recordedRoute = router.route
+        const dispatched = Promise.withResolvers<void>()
+        const answer = Promise.withResolvers<void>()
+        router.route = async (message) => {
+          dispatched.resolve()
+          await answer.promise
+          return recordedRoute(message)
+        }
+        await adapter.start()
+        await dispatched.promise
+
+        // then an interrupted review trigger is still undecided
+        expect(router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:opened'])).toBe('pending')
+        // and a human request the reconcile pass never replays is owed immediately
+        expect(router.recoveryRedelivery?.(reviewNotice('pr:7'), ['issue_comment:created'])).toBe('not-redelivered')
+
+        // when the pass admits the replay and settles
+        answer.resolve()
+        await waitUntil(() => router.recoveryRedelivery?.(reviewNotice('pr:8'), ['pull_request:opened']) !== 'pending')
+
+        // then the re-admitted PR supersedes its notice and every other PR keeps one
+        expect(receipts).toEqual(['pr:7:accepted'])
+        expect(router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:opened'])).toBe('redelivered')
+        expect(router.recoveryRedelivery?.(reviewNotice('pr:8'), ['pull_request:opened'])).toBe('not-redelivered')
+        expect(
+          router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:opened', 'issue_comment:created']),
+        ).toBe('not-redelivered')
+      } finally {
+        await adapter.stop()
+        await router.stop()
+        await journal.close()
         await rm(reconcileDir, { recursive: true, force: true })
       }
     })
