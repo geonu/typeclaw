@@ -1,8 +1,19 @@
 import { describe, expect, test } from 'bun:test'
 
 import { Agent, type AgentMessage } from '@earendil-works/pi-agent-core'
-import { createModels, fauxAssistantMessage, fauxProvider, isContextOverflow } from '@earendil-works/pi-ai'
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  isContextOverflow,
+  normalizeContext,
+  type Context,
+  type Model,
+} from '@earendil-works/pi-ai'
+import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions'
 import { AgentSession as PiAgentSession, SettingsManager } from '@earendil-works/pi-coding-agent'
+
+import { installLlmFetchObserver } from '@/run/llm-fetch-observer'
 
 import type { AgentSession } from './index'
 import {
@@ -672,6 +683,63 @@ describe('local pre-request failures', () => {
 
     expect(softNotice(spoofed)).not.toBe(LOCAL_NOTICE)
     expect(isThrottleOrOverload(spoofed)).toBe(true)
+  })
+})
+
+describe('observer TTFB timeout through the real openai-completions adapter', () => {
+  // The OpenAI SDK rewrites any fetch rejection that mentions "timed out" into a
+  // bare `APIConnectionTimeoutError('Request timed out.')`, dropping the
+  // observer's marker. Drive the real observer + adapter so a classifier that
+  // only knows the marker fails here instead of in a live chat turn.
+  async function stalledTurnErrorMessage(): Promise<string> {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+      })) as typeof fetch
+    const release = installLlmFetchObserver({ ttfbMs: 20, logger: { info: () => {}, warn: () => {} } })
+    try {
+      const model: Model<'openai-completions'> = {
+        id: 'glm-test',
+        name: 'GLM Test',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://llm.test/api/coding/paas/v4',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 4096,
+      }
+      const context: Context = { messages: [{ role: 'user', content: 'Hi', timestamp: Date.now() }] }
+      const result = await streamSimple(model, normalizeContext(context), {
+        apiKey: 'test-key',
+        maxRetries: 0,
+      }).result()
+      expect(result.stopReason).toBe('error')
+      return result.errorMessage ?? ''
+    } finally {
+      release()
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  test('stays a retryable, failover-worthy TTFB stall with the timeout notice', async () => {
+    // when
+    const raw = await stalledTurnErrorMessage()
+
+    // then
+    expect(isRetryableSameRef(raw)).toBe(true)
+    expect(isFailoverWorthy(raw)).toBe(true)
+    expect(isObserverTtfbTimeout(raw)).toBe(true)
+    expect(isTransientProviderFailure(raw)).toBe(true)
+    expect(softNotice(raw)).toBe(softNotice('x fetch timed out before response headers (typeclaw observer timeout)'))
+    expect(detectHardProviderError(new Error(raw))).not.toBeNull()
+  })
+
+  test('the bare SDK sentence only matches as the whole message', () => {
+    expect(isRetryableSameRef('Request timed out.')).toBe(true)
+    expect(isRetryableSameRef('tool said: Request timed out. then 400 invalid')).toBe(false)
   })
 })
 
