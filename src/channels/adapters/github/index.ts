@@ -1,3 +1,4 @@
+import { githubReviewChecks } from '@/channels/github-review-check'
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
@@ -34,6 +35,7 @@ import { loadReconcileCooldownStore, type ReconcileCooldownStore } from './recon
 import { reconcileOpenPrs } from './reconcile-open-prs'
 import { createRecoveredGuidLog, recoverFailedGithubDeliveries } from './recover-failed-deliveries'
 import { createGithubRecoveryCallbacks } from './recovery'
+import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore } from './review-check'
 import { createGithubReviewStateResolver } from './review-state'
 import { createGithubReviewSubmitter } from './review-submitter'
 import { createGithubReviewThreadResolver } from './review-thread-resolver'
@@ -216,10 +218,23 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     approve: () => options.configRef().review.approve,
     fetchImpl,
   })
+  const reviewCheckPublisher = createGithubReviewCheckPublisher({
+    token: authToken,
+    authType: options.secrets.auth.type,
+    enabled: () => options.configRef().review.check,
+    logger,
+    fetchImpl,
+  })
   const reviewSubmitter = createGithubReviewSubmitter({
     token: authToken,
     allowApprove: () => options.configRef().review.approve,
     accountIdentity: recoveryCallbacks.accountIdentity,
+    onReviewPosted: (posted) => {
+      void githubReviewChecks.reviewPosted(
+        { repo: posted.repo, pullRequest: posted.prNumber, headSha: posted.headSha },
+        posted.state,
+      )
+    },
     fetchImpl,
   })
   const channelNameResolver = createGithubChannelNameResolver({ token: authToken, fetchImpl })
@@ -363,11 +378,24 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         )
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
+      // Attach before any webhook can start a review, and close checks a
+      // previous process left in progress.
+      await githubReviewChecks.attach({
+        publisher: reviewCheckPublisher,
+        store: createReviewCheckLeaseStore(options.agentDir),
+        logger,
+      })
       // Best-effort: App-only preflight that compares the installation's granted
       // permissions against the configured eventAllowlist and warns about gaps.
       // Catches the most common misconfiguration (App installed with the default
       // metadata-only permission set) before any event fires a 403.
-      await runAppPermissionPreflight(logger, auth, options.configRef().eventAllowlist, options.configRef().repos ?? [])
+      await runAppPermissionPreflight(
+        logger,
+        auth,
+        options.configRef().eventAllowlist,
+        options.configRef().repos ?? [],
+        options.configRef().review.check,
+      )
       // Repository webhook registration is best-effort: failures are logged
       // per-repo, the adapter stays up. A misconfigured PAT or App that
       // can't manage hooks must not prevent the adapter from accepting
@@ -509,6 +537,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         reconcileTimer.clear()
         reconcileTimer = null
       }
+      githubReviewChecks.detach(reviewCheckPublisher)
       options.router.unregisterOutbound('github', outbound)
       options.router.unregisterReaction('github', reaction)
       options.router.unregisterRemoveReaction('github', removeReaction)
@@ -641,6 +670,7 @@ async function runAppPermissionPreflight(
   auth: ReturnType<typeof buildAuthStrategy>,
   eventAllowlist: readonly string[],
   repos: readonly string[],
+  reviewCheck: boolean,
 ): Promise<void> {
   if (auth.getInstallationGrants === undefined) return
   const getGrants = (context: GithubAuthContext | undefined) => auth.getInstallationGrants?.(context)
@@ -667,6 +697,13 @@ async function runAppPermissionPreflight(
     if (grants === undefined) continue
     const gaps = findPermissionGaps(eventAllowlist, grants.permissions)
     if (gaps.length > 0) logger.warn(buildAppPermissionPreflightGuidance(gaps))
+    const checks = grants.permissions.checks
+    if (reviewCheck && checks !== 'write' && checks !== 'admin') {
+      logger.warn(
+        `[github] review check will be skipped for ${label}: the GitHub App lacks "Checks: Read and write". ` +
+          'Grant it in the App settings to show reviews as a PR check, or set channels.github.review.check to false.',
+      )
+    }
   }
 }
 

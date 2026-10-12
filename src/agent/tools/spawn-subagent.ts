@@ -4,6 +4,7 @@ import { Type } from '@earendil-works/pi-ai'
 import { defineTool } from '@earendil-works/pi-coding-agent'
 
 import { githubReviewerWorkKey } from '@/channels/github-repo'
+import { githubReviewChecks, type ReviewerSettlement } from '@/channels/github-review-check'
 import type { ChannelRouter } from '@/channels/router'
 import type { PermissionService } from '@/permissions'
 import type { Stream } from '@/stream'
@@ -325,6 +326,8 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         return errorResult(`failed to spawn ${subagentName}: ${message}`)
       }
 
+      // The latest abort attempt, resolving to whether the abort was accepted.
+      let abortAttempt: Promise<boolean> | undefined
       const live = {
         taskId,
         sessionId: resolvedHandle.sessionId ?? '<pending>',
@@ -338,7 +341,19 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         ...(workKey !== undefined ? { workKey } : {}),
         startedAt,
         status: 'running' as const,
-        abort: resolvedHandle.abort,
+        // Every cancel path (subagent_cancel, draft/work-key cancellation) goes
+        // through this handle, which is how the review check tells an accepted
+        // cancellation apart from a reviewer failure. An accepted abort settles
+        // the check at once: the reviewer's completion may stay wedged after it.
+        abort: async () => {
+          const attempt = resolvedHandle.abort()
+          abortAttempt = attempt.then(
+            () => true,
+            () => false,
+          )
+          await attempt
+          void githubReviewChecks.reviewerSettled(taskId, REVIEW_CANCELLED)
+        },
         releaseCoalesceKey,
       }
       let registered: boolean
@@ -390,6 +405,14 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         liveRegistry.recordCapturedFinalMessageIfRunning(taskId, capturedFinalMessage)
       }
 
+      const reviewIdentity = delayedCancellationError === undefined ? params.review_identity : undefined
+      if (reviewIdentity !== undefined) {
+        void githubReviewChecks.beginReview(
+          { repo: reviewIdentity.repo, pullRequest: reviewIdentity.pull_request, headSha: reviewIdentity.head_sha },
+          taskId,
+        )
+      }
+
       void completion.then((c) => {
         releaseCoalesceKey()
         const durationMs = now() - startedAt
@@ -398,6 +421,17 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         // broadcast so exactly one canonical completed-event is emitted (the
         // winner's).
         const won = liveRegistry.recordCompletionIfRunning(taskId, completionToFinalShape(c, durationMs))
+        if (reviewIdentity !== undefined) {
+          // Classify only once an in-flight abort's result is known: aborting
+          // can resolve the completion before the abort itself settles.
+          void (async () => {
+            const cancelAccepted = abortAttempt !== undefined && (await abortAttempt)
+            await githubReviewChecks.reviewerSettled(
+              taskId,
+              reviewerSettlement(c, won, cancelAccepted, liveRegistry, taskId),
+            )
+          })()
+        }
         if (!won || !stream || !background) return
         const hasRecoverableOutput = !c.ok && c.finalMessage !== undefined
         stream.publish({
@@ -577,6 +611,21 @@ function completionToFinalShape(
     durationMs,
     ...(c.finalMessage !== undefined ? { finalMessage: c.finalMessage } : {}),
   }
+}
+
+const REVIEW_CANCELLED: ReviewerSettlement = { kind: 'cancelled', reason: 'the review was cancelled' }
+
+function reviewerSettlement(
+  c: { ok: true } | { ok: false; error: string },
+  won: boolean,
+  cancelAccepted: boolean,
+  liveRegistry: LiveSubagentRegistry,
+  taskId: string,
+): ReviewerSettlement {
+  if (cancelAccepted) return REVIEW_CANCELLED
+  const recordedError = liveRegistry.get(taskId)?.completion?.error
+  if (won && c.ok) return { kind: 'ok' }
+  return { kind: 'failed', reason: c.ok ? 'the reviewer did not finish in time' : (recordedError ?? c.error) }
 }
 
 type ToolReturn = {

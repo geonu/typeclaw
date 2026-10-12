@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { githubReviewChecks, type ReviewCheckOutcome } from '@/channels/github-review-check'
 import {
   __resetReviewObserverForTest,
   hasReview,
@@ -468,6 +469,47 @@ describe('post_github_review', () => {
     expect(first.details).toMatchObject({ ok: true, fallback: 'comment' })
     expect(second.details).toMatchObject({ ok: false })
     expect(comments).toHaveLength(1)
+  })
+
+  test('completes a tracked re-review check when its verdict lands as the duplicate-review comment', async () => {
+    // given: a re-review of the head that already holds a standing CHANGES_REQUESTED, tracked as a check
+    const head = 'c'.repeat(40)
+    standingChangesRequested(() => head)
+    let resolveFinished: (outcome: ReviewCheckOutcome) => void = () => {}
+    const finished = new Promise<ReviewCheckOutcome>((resolve) => {
+      resolveFinished = resolve
+    })
+    const publisher = {
+      start: async () => ({ mode: 'status' as const }),
+      finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
+        resolveFinished(outcome)
+        return 'published' as const
+      },
+    }
+    await githubReviewChecks.attach({
+      publisher,
+      store: { load: async () => [], save: async () => {} },
+      logger: { info: () => {}, warn: () => {} },
+    })
+    await githubReviewChecks.beginReview({ repo: 'acme/widgets', pullRequest: 7, headSha: head }, 'bg_rereview')
+    await githubReviewChecks.reviewerSettled('bg_rereview', { kind: 'ok' })
+    const channelRouter = router()
+    channelRouter.registerOutbound('github', async () => ({ ok: true }))
+
+    try {
+      // when: the verdict is posted and lands as the duplicate-review comment
+      const result = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
+        event: 'REQUEST_CHANGES',
+        body: 'still blocked',
+        head_sha: head,
+      })
+
+      // then: the check completes with the standing verdict instead of waiting for the posting deadline
+      expect(result.details).toMatchObject({ ok: true, fallback: 'comment' })
+      expect(await finished).toEqual({ kind: 'verdict', state: 'CHANGES_REQUESTED' })
+    } finally {
+      githubReviewChecks.detach(publisher)
+    }
   })
 
   test('lets a sibling retry the duplicate-review comment when the first delivery failed', async () => {

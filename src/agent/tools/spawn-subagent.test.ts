@@ -7,6 +7,7 @@ import {
   type ReviewerPayload,
   reviewerPayloadSchema,
 } from '@/bundled-plugins/reviewer/reviewer'
+import { githubReviewChecks, type ReviewCheckOutcome, type ReviewCheckPublisher } from '@/channels/github-review-check'
 import {
   forgetGithubReviewRound,
   promoteGithubReviewRound,
@@ -1965,5 +1966,117 @@ describe('resolveSpawnMode', () => {
     const r = resolveSpawnMode({ ...base, foreground: true, fromSubagent: true, subagentName: 'explorer' })
     expect(r.background).toBe(false)
     expect(r.overrideNote).toBeUndefined()
+  })
+})
+
+describe('spawn_subagent GitHub review check', () => {
+  const review_identity = {
+    repo: 'Acme/Widgets',
+    pull_request: 42,
+    head_sha: 'a'.repeat(40),
+    base_sha: 'b'.repeat(40),
+    review_kind: 'review' as const,
+  }
+
+  async function attachCheckPublisher() {
+    const started: string[] = []
+    let resolveFinished: (outcome: ReviewCheckOutcome) => void = () => {}
+    const finished = new Promise<ReviewCheckOutcome>((resolve) => {
+      resolveFinished = resolve
+    })
+    const publisher: ReviewCheckPublisher = {
+      start: async (key) => {
+        started.push(`${key.repo}#${key.pullRequest}@${key.headSha}`)
+        return { mode: 'status' }
+      },
+      finish: async (_key, _ref, outcome) => {
+        resolveFinished(outcome)
+        return 'published'
+      },
+    }
+    await githubReviewChecks.attach({
+      publisher,
+      store: { load: async () => [], save: async () => {} },
+      logger: { info: () => {}, warn: () => {} },
+    })
+    return { started, finished, detach: () => githubReviewChecks.detach(publisher) }
+  }
+
+  function reviewerTools(session: StubSession) {
+    const liveRegistry = new LiveSubagentRegistry()
+    const { registry } = reviewerRegistry()
+    const getOrigin = (): SessionOrigin => ({ kind: 'tui', sessionId: 'ses_parent' })
+    const spawn = createSpawnSubagentTool({
+      registry,
+      liveRegistry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      generateTaskId: () => 'bg_check1',
+    })
+    const cancel = createSubagentCancelTool({ liveRegistry, getOrigin, callerSessionId: 'ses_parent' })
+    return { spawn, cancel }
+  }
+
+  test('an accepted cancellation settles the check as cancelled even while completion stays wedged', async () => {
+    // given: a reviewer whose prompt never resolves, even after abort
+    const checks = await attachCheckPublisher()
+    const session = stubSession()
+    session.prompt = () => new Promise<void>(() => {})
+    const { spawn, cancel } = reviewerTools(session)
+
+    try {
+      // when: the reviewer is spawned for a PR head and the cancellation is accepted
+      await spawn.execute(
+        'call_1',
+        { subagent_type: 'reviewer', prompt: 'review it', review_identity },
+        undefined,
+        undefined,
+        ctx,
+      )
+      const cancelled = await cancel.execute('call_2', { task_id: 'bg_check1' }, undefined, undefined, ctx)
+
+      // then: the check started on that commit and ended as a cancellation without waiting on completion
+      expect(cancelled.details).toMatchObject({ ok: true, alreadyDone: false })
+      expect(checks.started).toEqual([`acme/widgets#42@${'a'.repeat(40)}`])
+      expect(await checks.finished).toEqual({ kind: 'cancelled', reason: 'the review was cancelled' })
+    } finally {
+      checks.detach()
+    }
+  })
+
+  test('a rejected cancellation followed by a reviewer failure reports the failure', async () => {
+    // given: a reviewer whose abort is refused and whose prompt later fails
+    const checks = await attachCheckPublisher()
+    const session = stubSession()
+    let failPrompt: (error: Error) => void = () => {}
+    session.prompt = () =>
+      new Promise<void>((_resolve, reject) => {
+        failPrompt = reject
+      })
+    session.abort = async () => {
+      throw new Error('provider refused abort')
+    }
+    const { spawn, cancel } = reviewerTools(session)
+
+    try {
+      // when: cancellation is rejected and the reviewer then fails
+      await spawn.execute(
+        'call_1',
+        { subagent_type: 'reviewer', prompt: 'review it', review_identity },
+        undefined,
+        undefined,
+        ctx,
+      )
+      const cancelled = await cancel.execute('call_2', { task_id: 'bg_check1' }, undefined, undefined, ctx)
+      failPrompt(new Error('provider exploded'))
+
+      // then: the check fails instead of being reported as a cancellation
+      expect(cancelled.details).toEqual({ ok: false, error: 'abort failed: provider refused abort' })
+      expect(await checks.finished).toMatchObject({ kind: 'failed' })
+    } finally {
+      checks.detach()
+    }
   })
 })

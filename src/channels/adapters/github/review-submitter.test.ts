@@ -301,4 +301,34 @@ describe('github review submitter', () => {
     }
     expect(seen).toEqual([])
   })
+
+  test('reports a verified review with the commit it covers so the review check can complete', async () => {
+    const posted: unknown[] = []
+    const submit = githubReviewSubmitter.createGithubReviewSubmitter({
+      token: async () => 'example-token',
+      allowApprove: () => true,
+      onReviewPosted: (review) => posted.push(review),
+      fetchImpl: fakeGithub({ headShas: ['head-sha'] }),
+    })
+
+    const result = await submit(request({ event: 'REQUEST_CHANGES' }))
+
+    expect(result.ok).toBe(true)
+    expect(posted).toEqual([{ repo: 'acme/widgets', prNumber: 7, headSha: 'head-sha', state: 'CHANGES_REQUESTED' }])
+  })
+
+  test('does not report a review whose verification failed', async () => {
+    const posted: unknown[] = []
+    const submit = githubReviewSubmitter.createGithubReviewSubmitter({
+      token: async () => 'example-token',
+      allowApprove: () => true,
+      onReviewPosted: (review) => posted.push(review),
+      fetchImpl: fakeGithub({ verifyState: 'PENDING' }),
+    })
+
+    const result = await submit(request())
+
+    expect(result.ok).toBe(false)
+    expect(posted).toEqual([])
+  })
 })

@@ -295,12 +295,18 @@ export const DEFAULT_GITHUB_REVIEW_ON: GithubReviewOn = 'review_requested'
 // Enforced in the inbound text rather than at the bash layer because the
 // review posts via `gh api --input <file>`, so the `event` value lives in a
 // temp file the command interceptor never sees.
+//
+// `check` shows the agent's own review as a `typeclaw/review` check on the
+// reviewed commit (in progress while reviewing, then the verdict). On by
+// default; a token without check/status write permission skips it silently
+// after one operator warning.
 const githubReviewSchema = z
   .object({
     on: z.enum(GITHUB_REVIEW_ON_VALUES).default(DEFAULT_GITHUB_REVIEW_ON),
     approve: z.boolean().default(true),
+    check: z.boolean().default(true),
   })
-  .default({ on: DEFAULT_GITHUB_REVIEW_ON, approve: true })
+  .default({ on: DEFAULT_GITHUB_REVIEW_ON, approve: true, check: true })
 
 const githubChannelSchema = adapterSchema.extend({
   // Optional now (PR 2): when omitted and a `tunnels[]` entry with
