@@ -148,7 +148,16 @@ export function wrapTransformContextWithLocalFailureMarker(
 // stall is a hard throw, not a `stopReason: 'error'` soft error, so it never
 // reaches `detectProviderError`; the marker lets the hard-throw path recognize
 // and surface it. The literal is the system's own token — English by design.
-const OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
+//
+// The OpenAI and Anthropic SDKs don't let the marker through for the TTFB case:
+// any fetch rejection that mentions "timed out" is replaced by a bare
+// `APIConnectionTimeoutError('Request timed out.')` with no cause. That error is
+// only raised when fetch itself rejects, i.e. before response headers, so it is
+// the same pre-headers stall and must classify like the marked one. Matched as
+// the whole message so the sentence echoed inside other text can't claim it.
+const MARKED_OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
+const SDK_CONNECTION_TIMEOUT = /^Request timed out\.$/
+const OBSERVER_TIMEOUT = new RegExp(`${MARKED_OBSERVER_TIMEOUT.source}|${SDK_CONNECTION_TIMEOUT.source}`, 'i')
 const OBSERVER_TTFB_TIMEOUT = /timed out before response headers/i
 
 // Transport-layer failure: the request died at the connection/session before a
@@ -308,7 +317,7 @@ export function isThrottleOrOverload(raw: string): boolean {
 // no-progress envelope or trip the codex provider circuit.
 export function isObserverTtfbTimeout(raw: string): boolean {
   if (LOCAL_PRE_REQUEST_FAILURE.test(raw)) return false
-  return OBSERVER_TIMEOUT.test(raw) && OBSERVER_TTFB_TIMEOUT.test(raw)
+  return (MARKED_OBSERVER_TIMEOUT.test(raw) && OBSERVER_TTFB_TIMEOUT.test(raw)) || SDK_CONNECTION_TIMEOUT.test(raw)
 }
 
 // Failover predicate for turn-drivers' `shouldFailover`: rotate to the next model
