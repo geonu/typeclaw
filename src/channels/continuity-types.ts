@@ -59,6 +59,12 @@ export const RECOVERY_NOTICE_TEXT =
   "⚠️ I restarted before I could confirm a reply to your earlier request. I didn't rerun it automatically — please ask again if you still need it."
 export const LIVE_TURN_ENDED_NOTICE_TEXT =
   "⚠️ My earlier turn ended before I could confirm a reply to your request. I didn't rerun it automatically — please ask again if you still need it."
+// Both templates are frozen into persisted outbox payloads (fenced by `recoveryPayload`), so their
+// bytes keep the historical ⚠️ prefix. Users see this rendered form: an interrupted turn is not an
+// alarm, and the emoji is reserved for failures someone has to act on.
+export function recoveryNoticeDisplayText(record: Pick<RecoveryRecord, 'text'>): string {
+  return record.text.replace(/^⚠️ /, '')
+}
 const nonempty = z.string().min(1)
 const timestamp = z.number().finite().nonnegative()
 const generation = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)

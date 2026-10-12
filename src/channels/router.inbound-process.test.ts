@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { Subprocess } from 'bun'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT } from './continuity-types'
+import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
 import { RecoveryOutbox } from './recovery-outbox'
 
 const moduleUrl = (path: string) => JSON.stringify(new URL(path, import.meta.url).href)
@@ -372,7 +372,7 @@ for (const mode of [
         expect(notices).toEqual([
           {
             accounting: 'recovery',
-            text: RECOVERY_NOTICE_TEXT,
+            text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
             deliveryId: retired[0]!.deliveryId,
             coveredIds: expect.any(Array),
           },
@@ -441,7 +441,7 @@ test('mixed stop committed before JSON remains authoritative through corruption;
       .split('\n')
       .map((line) => JSON.parse(line))
     expect(posts.map((post) => [post.accounting, post.deliveryId, post.text])).toEqual([
-      ['recovery', inventory[0]!.deliveryId, RECOVERY_NOTICE_TEXT],
+      ['recovery', inventory[0]!.deliveryId, recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT })],
     ])
     expect(await optionalRead(dir, 'recovery-errors')).toContain('journal')
     const calls = await optionalRead(dir, 'provider-calls')
@@ -512,7 +512,7 @@ test('account rotation transfers queued old-account input and child while compat
         .split('\n')
         .map((line) => JSON.parse(line))
         .map((post) => [post.accounting, post.deliveryId, post.text]),
-    ).toEqual([['recovery', notices[0]!.deliveryId, notices[0]!.text]])
+    ).toEqual([['recovery', notices[0]!.deliveryId, recoveryNoticeDisplayText(notices[0]!)]])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -584,13 +584,16 @@ for (const mode of ['idle-gc', 'stale-rollover']) {
       const [child] = (await new BackgroundObligationStore(dir).list()).filter((row) => row.taskId === 'child')
       expect(notices.flatMap((post) => post.coveredIds).sort()).toEqual([a, child!.obligationId].sort())
       expect(notices.find((post) => post.coveredIds.includes(a))).toEqual({
-        text: LIVE_TURN_ENDED_NOTICE_TEXT,
+        text: recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT }),
         accounting: 'recovery',
         deliveryId: notice!.deliveryId,
         coveredIds: [a],
       })
       const childNotice = notices.find((post) => post.coveredIds.includes(child!.obligationId))
-      expect(childNotice).toMatchObject({ text: RECOVERY_NOTICE_TEXT, coveredIds: [child!.obligationId] })
+      expect(childNotice).toMatchObject({
+        text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
+        coveredIds: [child!.obligationId],
+      })
       expect(child).toMatchObject({
         phase: 'closed',
         outcome: { kind: 'delivered', deliveryId: childNotice!.deliveryId },

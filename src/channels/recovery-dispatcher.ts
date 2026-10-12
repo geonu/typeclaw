@@ -1,5 +1,5 @@
 import type { BackgroundObligationStore } from './background-obligations'
-import type { RecoveryRecord } from './continuity-types'
+import { recoveryNoticeDisplayText, type RecoveryRecord } from './continuity-types'
 import type { InboundJournal } from './inbound-journal'
 import type { RecoveryOutbox } from './recovery-outbox'
 import type { ChannelRouter } from './router'
@@ -265,7 +265,7 @@ export class RecoveryDispatcher {
           // transport I/O. /stop can withdraw an already-in-flight notice.
           return {
             pending: this.router.send(
-              { ...record!.target, text: record!.text },
+              { ...record!.target, text: recoveryNoticeDisplayText(record!) },
               {
                 source: 'system',
                 outputKind: 'meta',

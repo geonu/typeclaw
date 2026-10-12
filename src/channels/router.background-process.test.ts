@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT } from './continuity-types'
+import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
 import { RecoveryOutbox } from './recovery-outbox'
 
 const cwd = join(import.meta.dir, '../..')
@@ -283,7 +283,9 @@ for (const boundary of [
           [deliveryId, 'delivered', 1],
         ])
         // Genuine process death keeps the frozen restart template.
-        expect(JSON.parse(posts.trim().split('\n').at(-1)!).text).toBe(RECOVERY_NOTICE_TEXT)
+        expect(JSON.parse(posts.trim().split('\n').at(-1)!).text).toBe(
+          recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
+        )
       }
     } finally {
       child.kill('SIGKILL')
@@ -327,8 +329,10 @@ test('provider-error notice after a consumed child result never erases the child
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line).text)
-    expect(posts.filter((text) => text === LIVE_TURN_ENDED_NOTICE_TEXT)).toHaveLength(1)
-    expect(posts).not.toContain(RECOVERY_NOTICE_TEXT)
+    expect(
+      posts.filter((text) => text === recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT })),
+    ).toHaveLength(1)
+    expect(posts).not.toContain(recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))
     expect(posts).not.toContain('Result: 42.')
   } finally {
     child.kill('SIGKILL')

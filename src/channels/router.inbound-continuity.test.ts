@@ -16,6 +16,7 @@ import { BackgroundObligationStore, type BackgroundObligation } from './backgrou
 import {
   LIVE_TURN_ENDED_NOTICE_TEXT,
   RECOVERY_NOTICE_TEXT,
+  recoveryNoticeDisplayText,
   recoveryNoticeCause,
   recoveryPayload,
   type RecoveryRecord,
@@ -1743,12 +1744,15 @@ for (const progress of [
   })
 }
 
+// The redacted 401 notice these tests provoke; provider notices carry no alarm emoji.
+const PROVIDER_NOTICE_PREFIX = 'The upstream LLM provider'
+
 for (const delivery of ['lands', 'is rejected'] as const) {
   test(`a provider-error notice that ${delivery} never settles a consumed child result`, async () => {
     const f = await debtFixture()
     try {
       const parent = f.sessions[0]!
-      if (delivery === 'is rejected') f.state.reject = '⚠️'
+      if (delivery === 'is rejected') f.state.reject = PROVIDER_NOTICE_PREFIX
       parent.onPrompt = async () => {
         await f.accept('lookup')
         await f.complete('lookup')
@@ -1764,7 +1768,7 @@ for (const delivery of ['lands', 'is rejected'] as const) {
       expect(child.phase).toBe('notice-owned')
       const covered = notices.flatMap((notice) => notice.covers.map((cover) => cover.id)).sort()
       if (delivery === 'lands') {
-        expect(f.sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+        expect(f.sent.filter((text) => text.startsWith(PROVIDER_NOTICE_PREFIX))).toHaveLength(1)
         // The landed notice answers the request it captured; the consumed result stays owed.
         expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
         expect(covered).toEqual([child.obligationId])
@@ -1792,7 +1796,7 @@ test('a provider-error notice settles only the generation it captured before sen
   const f = await debtFixture()
   try {
     const parent = f.sessions[0]!
-    const held = f.hold('⚠️')
+    const held = f.hold(PROVIDER_NOTICE_PREFIX)
     parent.onPrompt = async () => parent.failProvider('401 Unauthorized: invalid api key')
     const request = await f.route('Summarize the incident.')
     const draining = f.flush()
@@ -1802,7 +1806,7 @@ test('a provider-error notice settles only the generation it captured before sen
     held.release.resolve()
     await draining
 
-    expect(f.sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+    expect(f.sent.filter((text) => text.startsWith(PROVIDER_NOTICE_PREFIX))).toHaveLength(1)
     expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'intentionally-suppressed' } })
     expect(await f.outbox.list()).toEqual([])
   } finally {
@@ -2158,7 +2162,7 @@ for (const published of [false, true]) {
         await f.noticeTransition(frozen.deliveryId, 'retired').promise
         await dispatcher.stop()
         await debt.expectPhase('closed')
-        expect(f.sent).toEqual([frozen.text])
+        expect(f.sent).toEqual([recoveryNoticeDisplayText(frozen)])
         expect(errors).toEqual([])
         expect(await f.outbox.list()).toEqual([])
         expect(await f.outbox.retired(frozen.deliveryId)).toBeDefined()
@@ -2172,7 +2176,7 @@ for (const published of [false, true]) {
           expect((await recovered.list()).some((notice) => notice.deliveryId === frozen.deliveryId)).toBe(false)
           expect((await recovered.import(frozen)).state).toBe('delivered')
         }
-        expect(f.sent).toEqual([frozen.text])
+        expect(f.sent).toEqual([recoveryNoticeDisplayText(frozen)])
       } finally {
         restore()
         await dispatcher?.stop()
@@ -2522,7 +2526,9 @@ for (const decision of ['notice-owned', 'outcome-decided'] as const) {
       expect(f.router.liveCount()).toBe(1)
       expect(f.logs.some((line) => line.includes('controlled prepared source durability failure'))).toBe(true)
       expect((await f.outbox.list())[0]!.state).toBe('pending')
-      expect(f.sent.some((text) => text === LIVE_TURN_ENDED_NOTICE_TEXT)).toBe(false)
+      expect(f.sent.some((text) => text === recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT }))).toBe(
+        false,
+      )
     } finally {
       restore()
       await f.cleanup()

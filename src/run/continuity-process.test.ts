@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT } from '@/channels/continuity-types'
+import {
+  LIVE_TURN_ENDED_NOTICE_TEXT,
+  RECOVERY_NOTICE_TEXT,
+  recoveryNoticeDisplayText,
+} from '@/channels/continuity-types'
 import { RecoveryOutbox } from '@/channels/recovery-outbox'
 
 // Production composition proof: every boot is a separate process running the
@@ -276,7 +280,7 @@ for (const language of ['en', 'ko'] as const) {
       // before the unrelated "Thanks!" turn answered.
       expect(livePosts.map((post) => [post.accounting, post.text])).toEqual([
         ['live-turn', PROGRESS[language]],
-        ['recovery', LIVE_TURN_ENDED_NOTICE_TEXT],
+        ['recovery', recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT })],
         ['live-turn', "You're welcome."],
       ])
       expect(livePosts[1]!.coveredIds).toEqual([recorded(a, 'receipt A inputId')])
@@ -289,7 +293,7 @@ for (const language of ['en', 'ko'] as const) {
       expect(liveCalls.every((call) => call.mode === 'live')).toBe(true)
       const posts = await jsonl<Post>(agent.dir, 'posts')
       expect(posts).toEqual(livePosts)
-      expect(posts.some((post) => post.text === RECOVERY_NOTICE_TEXT)).toBe(false)
+      expect(posts.some((post) => post.text === recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))).toBe(false)
       expect(posts.flatMap((post) => post.coveredIds)).not.toContain(c)
       const outbox = new RecoveryOutbox(agent.dir)
       expect(await outbox.list()).toEqual([])
@@ -332,10 +336,10 @@ for (const language of ['en', 'ko'] as const) {
       expect(posts.every((post) => post.mode === 'live' && post.accounting === 'live-turn')).toBe(true)
       expect(posts.map((post) => post.text)).toEqual([
         PROGRESS[language],
-        expect.stringMatching(/^⚠️ /),
+        expect.stringMatching(/^The upstream LLM provider /),
         "You're welcome.",
       ])
-      expect(posts.some((post) => post.text === RECOVERY_NOTICE_TEXT)).toBe(false)
+      expect(posts.some((post) => post.text === recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))).toBe(false)
       const outbox = new RecoveryOutbox(agent.dir)
       expect(await outbox.list()).toEqual([])
       expect(await outbox.listRetired()).toEqual([])
@@ -372,7 +376,7 @@ for (const reconcile of ['found', 'unreconcilable'] as const) {
         (reconcile === 'found' ? ['live'] : ['live', 'repair']).map((mode) => [
           mode,
           pending!.deliveryId,
-          LIVE_TURN_ENDED_NOTICE_TEXT,
+          recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT }),
         ]),
       )
       expect(posts.filter((post) => post.accounting !== 'recovery').map((post) => post.text)).toEqual([PROGRESS.en])
@@ -456,7 +460,11 @@ test('startAgent: production maintenance compacts journal growth, keeps dedupe a
     // A genuine old-epoch request recovers with the frozen restart notice, once.
     const notices = (await jsonl<Post>(agent.dir, 'posts')).filter((post) => post.accounting === 'recovery')
     expect(notices.map((post) => [post.mode, post.text, post.coveredIds])).toEqual([
-      ['maintenance-1', RECOVERY_NOTICE_TEXT, [recorded(seeded!.openInput, 'open inputId')]],
+      [
+        'maintenance-1',
+        recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
+        [recorded(seeded!.openInput, 'open inputId')],
+      ],
     ])
     const outbox = new RecoveryOutbox(agent.dir)
     expect(await outbox.list()).toEqual([])

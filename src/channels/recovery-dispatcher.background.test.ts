@@ -6,7 +6,12 @@ import { join } from 'node:path'
 import { noopPermissionService } from '@/permissions'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT, recoveryNoticeCause } from './continuity-types'
+import {
+  LIVE_TURN_ENDED_NOTICE_TEXT,
+  RECOVERY_NOTICE_TEXT,
+  recoveryNoticeCause,
+  recoveryNoticeDisplayText,
+} from './continuity-types'
 import { RecoveryDispatcher } from './recovery-dispatcher'
 import { createRecoveryNotice } from './recovery-notice'
 import { RecoveryOutbox } from './recovery-outbox'
@@ -359,7 +364,12 @@ test('same-epoch live-turn-ended transfer dispatches promptly with its frozen no
     await liveSent
     await f.dispatcher.stop()
     expect(f.sent).toEqual([f.notice.deliveryId, transfer.deliveryId])
-    expect(f.texts).toEqual([RECOVERY_NOTICE_TEXT, LIVE_TURN_ENDED_NOTICE_TEXT])
+    // The frozen templates keep their stored bytes; users get them without the alarm emoji.
+    expect(RECOVERY_NOTICE_TEXT.startsWith('⚠️ ')).toBe(true)
+    expect(f.texts).toEqual(
+      [RECOVERY_NOTICE_TEXT, LIVE_TURN_ENDED_NOTICE_TEXT].map((text) => recoveryNoticeDisplayText({ text })),
+    )
+    expect(f.texts.some((text) => text?.startsWith('⚠️'))).toBe(false)
     expect(await f.source.get(live.obligationId)).toMatchObject({
       phase: 'closed',
       outcome: { kind: 'delivered', deliveryId: transfer.deliveryId },
@@ -408,7 +418,7 @@ test('live-turn-ended transfer stranded by process death is re-imported unchange
       await dispatcher.stop()
     }
     expect(f.sent).toEqual([transfer.deliveryId])
-    expect(f.texts).toEqual([LIVE_TURN_ENDED_NOTICE_TEXT])
+    expect(f.texts).toEqual([recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT })])
   } finally {
     await f.cleanup()
   }

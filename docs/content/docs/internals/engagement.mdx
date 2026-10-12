@@ -467,11 +467,13 @@ reconstructed from a later live turn.
 
 Two fixed runtime notices exist, both independent of providers, `NO_REPLY`, session reopening and child execution. Boot recovery of genuinely older-epoch work (and legacy inventory migration) uses the frozen restart template, byte-identical to earlier versions:
 
-> ⚠️ I restarted before I could confirm a reply to your earlier request. I didn't rerun it automatically — please ask again if you still need it.
+> I restarted before I could confirm a reply to your earlier request. I didn't rerun it automatically — please ask again if you still need it.
 
 Every transfer the router prepares inside a running process uses the `live-turn-ended` cause (`schemaVersion: 2` record, `recoveryNoticeCause` in `src/channels/continuity-types.ts`):
 
-> ⚠️ My earlier turn ended before I could confirm a reply to your request. I didn't rerun it automatically — please ask again if you still need it.
+> My earlier turn ended before I could confirm a reply to your request. I didn't rerun it automatically — please ask again if you still need it.
+
+The stored template bytes of both still begin with the historical `⚠️ ` prefix, because the frozen payload fence compares them. `recoveryNoticeDisplayText` strips that prefix at send time, so users see the plain wording above.
 
 The cause, locale, template version and text are frozen at transfer preparation and use the same outbox, dispatcher, authorization and reconciliation path. Records prepared before this version stay readable and immutable; a same-epoch transfer that an older version prepared with the restart template is not reclassified. This stack uses the existing English system-notice fallback only; it adds no locale selector or model language inference. Recovery sends retain transport/flood checks but do not change unrelated live-turn send counts, promise/leaf/skip state, engagement/reaction policy, typing or sticky state.
 
