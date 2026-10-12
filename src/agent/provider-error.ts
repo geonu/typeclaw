@@ -273,6 +273,12 @@ const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
   },
 ]
 
+// An unclassified failure names no cause the chat user can act on, so channels
+// treat it as retry-and-see rather than posting the generic notice.
+export function isUnclassifiedProviderNotice(safeMessage: string): boolean {
+  return safeMessage === GENERIC_SAFE_NOTICE
+}
+
 function toSafeMessage(raw: string): string {
   for (const { match, safe } of SAFE_CLASSES) {
     if (match.test(raw)) return safe

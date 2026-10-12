@@ -14,6 +14,7 @@ import {
   detectHardProviderError,
   isFailoverWorthy,
   isTransientProviderFailure,
+  isUnclassifiedProviderNotice,
   subscribeProviderErrors,
 } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
@@ -261,7 +262,7 @@ export function disengageReactionEmojiFor(adapter: AdapterId): string {
   return DISENGAGE_REACTION_EMOJI_OVERRIDES[adapter] ?? DISENGAGE_REACTION_EMOJI
 }
 
-type PendingProviderError = { turnSeq: number; safeMessage: string; transient: boolean }
+type PendingProviderError = { turnSeq: number; safeMessage: string; retryAndSee: boolean }
 
 type SilentAckReason = 'github_review_output' | 'awaiting_background_child'
 
@@ -3336,7 +3337,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.pendingProviderError = {
           turnSeq: live.turnSeq,
           safeMessage: err.safeMessage,
-          transient: isTransientProviderFailure(err.message),
+          retryAndSee: isTransientProviderFailure(err.message) || isUnclassifiedProviderNotice(err.safeMessage),
         }
       })
       live.unsubTodoOutcome = created.session.subscribe((event: unknown) => {
@@ -4868,10 +4869,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     } catch (error) {
       logger.error(`[channels] ${live.keyId}: provider-error notice coverage capture failed: ${describeError(error)}`)
     }
-    // Only a retry-and-see failure collapses to a reaction. Auth, billing,
-    // quota, model-config, rate limits, and unclassified failures keep the text
-    // notice: someone has to act on them, and a bare ⚠️ would hide the cause.
-    if (pending.transient && (await reactTurnFailed(live))) {
+    // Only a retry-and-see failure (transient, or unclassified with nothing the
+    // user could act on) collapses to a reaction. Auth, billing, quota,
+    // model-config and rate limits keep the text notice: every later request
+    // fails too until someone acts, so telling the user is worth the noise.
+    if (pending.retryAndSee && (await reactTurnFailed(live))) {
       logger.warn(`[channels] ${live.keyId}: provider-error marked with reaction notice="${pending.safeMessage}"`)
       if (inboundCoverage.length > 0) {
         await recordLandedBackgroundResponse(live, 'provider-error-notice', [], inboundCoverage)
@@ -5557,7 +5559,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             live.pendingProviderError = {
               turnSeq: live.turnSeq,
               safeMessage: hardProviderError.safeMessage,
-              transient: isTransientProviderFailure(hardProviderError.message),
+              retryAndSee:
+                isTransientProviderFailure(hardProviderError.message) ||
+                isUnclassifiedProviderNotice(hardProviderError.safeMessage),
             }
           }
           live.consecutiveSends.clear()

@@ -11984,6 +11984,13 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
       expect(sent.some((t) => /unauthorized/i.test(t) && /API key/i.test(t))).toBe(true)
     })
 
+    test('an unclassified failure reacts ⚠️ instead of posting the generic notice', async () => {
+      const { sent, reactions } = await failingTurnRouter('unexpected stream shape: missing delta')
+
+      expect(reactions).toHaveLength(1)
+      expect(sent).toEqual([])
+    })
+
     test('a rate limit keeps the text notice so the cause stays visible', async () => {
       const { sent, reactions } = await failingTurnRouter('429 Too Many Requests: rate limit reached')
 
