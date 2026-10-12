@@ -1,5 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 
+import { githubReviewChecks } from '@/channels/github-review-check'
 import { registerOrJoinReplyReviewRound } from '@/channels/github-review-verdict-coordinator'
 import type { GithubReviewOn } from '@/channels/schema'
 import type {
@@ -159,6 +160,7 @@ export async function processVerifiedGithubDelivery(
     }
     const workspace = `${repository.owner}/${repository.name}`
     invalidateGithubReviewSubmission(workspace, prNumber)
+    void githubReviewChecks.cancelPullRequest(workspace, prNumber, 'the pull request was converted to draft')
     scheduleDraftAbort({ workspace, prNumber, prId: readNumber(pr, 'id'), options })
     return
   }
@@ -197,6 +199,12 @@ export async function processVerifiedGithubDelivery(
     ...(reviewCommentParent !== null ? { reviewCommentParent } : {}),
   })
   if (classified === null) return
+  if (event === 'pull_request' && action === 'review_request_removed') {
+    const prNumber = readNumber(readRecord(payload.pull_request), 'number')
+    if (prNumber !== null) {
+      void githubReviewChecks.cancelPullRequest(classified.workspace, prNumber, 'the review request was removed')
+    }
+  }
 
   const routed =
     replyReviewRound?.kind === 'round'
