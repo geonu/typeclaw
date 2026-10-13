@@ -344,10 +344,16 @@ export function isFailoverWorthy(raw: string): boolean {
 // means the model is out of capacity NOW, so the right move is to fail OVER to a
 // different ref, not hammer the same one — whereas a socket hang-up or a 500 is a
 // one-off blip a replay against the SAME ref often fixes. `\b` anchors the 5xx
-// codes so they don't match digit runs in prose. Provider protocol tokens —
-// English by design (the system-token exception to the multi-language rule).
+// codes so they don't match digit runs in prose. Streaming APIs often report a
+// provider-side 500 inside the event stream with no status code at all, only
+// the provider's own name for it: OpenAI/Codex `server_error` ("An error
+// occurred while processing your request"), Anthropic `api_error`, Gemini
+// `INTERNAL` ("An internal error has occurred"), and the generic "internal
+// server error" / "bad gateway" / "gateway timeout" wording proxies use.
+// Provider protocol tokens — English by design (the system-token exception to
+// the multi-language rule).
 const NETWORK_OR_5XX =
-  /econnreset|econnrefused|etimedout|enetunreach|socket hang up|network.?error|connection.?(?:error|refused|reset|lost)|fetch failed|other side closed|reset before headers|http2 request did not get a response|\b(?:500|502|504)\b/i
+  /econnreset|econnrefused|etimedout|enetunreach|socket hang up|network.?error|connection.?(?:error|refused|reset|lost)|fetch failed|other side closed|reset before headers|http2 request did not get a response|\b(?:server_error|api_error)\b|"INTERNAL"|an error occurred while processing your request|an internal error has occurred|internal server error|bad gateway|gateway time-?out|\b(?:500|502|504)\b/i
 
 // Retry predicate for typeclaw-owned SAME-REF retry: replay the SAME model ref
 // before advancing the chain. Deliberately NARROWER than `isFailoverWorthy` —
