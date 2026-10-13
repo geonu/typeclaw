@@ -22,10 +22,19 @@ export const REVIEW_CHECK_DENIAL_TTL_MS = 60 * 60_000
 
 const STATUS_DESCRIPTION_MAX = 140
 
+// The check is named after the agent's GitHub identity (an App's `slug[bot]`
+// login shows as `slug`), so a PR reviewed by several agents gets one check per
+// agent. Before the identity is known the generic name is used.
+export function reviewCheckName(selfLogin: string | null): string {
+  const name = selfLogin?.replace(/\[bot\]$/i, '').trim()
+  return name !== undefined && name !== '' ? name : REVIEW_CHECK_NAME
+}
+
 export function createGithubReviewCheckPublisher(deps: {
   token: (context?: GithubAuthContext) => Promise<string>
   authType: 'pat' | 'app'
   enabled: () => boolean
+  checkName: () => string
   logger: { warn: (m: string) => void }
   fetchImpl?: typeof fetch
   now?: () => number
@@ -76,11 +85,13 @@ export function createGithubReviewCheckPublisher(deps: {
   }
 
   return {
+    name: deps.checkName,
+
     async start(key) {
       if (!deps.enabled() || isDenied(key.repo)) return null
       if (deps.authType === 'app') {
         const result = await send(key, '/check-runs', 'POST', {
-          name: REVIEW_CHECK_NAME,
+          name: deps.checkName(),
           head_sha: key.headSha,
           status: 'in_progress',
           started_at: new Date(now()).toISOString(),
@@ -90,12 +101,13 @@ export function createGithubReviewCheckPublisher(deps: {
         const body = (await result.response.json().catch(() => null)) as { id?: unknown } | null
         return typeof body?.id === 'number' ? { mode: 'check-run', checkRunId: body.id } : null
       }
+      const context = deps.checkName()
       const result = await send(key, `/statuses/${key.headSha}`, 'POST', {
         state: 'pending',
-        context: REVIEW_CHECK_NAME,
+        context,
         description: 'TypeClaw is reviewing this commit',
       })
-      return result.kind === 'ok' ? { mode: 'status' } : null
+      return result.kind === 'ok' ? { mode: 'status', context } : null
     },
 
     async finish(key, ref, outcome) {
@@ -106,7 +118,10 @@ export function createGithubReviewCheckPublisher(deps: {
         return publishResult(
           await send(key, `/statuses/${key.headSha}`, 'POST', {
             state: statusState(outcome),
-            context: REVIEW_CHECK_NAME,
+            // A pending status is only replaced by one with the same context, so
+            // finish under the name it started with (leases from before
+            // per-agent names carry none and started as the generic name).
+            context: ref?.mode === 'status' ? (ref.context ?? REVIEW_CHECK_NAME) : deps.checkName(),
             description: truncate(summary, STATUS_DESCRIPTION_MAX),
           }),
         )
@@ -121,7 +136,7 @@ export function createGithubReviewCheckPublisher(deps: {
         return publishResult(await send(key, `/check-runs/${ref.checkRunId}`, 'PATCH', completion))
       }
       return publishResult(
-        await send(key, '/check-runs', 'POST', { name: REVIEW_CHECK_NAME, head_sha: key.headSha, ...completion }),
+        await send(key, '/check-runs', 'POST', { name: deps.checkName(), head_sha: key.headSha, ...completion }),
       )
     },
   }
@@ -228,7 +243,8 @@ function isPersistedLease(value: unknown): value is PersistedReviewCheckLease {
     (ref === null
       ? lease.outcome !== undefined
       : typeof ref === 'object' &&
-        (ref.mode === 'status' || (ref.mode === 'check-run' && typeof ref.checkRunId === 'number')))
+        ((ref.mode === 'status' && (ref.context === undefined || typeof ref.context === 'string')) ||
+          (ref.mode === 'check-run' && typeof ref.checkRunId === 'number')))
   )
 }
 

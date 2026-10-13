@@ -35,7 +35,7 @@ import { loadReconcileCooldownStore, type ReconcileCooldownStore } from './recon
 import { reconcileOpenPrs } from './reconcile-open-prs'
 import { createRecoveredGuidLog, recoverFailedGithubDeliveries } from './recover-failed-deliveries'
 import { createGithubRecoveryCallbacks } from './recovery'
-import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore } from './review-check'
+import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore, reviewCheckName } from './review-check'
 import { createGithubReviewStateResolver } from './review-state'
 import { createGithubReviewSubmitter } from './review-submitter'
 import { createGithubReviewThreadResolver } from './review-thread-resolver'
@@ -222,6 +222,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     token: authToken,
     authType: options.secrets.auth.type,
     enabled: () => options.configRef().review.check,
+    checkName: () => reviewCheckName(selfLogin),
     logger,
     fetchImpl,
   })

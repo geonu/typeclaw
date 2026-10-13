@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import type { ReviewCheckKey } from '@/channels/github-review-check'
 
-import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore } from './review-check'
+import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore, reviewCheckName } from './review-check'
 
 const KEY: ReviewCheckKey = { repo: 'acme/widgets', pullRequest: 7, headSha: 'a'.repeat(40) }
 
@@ -35,17 +35,26 @@ function json(body: unknown, status = 200): Response {
 function publisher(
   authType: 'pat' | 'app',
   fetchImpl: typeof fetch,
-  options: { enabled?: boolean; warnings?: string[] } = {},
+  options: { enabled?: boolean; warnings?: string[]; checkName?: () => string } = {},
 ) {
   return createGithubReviewCheckPublisher({
     token: async () => 'example-token',
     authType,
     enabled: () => options.enabled ?? true,
+    checkName: options.checkName ?? (() => 'my-agent'),
     logger: { warn: (m) => options.warnings?.push(m) },
     fetchImpl,
     now: () => Date.parse('2026-01-01T00:00:00Z'),
   })
 }
+
+describe('reviewCheckName', () => {
+  test('names the check after the agent login, dropping the App [bot] suffix', () => {
+    expect(reviewCheckName('my-agent[bot]')).toBe('my-agent')
+    expect(reviewCheckName('octo-reviewer')).toBe('octo-reviewer')
+    expect(reviewCheckName(null)).toBe('typeclaw/review')
+  })
+})
 
 describe('GitHub review check publisher', () => {
   test('App auth starts an in-progress check run and completes it red on requested changes', async () => {
@@ -61,7 +70,7 @@ describe('GitHub review check publisher', () => {
       'PATCH https://api.github.com/repos/acme/widgets/check-runs/555',
     ])
     expect(github.calls[0]?.body).toMatchObject({
-      name: 'typeclaw/review',
+      name: 'my-agent',
       head_sha: KEY.headSha,
       status: 'in_progress',
     })
@@ -89,13 +98,29 @@ describe('GitHub review check publisher', () => {
     await checks.finish(KEY, ref, { kind: 'failed', reason: 'TypeClaw restarted before this review was posted' })
     await checks.finish(KEY, ref, { kind: 'cancelled', reason: 'the review request was removed' })
 
-    expect(ref).toEqual({ mode: 'status' })
+    expect(ref).toEqual({ mode: 'status', context: 'my-agent' })
     expect(
       github.calls.every((c) => c.url === `https://api.github.com/repos/acme/widgets/statuses/${KEY.headSha}`),
     ).toBe(true)
     expect(github.calls.map((c) => c.body.state)).toEqual(['pending', 'failure', 'success'])
     expect(github.calls[2]?.body.description).toBe('Not reviewed: the review request was removed')
-    expect(github.calls.every((c) => c.body.context === 'typeclaw/review')).toBe(true)
+    expect(github.calls.every((c) => c.body.context === 'my-agent')).toBe(true)
+  })
+
+  test('a PAT status finishes under the name it started with, even if the agent name changed', async () => {
+    // given: a status started as one name, and a lease persisted before per-agent names
+    const github = fakeGithub(() => json({}, 201))
+    let name = 'old-agent'
+    const checks = publisher('pat', github.fetchImpl, { checkName: () => name })
+    const ref = await checks.start(KEY)
+    name = 'new-agent'
+
+    // when: both are finished
+    await checks.finish(KEY, ref, { kind: 'verdict', state: 'APPROVED' })
+    await checks.finish(KEY, { mode: 'status' }, { kind: 'verdict', state: 'APPROVED' })
+
+    // then: each completion replaces its own pending status
+    expect(github.calls.map((c) => c.body.context)).toEqual(['old-agent', 'old-agent', 'typeclaw/review'])
   })
 
   test('a verdict without an in-progress check creates a completed one', async () => {
@@ -109,7 +134,7 @@ describe('GitHub review check publisher', () => {
     expect(github.calls[0]).toMatchObject({
       method: 'POST',
       url: 'https://api.github.com/repos/acme/widgets/check-runs',
-      body: { name: 'typeclaw/review', status: 'completed', conclusion: 'success' },
+      body: { name: 'my-agent', status: 'completed', conclusion: 'success' },
     })
   })
 
@@ -147,6 +172,7 @@ describe('GitHub review check publisher', () => {
       token: async () => 'example-token',
       authType: 'app',
       enabled: () => true,
+      checkName: () => 'my-agent',
       logger: { warn: (m) => warnings.push(m) },
       fetchImpl: github.fetchImpl,
       now: () => clock,
