@@ -72,6 +72,7 @@ const TREE_NAMES_SNAPSHOT_MAX_ENTRIES = 65_536
 const FIND_IGNORE_FILE_NAMES = new Set(['.gitignore', '.ignore', '.fdignore'])
 // ripgrep's own binary heuristic: a NUL in the leading block. rg skips such
 // files during recursive search, so grep snapshots them as empty placeholders.
+// rg transcodes BOM-prefixed UTF-16 before that check, so those stay searchable.
 const BINARY_SNIFF_BYTES = 8192
 const AGENT_ROOT_SNAPSHOT_EXCLUDED_DIRS = new Set(['.git', '.gitstore', 'node_modules'])
 
@@ -1043,7 +1044,7 @@ async function snapshotOpenedDirectory(
       enforceInputIdentityDenial(identityVerifier, opened)
       const resolved = await realpath(`/proc/self/fd/${source.fd}`)
       if (isDeniedSnapshotPath(resolved, options)) continue
-      if (await snapshotsAsPlaceholder(source, entry.name, state.mode)) {
+      if (await snapshotsAsPlaceholder(source, candidate, state.mode)) {
         await writeFile(target, '', { flag: 'wx', mode: 0o400 })
         continue
       }
@@ -1074,12 +1075,28 @@ function treeSnapshotMode(tool: string): TreeSnapshotMode {
   return 'contents'
 }
 
-async function snapshotsAsPlaceholder(source: FileHandle, name: string, mode: TreeSnapshotMode): Promise<boolean> {
+async function snapshotsAsPlaceholder(source: FileHandle, candidate: string, mode: TreeSnapshotMode): Promise<boolean> {
   if (mode === 'listing') return true
-  if (mode === 'names') return !FIND_IGNORE_FILE_NAMES.has(name)
+  if (mode === 'names') return !isFindIgnoreFile(candidate)
   const head = Buffer.alloc(BINARY_SNIFF_BYTES)
   const { bytesRead } = await source.read(head, 0, BINARY_SNIFF_BYTES, 0)
-  return head.subarray(0, bytesRead).includes(0)
+  const sniffed = head.subarray(0, bytesRead)
+  if (hasUtf16Bom(sniffed)) return false
+  return sniffed.includes(0)
+}
+
+function isFindIgnoreFile(candidate: string): boolean {
+  if (FIND_IGNORE_FILE_NAMES.has(path.basename(candidate))) return true
+  const parent = path.dirname(candidate)
+  return (
+    path.basename(candidate) === 'exclude' &&
+    path.basename(parent) === 'info' &&
+    path.basename(path.dirname(parent)) === '.git'
+  )
+}
+
+function hasUtf16Bom(head: Buffer): boolean {
+  return head.length >= 2 && ((head[0] === 0xff && head[1] === 0xfe) || (head[0] === 0xfe && head[1] === 0xff))
 }
 
 function assertRegularInputFile(stats: Stats, original: string): void {

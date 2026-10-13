@@ -2703,6 +2703,8 @@ describe('wrapSystemTool', () => {
       const tree = path.join(agentDir, 'workspace')
       await mkdir(path.join(tree, 'recordings'), { recursive: true })
       await writeFile(path.join(tree, 'notes.md'), 'meeting needle')
+      await writeFile(path.join(tree, 'utf16le.txt'), Buffer.from('\ufeffutf16 needle', 'utf16le'))
+      await writeFile(path.join(tree, 'utf16be.txt'), Buffer.from('\ufeffutf16 needle', 'utf16le').swap16())
       await writeFile(path.join(tree, 'recordings', 'memo.m4a'), '')
       await truncate(path.join(tree, 'recordings', 'memo.m4a'), 80 * 1024 * 1024)
       try {
@@ -2720,6 +2722,9 @@ describe('wrapSystemTool', () => {
         expect(listed).toContain('recordings/')
         expect(await run('find', { path: 'workspace', pattern: '**/*.m4a' })).toContain('recordings/memo.m4a')
         expect(await run('grep', { path: 'workspace', pattern: 'meeting needle' })).toContain('notes.md')
+        const utf16 = await run('grep', { path: 'workspace', pattern: 'utf16 needle' })
+        expect(utf16).toContain('utf16le.txt')
+        expect(utf16).toContain('utf16be.txt')
       } finally {
         await rm(agentDir, { recursive: true, force: true })
       }
@@ -2738,6 +2743,11 @@ describe('wrapSystemTool', () => {
       )
       await writeFile(path.join(tree, '.gitignore'), 'skipped.log\n')
       await writeFile(path.join(tree, 'skipped.log'), '')
+      const repo = path.join(tree, 'repo')
+      await mkdir(path.join(repo, '.git', 'info'), { recursive: true })
+      await writeFile(path.join(repo, '.git', 'info', 'exclude'), 'excluded.log\n')
+      await writeFile(path.join(repo, 'excluded.log'), '')
+      await writeFile(path.join(repo, 'kept.log'), '')
       try {
         const find = buildBuiltinPiToolOverrides({ agentDir, sessionId: 'many', hooks: createHookBus() }).find(
           (tool) => tool.name === 'find',
@@ -2764,6 +2774,8 @@ describe('wrapSystemTool', () => {
         const text = (r: typeof result) => r.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
         expect(text(result)).toContain('s-4199.jsonl')
         expect(text(ignored)).not.toContain('skipped.log')
+        expect(text(ignored)).toContain('kept.log')
+        expect(text(ignored)).not.toContain('excluded.log')
       } finally {
         await rm(agentDir, { recursive: true, force: true })
       }
