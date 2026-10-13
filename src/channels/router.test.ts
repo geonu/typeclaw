@@ -17716,12 +17716,11 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(1)
   })
 
-  test('does not carry tool activity into a finished-subagent completion wake', async () => {
-    // given: the production incident. A PR turn spawned a background reviewer (a
-    // tool call) and deliberately ended silent, per the subagent contract. The
-    // reviewer finished, and the completion wake carrying its verdict died on a
-    // provider overload WITHOUT touching a tool. Turn A's tool activity must not
-    // license silence for the wake, or the verdict is lost with no signal at all.
+  test('a finished-subagent completion wake that dies on the provider stays silent in the channel', async () => {
+    // given: a PR turn spawned a background reviewer (a tool call) and deliberately
+    // ended silent, per the subagent contract. The reviewer finished, and the
+    // completion wake died on a provider overload. Only a turn answering a user
+    // errors out in the channel; the wake's failure goes to the operator log.
     const dir = await tempDir()
     const logs: string[] = []
     const sent: string[] = []
@@ -17754,13 +17753,45 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
       ok: true,
       durationMs: 5_000,
     })
-    await waitFor(() => sent.some((t) => PROVIDER_NOTICE.test(t)))
+    await waitFor(() => logs.some((m) => /provider_error_notice_suppressed reason=background_wake_turn/.test(m)))
 
-    // then: the wake ran as its own logical turn and its death is visible
+    // then: the wake ran as its own logical turn, posted nothing, and logged why
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sessions[0]!.prompts[1]).toContain('bg_reviewer')
-    expect(sent.filter((t) => PROVIDER_NOTICE.test(t))).toHaveLength(1)
-    expect(logs.some((m) => /provider_error_notice_suppressed reason=tool_activity_this_turn/.test(m))).toBe(false)
+    expect(sent).toEqual([])
+  })
+
+  test('a finished-subagent completion wake that exhausts its empty-turn retries posts no fallback', async () => {
+    // given: the wake keeps whiffing after tool work until the retry budget runs out
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+    await router.route(inbound({ text: '이 PR 리뷰해줘' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // when
+    sessions[0]!.onPrompt = () => emptyStopAfterToolWork(sessions[0]!)
+    await router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'reviewer',
+      taskId: 'bg_reviewer',
+      ok: true,
+      durationMs: 5_000,
+    })
+    await waitFor(() => logs.some((m) => m.includes('empty_turn_fallback_suppressed reason=background_wake_turn')))
+
+    // then
+    expect(sessions[0]!.prompts).toHaveLength(2 + MAX_EMPTY_TURN_RETRIES)
+    expect(sent).toEqual([])
   })
 
   test('still carries tool activity across a retry nudge in the same logical turn', async () => {
@@ -21203,6 +21234,64 @@ describe('ChannelRouter durable background response coverage', () => {
     await rm(f.dir, { recursive: true, force: true })
   })
 
+  test('a completion-wake retry moved by reload stays silent when the successor hits a provider error', async () => {
+    // given: a completion wake promised more work, then reloaded while its retry was queued
+    let created = 0
+    let successor: FakeSession | undefined
+    const f = await fixture(KEY, (session) => {
+      created++
+      if (created > 1) {
+        successor = session
+        session.onPrompt = () => {
+          session.emit({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: 'server_is_overloaded' },
+          })
+          session.setAssistantMidTurn('', 'error')
+        }
+      }
+    })
+    const ref = await f.accept('reload-wake')
+    const retryEntered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let attempts = 0
+    f.sessions[0]!.onPrompt = async () => {
+      attempts++
+      if (attempts === 1) {
+        await reply(f.sessions[0]!, f.router, KEY, "I'll keep checking on that now.")
+      } else {
+        retryEntered.resolve()
+        await release.promise
+        f.sessions[0]!.setAssistantText('NO_REPLY')
+      }
+    }
+    await f.router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      taskId: 'reload-wake',
+      subagent: 'explorer',
+      ok: true,
+      durationMs: 20,
+    })
+    await retryEntered.promise
+    f.router.__testing!.injectContinuationReminder(KEY, WILLINGNESS_NUDGE)
+
+    // when: the successor resumes the retry and its provider call fails
+    await f.router.tearDownAllLive()
+    release.resolve()
+    await f.router.__testing!.flushDebounce(KEY)
+    await waitFor(() => successor?.prompts.length === 1)
+    await f.router.__testing!.flushDebounce(KEY)
+
+    // then: no channel notice, no recovery notice, and the result settles silently
+    expect(f.sent).toEqual(["I'll keep checking on that now."])
+    expect(await f.store.get(ref.obligationId)).toMatchObject({
+      phase: 'closed',
+      outcome: { kind: 'intentionally-suppressed' },
+    })
+    expect(await new RecoveryOutbox(f.dir, { epoch: 'inspection' }).list()).toEqual([])
+    await rm(f.dir, { recursive: true, force: true })
+  })
+
   test('reload moves retry coverage without granting another willingness nudge', async () => {
     let created = 0
     let successor: FakeSession | undefined
@@ -21378,7 +21467,7 @@ describe('ChannelRouter durable background response coverage', () => {
     await rm(f.dir, { recursive: true, force: true })
   })
 
-  test('absent parent and provider failure leave completed results owed', async () => {
+  test('absent parent leaves a completed result owed; a provider failure on its wake settles it silently', async () => {
     const f = await fixture()
     const absent = await f.accept('absent', KEY, 'missing-parent')
     expect(
@@ -21404,8 +21493,10 @@ describe('ChannelRouter durable background response coverage', () => {
     })
     await waitFor(() => f.sessions[0]!.prompts.length > 1)
     await f.router.__testing!.flushDebounce(KEY)
-    expect((await f.store.get(failed.obligationId))?.phase).not.toBe('closed')
-    expect((await f.store.get(failed.obligationId))?.outcome).toBeUndefined()
+    expect(await f.store.get(failed.obligationId)).toMatchObject({
+      phase: 'closed',
+      outcome: { kind: 'intentionally-suppressed', reason: 'background-wake-turn-ended' },
+    })
     expect(f.sent).toEqual([])
     await rm(f.dir, { recursive: true, force: true })
   })

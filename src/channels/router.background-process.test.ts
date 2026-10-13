@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
+import { RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
 import { RecoveryOutbox } from './recovery-outbox'
 
 const cwd = join(import.meta.dir, '../..')
@@ -295,7 +295,7 @@ for (const boundary of [
   }, 30_000)
 }
 
-test('provider-error notice after a consumed child result never erases the child debt; it ends as one live notice', async () => {
+test('provider failure on a completion wake settles the consumed child result silently, with no notice or replay', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-router-process-'))
   await writeFile(
     join(dir, 'typeclaw.json'),
@@ -308,12 +308,12 @@ test('provider-error notice after a consumed child result never erases the child
       rows: Array<{ taskId: string; phase: string; transfer?: { deliveryId: string; text: string } }>
       outbox: Array<{ deliveryId: string; text: string; covers: Array<{ store: string; id: string }> }>
     }
-    // The provider failure did not close the consumed result; it was handed
-    // to a durable non-restart notice in the same process.
-    expect(decided.rows).toMatchObject([{ taskId: 'task', phase: 'notice-owned' }])
-    expect(decided.outbox).toHaveLength(1)
-    expect(decided.outbox[0]!.text).toBe(LIVE_TURN_ENDED_NOTICE_TEXT)
-    expect(decided.outbox[0]!.deliveryId).toBe(decided.rows[0]!.transfer!.deliveryId)
+    // Only a turn answering a user errors out: the wake's failure closes the
+    // consumed result as intentionally suppressed, and no notice is queued.
+    expect(decided.rows).toMatchObject([
+      { taskId: 'task', phase: 'closed', outcome: { kind: 'intentionally-suppressed' } },
+    ])
+    expect(decided.outbox).toEqual([])
     const providerCalls = await readFile(join(dir, 'provider-calls'), 'utf8')
     for (const mode of ['repair', 'second-repair']) {
       const boot = spawnWorker(dir, mode)
@@ -324,16 +324,9 @@ test('provider-error notice after a consumed child result never erases the child
     }
     expect(await readFile(join(dir, 'provider-calls'), 'utf8')).toBe(providerCalls)
     const rows = await new BackgroundObligationStore(dir, { epoch: 'inspection' }).list()
-    expect(rows).toMatchObject([{ phase: 'closed', outcome: { deliveryId: decided.outbox[0]!.deliveryId } }])
-    const posts = (await readFile(join(dir, 'posts'), 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line).text)
-    expect(
-      posts.filter((text) => text === recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT })),
-    ).toHaveLength(1)
-    expect(posts).not.toContain(recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))
-    expect(posts).not.toContain('Result: 42.')
+    expect(rows).toMatchObject([{ phase: 'closed', outcome: { kind: 'intentionally-suppressed' } }])
+    // Neither the provider-error notice nor a recovery notice reached the channel.
+    expect(await readFile(join(dir, 'posts'), 'utf8').catch(() => '')).toBe('')
   } finally {
     child.kill('SIGKILL')
     await child.exited

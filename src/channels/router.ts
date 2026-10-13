@@ -837,6 +837,9 @@ type PendingSystemReminder = {
   kind: 'retry' | 'wakeup'
   githubReviewRoundKey?: string
   backgroundObligationId?: string
+  // Set on a retry handed to a reload successor: a reminder-only retry never runs
+  // beginWakeupTurn, so the successor restores the logical turn's provenance here.
+  backgroundWake?: boolean
   inboundRetry?: { inputIds: string[]; turnId: string }
   backgroundRetry?: {
     turnId: string
@@ -1312,6 +1315,12 @@ type LiveSession = {
   // retry iterations that end the turn. Reset ONLY on a real user batch,
   // beside `githubReviewOutputTurn`.
   toolExecutionThisLogicalTurn: boolean
+  // True while the logical turn was opened by background work (a completed
+  // subagent's wakeup) rather than a user message. Only a turn answering a user
+  // may error out in the channel: a failure here is logged for the operator and
+  // its coverage settles silently, never as a provider-error, empty-turn or
+  // live-turn-ended notice. Set by beginWakeupTurn, cleared by a real user batch.
+  backgroundWakeLogicalTurn: boolean
   // Successful, non-communication, non-control tool output observed during
   // this logical turn. Unlike toolExecutionThisLogicalTurn, channel_reply and
   // todo/control calls cannot satisfy a later durable completion claim.
@@ -3303,6 +3312,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         stagedFallbackCause: null,
         githubReviewOutputTurn: null,
         toolExecutionThisLogicalTurn: false,
+        backgroundWakeLogicalTurn: false,
         qualifyingWorkThisLogicalTurn: false,
         promisedWorkOutstandingThisLogicalTurn: false,
         statusOutputOutstandingThisLogicalTurn: false,
@@ -4113,8 +4123,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const postEmptyTurnFallback = async (live: LiveSession, cause: string): Promise<void> => {
-    logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
     live.emptyTurnFallbackTurn = live.turnSeq
+    if (live.backgroundWakeLogicalTurn) {
+      logger.warn(`[channels] ${live.keyId} empty_turn_fallback_suppressed reason=background_wake_turn cause=${cause}`)
+      void dropContinuationReactions(live)
+      return
+    }
+    logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
     try {
       const inboundCoverage = await captureInboundResultCoverage(live.sessionId)
       if (await reactTurnFailed(live)) {
@@ -4856,6 +4871,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
     live.pendingProviderError = null
+    // Only a turn answering a user errors out in the channel. A turn opened by
+    // background work stays silent; the `LLM call failed` line plus this record
+    // carry the failure to the operator, and turn-end settles its coverage.
+    if (live.backgroundWakeLogicalTurn) {
+      logger.warn(
+        `[channels] ${live.keyId}: provider_error_notice_suppressed reason=background_wake_turn notice="${pending.safeMessage}"`,
+      )
+      return
+    }
     // Genuinely empty turn with no retry left: surface the REDACTED
     // `safeMessage` (never raw provider text, which can carry response bodies /
     // URLs / tokens) via a 'system' send — the one-shot bypass path that lands
@@ -4927,6 +4951,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     try {
       await backgroundObligations.withTargetLane(live.key, async () => {
         if (keepsCoverage() || awaitsDeferredChild(live, 'turn-end-coverage')) return
+        // A background-opened turn that ended without answering settles what it
+        // holds silently instead of posting a live-turn-ended notice. Anything
+        // it cannot settle (owned elsewhere) still transfers below.
+        if (live.backgroundWakeLogicalTurn) {
+          logger.warn(
+            `[channels] ${live.keyId}: background_wake_turn_ended_silently ` +
+              `inbound=${live.inboundCoverage.length} background=${live.backgroundCoverage.length}`,
+          )
+          await settleBackgroundCoverageInLane(
+            live,
+            'intentionally-suppressed',
+            'background-wake-turn-ended',
+            live.backgroundCoverage,
+          )
+        }
         await transferHeldCoverageInLane(live)
       })
     } catch (error) {
@@ -4974,6 +5013,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.nextPromptMaxTokens = undefined
     live.githubReviewOutputTurn = null
     live.toolExecutionThisLogicalTurn = false
+    live.backgroundWakeLogicalTurn = true
     live.qualifyingWorkThisLogicalTurn = false
   }
 
@@ -5246,6 +5286,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             live.willingnessNudges = carried.willingnessNudges
             live.nextPromptMaxTokens = carried.nextPromptMaxTokens
           }
+          const carriedWake = fresh ? undefined : queued.find((r) => r.backgroundWake !== undefined)?.backgroundWake
+          if (carriedWake !== undefined) live.backgroundWakeLogicalTurn = carriedWake
           const ownedRow = live.inboundCoverage[0] ? inboundJournal.get(live.inboundCoverage[0]) : undefined
           const ownedInput = ownedRow?.phase === 'closed' ? undefined : ownedRow
           const ownedBackground = live.backgroundCoverage[0]
@@ -5375,6 +5417,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // empty-turn fallback across the reminder-only retry iterations.
           live.githubReviewOutputTurn = null
           live.toolExecutionThisLogicalTurn = false
+          live.backgroundWakeLogicalTurn = false
           live.qualifyingWorkThisLogicalTurn = false
           live.promisedWorkOutstandingThisLogicalTurn = false
           live.statusOutputOutstandingThisLogicalTurn = false
@@ -5717,6 +5760,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (retry) {
           // A queued retry already carries this turn's lineage and retry budgets
           // forward; the coverage rides on it rather than as a separate snapshot.
+          retry.backgroundWake = live.backgroundWakeLogicalTurn
           const refs = await resolveBackgroundCoverage(live, live.backgroundCoverage, true)
           const inputIds = live.inboundCoverage.filter((id) => isHeldByLiveTurn(live, inboundJournal.get(id)))
           if (refs.length > 0 || inputIds.length > 0) {
