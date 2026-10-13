@@ -17438,6 +17438,134 @@ describe('ChannelRouter more_work_this_turn:true empty-stop recovery (phrase-ind
     expect(sent).not.toContain('지난 기록은 이 내용이야.')
   })
 
+  test('retries a provider error after silent tool work and answers without a notice', async () => {
+    // given: a review turn that ran tools without posting anything, then hit
+    // Codex's generic server error on the next model call
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '이 PR 리뷰해줘' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'Codex error: An error occurred while processing your request.',
+        },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    sessions[0]!.onContinue = async () => {
+      sessions[0]!.agent.state.messages.push({ role: 'assistant', stopReason: 'stop' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '리뷰 끝났어.' })
+      sessions[0]!.setAssistantText('')
+    }
+
+    // when
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: resumed from the completed tool result, never re-prompted
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.continued).toBe(1)
+    expect(sent).toEqual(['리뷰 끝났어.'])
+  })
+
+  test('does not retry after tool work once the turn already sent a reply', async () => {
+    // given: the turn posted its answer, then a later model call failed
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '이 PR 리뷰해줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '리뷰 끝났어.' })
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'Codex error: An error occurred while processing your request.',
+        },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    sessions[0]!.onContinue = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'duplicate answer' })
+    }
+
+    // when
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions[0]!.continued).toBe(0)
+    expect(sent).not.toContain('duplicate answer')
+  })
+
+  test('/stop during post-tool retry backoff cancels a retry that had no progress reply', async () => {
+    const dir = await tempDir()
+    let signalBackoffStart: () => void = () => {}
+    const backoffStarted = new Promise<void>((resolve) => {
+      signalBackoffStart = resolve
+    })
+    const { router, sessions } = makeRouter(dir, {
+      retryRandom: () => 0.999,
+      onRetryBackoffStart: signalBackoffStart,
+    })
+    // A failed stop ack keeps the send count unchanged, so only the stop
+    // itself can revoke the retry.
+    router.registerOutbound('discord-bot', async (msg) =>
+      msg.text === 'Stopped the current turn.' ? { ok: false, error: 'stop acknowledgment unavailable' } : { ok: true },
+    )
+
+    await router.route(inbound({ text: '이 PR 리뷰해줘' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+
+    const draining = router.__testing!.flushDebounce(KEY)
+    await backoffStarted
+    await router.route(inbound({ text: '/stop', externalMessageId: 'm-stop-silent-retry-backoff' }))
+    await draining
+
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.continued).toBe(0)
+  })
+
   test('surfaces one redacted warning after the authorized retry fails again', async () => {
     const dir = await tempDir()
     const sent: string[] = []
