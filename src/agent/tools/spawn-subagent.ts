@@ -10,6 +10,7 @@ import type { PermissionService } from '@/permissions'
 import type { Stream } from '@/stream'
 
 import { type LiveSubagentRegistry, type SubagentCompletion } from '../live-subagents'
+import { attachReviewerActivityCapture } from '../reviewer-activity'
 import { MAX_SUBAGENT_DEPTH, type SessionOrigin, subagentDepth } from '../session-origin'
 import {
   type CreateSessionForSubagent,
@@ -298,6 +299,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           return errorResult('background launch cancelled before execution')
         }
       }
+      let detachReviewerActivity: (() => void) | undefined
       const { handle, completion } = startSubagent(subagentName, {
         registry,
         createSessionForSubagent,
@@ -312,6 +314,15 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           capturedFinalMessage = message
           liveRegistry.recordCapturedFinalMessageIfRunning(taskId, message)
         },
+        ...(params.review_identity !== undefined
+          ? {
+              onSession: ({ session }) => {
+                detachReviewerActivity = attachReviewerActivityCapture(session, (activity) =>
+                  githubReviewChecks.reportActivity(taskId, activity),
+                )
+              },
+            }
+          : {}),
       })
 
       let resolvedHandle: { taskId: string; sessionId: string | undefined; abort: () => Promise<void> } | undefined
@@ -410,10 +421,12 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         void githubReviewChecks.beginReview(
           { repo: reviewIdentity.repo, pullRequest: reviewIdentity.pull_request, headSha: reviewIdentity.head_sha },
           taskId,
+          { reviewKind: reviewIdentity.review_kind },
         )
       }
 
       void completion.then((c) => {
+        detachReviewerActivity?.()
         releaseCoalesceKey()
         const durationMs = now() - startedAt
         // First-writer-wins: if the parent drain already settled this child by

@@ -3,9 +3,15 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { ReviewCheckKey } from '@/channels/github-review-check'
+import { GithubReviewCheckTracker, type ReviewCheckKey } from '@/channels/github-review-check'
 
-import { createGithubReviewCheckPublisher, createReviewCheckLeaseStore, reviewCheckName } from './review-check'
+import {
+  createGithubReviewCheckPublisher,
+  createReviewCheckLeaseStore,
+  REVIEW_CHECK_MAX_FINDINGS,
+  reviewCheckDetails,
+  reviewCheckName,
+} from './review-check'
 
 const KEY: ReviewCheckKey = { repo: 'acme/widgets', pullRequest: 7, headSha: 'a'.repeat(40) }
 
@@ -201,6 +207,219 @@ describe('GitHub review check publisher', () => {
     expect(await checks.finish(KEY, { mode: 'status' }, { kind: 'failed', reason: 'boom' })).toBe('retry')
   })
 
+  test('progress updates the running check with plain-language steps and no internal identifiers', async () => {
+    // given: a running check whose reviewer has read code and is running commands
+    const github = fakeGithub()
+    const checks = publisher('app', github.fetchImpl)
+    const t0 = Date.parse('2026-01-01T00:00:00Z')
+
+    // when: progress is published 4m12s in
+    await checks.progress?.(
+      KEY,
+      { mode: 'check-run', checkRunId: 555 },
+      {
+        phase: 'reviewing',
+        startedAt: t0,
+        now: t0 + 252_000,
+        reviewKind: 're-review',
+        activity: { started: true, filesRead: 14, commandsRun: 2, current: 'commands', lastActivityAt: t0 + 246_000 },
+      },
+    )
+
+    // then: it patches the check run's output only
+    expect(github.calls).toHaveLength(1)
+    expect(github.calls[0]).toMatchObject({
+      method: 'PATCH',
+      url: 'https://api.github.com/repos/acme/widgets/check-runs/555',
+    })
+    const output = github.calls[0]?.body.output as { title: string; summary: string }
+    expect(github.calls[0]?.body.status).toBeUndefined()
+    expect(output.title).toBe('Reviewing… (4m 12s)')
+    expect(output.summary).toContain('re-review after new commits')
+    expect(output.summary).toContain('| ✅ | Read the code (14 files) |')
+    expect(output.summary).toContain('| ⏳ | Running commands (tests, builds) |')
+    expect(output.summary).toContain('| ⬜ | Write up findings |')
+    expect(output.summary).toContain('Last activity: 6 seconds ago')
+  })
+
+  test('progress in the posting phase says the review is being posted', async () => {
+    const github = fakeGithub()
+    const checks = publisher('app', github.fetchImpl)
+
+    await checks.progress?.(
+      KEY,
+      { mode: 'check-run', checkRunId: 555 },
+      { phase: 'posting', startedAt: 0, now: 400_000, activity: null },
+    )
+
+    const output = github.calls[0]?.body.output as { title: string; summary: string }
+    expect(output.title).toBe('Posting review… (6m 40s)')
+  })
+
+  test('requested changes render the findings table, review link, and duration', async () => {
+    // given: a posted review with two findings
+    const github = fakeGithub()
+    const checks = publisher('app', github.fetchImpl)
+    const details = reviewCheckDetails(42, [
+      { path: 'src/auth/session.ts', line: 88, body: '**Token refresh can race with logout**\n\nDetails here.' },
+      { path: 'src/api/client.ts', line: 40, body: '- Retry has | no upper bound' },
+    ])
+
+    // when: the check completes
+    await checks.finish(
+      KEY,
+      { mode: 'check-run', checkRunId: 555 },
+      { kind: 'verdict', state: 'CHANGES_REQUESTED', details },
+      { startedAt: 0, decidedAt: 483_000, tracked: true },
+    )
+
+    // then: the page lists both findings with diff links and points Details at the review
+    const body = github.calls[0]?.body as { output: { title: string; summary: string }; details_url: string }
+    expect(body.details_url).toBe('https://github.com/acme/widgets/pull/7#pullrequestreview-42')
+    expect(body.output.title).toBe('Changes requested · 2 findings')
+    expect(body.output.summary).toContain('after a 8m 03s review')
+    expect(body.output.summary).toContain('Token refresh can race with logout |')
+    expect(body.output.summary).toContain('Retry has \\| no upper bound')
+    expect(body.output.summary).toMatch(
+      /\[`src\/auth\/session\.ts:88`\]\(https:\/\/github\.com\/acme\/widgets\/pull\/7\/files#diff-[0-9a-f]{64}R88\)/,
+    )
+    expect(body.output.summary).toContain('[View the full review →]')
+  })
+
+  test('an untracked verdict omits the duration and PAT statuses link to the review', async () => {
+    const github = fakeGithub(() => json({}, 201))
+    const checks = publisher('pat', github.fetchImpl)
+
+    await checks.finish(
+      KEY,
+      { mode: 'status' },
+      { kind: 'verdict', state: 'APPROVED', details: reviewCheckDetails(9, []) },
+      { startedAt: 0, decidedAt: 60_000, tracked: false },
+    )
+
+    expect(github.calls[0]?.body.target_url).toBe('https://github.com/acme/widgets/pull/7#pullrequestreview-9')
+  })
+
+  test('review details cap the stored findings but keep the real count', () => {
+    const comments = Array.from({ length: REVIEW_CHECK_MAX_FINDINGS + 5 }, (_, i) => ({
+      path: 'a.ts',
+      line: i + 1,
+      body: '# 토큰 갱신 경쟁 상태',
+    }))
+
+    const details = reviewCheckDetails(1, comments)
+
+    expect(details.findings).toHaveLength(REVIEW_CHECK_MAX_FINDINGS)
+    expect(details.findingCount).toBe(REVIEW_CHECK_MAX_FINDINGS + 5)
+    expect(details.findings?.[0]?.title).toBe('토큰 갱신 경쟁 상태')
+  })
+
+  test('failures and cancellations explain the reason and how to retry', async () => {
+    const github = fakeGithub()
+    const checks = publisher('app', github.fetchImpl)
+    const ref = { mode: 'check-run' as const, checkRunId: 1 }
+
+    await checks.finish(KEY, ref, { kind: 'failed', reason: 'the reviewer did not finish in time' })
+    await checks.finish(KEY, ref, { kind: 'cancelled', reason: 'the pull request was converted to draft' })
+
+    const [failed, cancelled] = github.calls.map((c) => c.body.output as { title: string; summary: string })
+    expect(failed?.title).toBe("Review didn't finish")
+    expect(failed?.summary).toContain('Reason: the reviewer did not finish in time.')
+    expect(failed?.summary).toContain('re-request a review')
+    expect(cancelled?.title).toBe('Review skipped')
+    expect(cancelled?.summary).toContain('Reason: the pull request was converted to draft.')
+  })
+
+  test('a finding on a deleted line links to the left side of the diff', async () => {
+    const github = fakeGithub()
+    const checks = publisher('app', github.fetchImpl)
+    const details = reviewCheckDetails(1, [{ path: 'old.ts', line: 12, side: 'LEFT', body: 'Removed guard' }])
+
+    await checks.finish(KEY, { mode: 'check-run', checkRunId: 1 }, { kind: 'verdict', state: 'COMMENTED', details })
+
+    const output = github.calls[0]?.body.output as { summary: string }
+    expect(details.findings?.[0]?.side).toBe('LEFT')
+    expect(output.summary).toMatch(/#diff-[0-9a-f]{64}L12\)/)
+  })
+
+  test('a stalled progress request is aborted so the completion still publishes, with no progress after it', async () => {
+    // given: a running check whose next progress PATCH hangs until it is aborted
+    let hangProgress = true
+    let progressEntered: () => void = () => {}
+    const inFlight = new Promise<void>((resolve) => {
+      progressEntered = resolve
+    })
+    const calls: string[] = []
+    const fetchImpl = Object.assign(
+      async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        const kind = init?.method === 'POST' ? 'start' : body.status === 'completed' ? 'complete' : 'progress'
+        calls.push(kind)
+        if (kind === 'progress' && hangProgress) {
+          hangProgress = false
+          progressEntered()
+          const signal = init?.signal
+          return new Promise<Response>((_, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason))
+          })
+        }
+        return json({ id: 555 }, 201)
+      },
+      { preconnect: () => {} },
+    )
+    const checks = createGithubReviewCheckPublisher({
+      token: async () => 'example-token',
+      authType: 'app',
+      enabled: () => true,
+      checkName: () => 'typeclaw/review',
+      logger: { warn: () => {} },
+      fetchImpl,
+      progressTimeoutMs: 5,
+    })
+    const tracker = new GithubReviewCheckTracker()
+    await tracker.attach({
+      publisher: checks,
+      store: { load: async () => [], save: async () => {} },
+      logger: { info: () => {}, warn: () => {} },
+    })
+    try {
+      await tracker.beginReview(KEY, 'bg_1')
+
+      // when: the sweep's progress stalls and the verdict is posted meanwhile
+      const sweeping = tracker.sweep()
+      await inFlight
+      await tracker.reviewPosted(KEY, 'APPROVED')
+      await sweeping
+      await tracker.sweep()
+
+      // then: the stalled request is abandoned, the completion lands, and nothing follows it
+      expect(calls).toEqual(['start', 'progress', 'complete'])
+    } finally {
+      tracker.detach(checks)
+    }
+  })
+
+  test('a stalled token lookup for progress is bounded too', async () => {
+    const github = fakeGithub()
+    const checks = createGithubReviewCheckPublisher({
+      token: () => new Promise<string>(() => {}),
+      authType: 'app',
+      enabled: () => true,
+      checkName: () => 'typeclaw/review',
+      logger: { warn: () => {} },
+      fetchImpl: github.fetchImpl,
+      progressTimeoutMs: 5,
+    })
+
+    await checks.progress?.(
+      KEY,
+      { mode: 'check-run', checkRunId: 1 },
+      { phase: 'posting', startedAt: 0, now: 0, activity: null },
+    )
+
+    expect(github.calls).toEqual([])
+  })
+
   test('the opt-out disables every call', async () => {
     const github = fakeGithub()
     const checks = publisher('app', github.fetchImpl, { enabled: false })
@@ -225,6 +444,27 @@ describe('review check lease store', () => {
 
     expect(await store.load()).toEqual([])
     const lease = { ...KEY, ref: { mode: 'check-run' as const, checkRunId: 9 }, startedAt: 1 }
+    await store.save([lease])
+
+    expect(await createReviewCheckLeaseStore(dir).load()).toEqual([lease])
+  })
+
+  test('round-trips a verdict outcome with review details', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'review-check-'))
+    dirs.push(dir)
+    const store = createReviewCheckLeaseStore(dir)
+    const lease = {
+      ...KEY,
+      ref: { mode: 'check-run' as const, checkRunId: 9 },
+      startedAt: 1,
+      outcome: {
+        kind: 'verdict' as const,
+        state: 'COMMENTED' as const,
+        details: { reviewId: 3, findings: [{ path: 'a.ts', line: 1, title: 'x' }], findingCount: 1 },
+      },
+      outcomeAt: 2,
+    }
+
     await store.save([lease])
 
     expect(await createReviewCheckLeaseStore(dir).load()).toEqual([lease])

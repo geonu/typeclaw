@@ -39,8 +39,18 @@ export type ReviewCheckKey = { repo: string; pullRequest: number; headSha: strin
 
 export type ReviewCheckRef = { mode: 'check-run'; checkRunId: number } | { mode: 'status'; context?: string }
 
+export type ReviewCheckFinding = { path: string; line: number; side?: 'LEFT' | 'RIGHT'; title: string }
+
+// Persisted with the outcome, so it stays small: `findings` is capped and
+// `findingCount` keeps the real total.
+export type ReviewCheckVerdictDetails = {
+  reviewId?: number
+  findings?: ReviewCheckFinding[]
+  findingCount?: number
+}
+
 export type ReviewCheckOutcome =
-  | { kind: 'verdict'; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' }
+  | { kind: 'verdict'; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'; details?: ReviewCheckVerdictDetails }
   | { kind: 'failed'; reason: string }
   | { kind: 'cancelled'; reason: string }
 
@@ -48,6 +58,26 @@ export type ReviewerSettlement =
   | { kind: 'ok' }
   | { kind: 'failed'; reason: string }
   | { kind: 'cancelled'; reason: string }
+
+// What a reviewer is doing, in plain categories: the check page never shows
+// task ids, session ids, tool names, or model text.
+export type ReviewerActivity = {
+  started: boolean
+  filesRead: number
+  commandsRun: number
+  current: 'reading' | 'commands' | 'writing' | null
+  lastActivityAt: number | null
+}
+
+export type ReviewCheckProgress = {
+  phase: 'reviewing' | 'posting'
+  startedAt: number
+  now: number
+  reviewKind?: 'review' | 're-review'
+  activity: ReviewerActivity | null
+}
+
+export type ReviewCheckTiming = { startedAt: number; decidedAt: number; tracked: boolean }
 
 // 'published': GitHub has the outcome, or retrying cannot help (disabled, no
 // permission). 'retry': a transient failure; the tracker keeps the outcome.
@@ -65,7 +95,10 @@ export type ReviewCheckPublisher = {
     key: ReviewCheckKey,
     ref: ReviewCheckRef | null,
     outcome: ReviewCheckOutcome,
+    timing?: ReviewCheckTiming,
   ) => Promise<ReviewCheckPublishResult>
+  // Best effort: a lost progress update is replaced by the next one.
+  progress?: (key: ReviewCheckKey, ref: ReviewCheckRef, progress: ReviewCheckProgress) => Promise<void>
 }
 
 // `ref: null` is only persisted together with an outcome: a verdict whose
@@ -73,6 +106,8 @@ export type ReviewCheckPublisher = {
 export type PersistedReviewCheckLease = ReviewCheckKey & {
   ref: ReviewCheckRef | null
   startedAt: number
+  // Absent in records written before review durations were shown.
+  tracked?: boolean
   outcome?: ReviewCheckOutcome
   outcomeAt?: number
 }
@@ -98,6 +133,11 @@ type Lease = {
   // undefined while the start call is in flight.
   ref: ReviewCheckRef | null | undefined
   started: Promise<void>
+  // False for a lease created only to publish a verdict nobody was tracked
+  // reviewing; its duration means nothing.
+  tracked: boolean
+  reviewKind?: 'review' | 're-review'
+  activity: ReviewerActivity | null
   outcome?: ReviewCheckOutcome
   outcomeAt?: number
   outcomeVersion: number
@@ -150,6 +190,7 @@ export class GithubReviewCheckTracker {
       const lease = this.createLease(normalizeKey(record), record.startedAt)
       lease.ref = record.ref
       if (record.ref?.mode === 'status') lease.name = record.ref.context ?? REVIEW_CHECK_NAME
+      lease.tracked = record.tracked === true
       this.claimCheck(lease)
       this.decide(lease, record.outcome ?? RESTARTED_OUTCOME, record.outcomeAt)
       restored++
@@ -170,7 +211,11 @@ export class GithubReviewCheckTracker {
     }
   }
 
-  beginReview(key: ReviewCheckKey, taskId: string): Promise<void> {
+  beginReview(
+    key: ReviewCheckKey,
+    taskId: string,
+    options: { reviewKind?: 'review' | 're-review' } = {},
+  ): Promise<void> {
     const attachment = this.attachment
     if (attachment === null) return Promise.resolve()
     const normalized = normalizeKey(key)
@@ -180,9 +225,12 @@ export class GithubReviewCheckTracker {
       existing.owners.add(taskId)
       existing.phase = 'reviewing'
       existing.deadlineAt = this.now() + REVIEW_CHECK_REVIEWING_DEADLINE_MS
+      if (options.reviewKind !== undefined) existing.reviewKind = options.reviewKind
       return existing.started
     }
     const lease = this.createLease(normalized, this.now())
+    lease.tracked = true
+    if (options.reviewKind !== undefined) lease.reviewKind = options.reviewKind
     this.leaseByTask.set(taskId, lease.uid)
     lease.owners.add(taskId)
     lease.started = attachment.publisher
@@ -213,14 +261,27 @@ export class GithubReviewCheckTracker {
     if (lease.ownerSucceeded) {
       lease.phase = 'posting'
       lease.deadlineAt = this.now() + REVIEW_CHECK_POSTING_DEADLINE_MS
-      return Promise.resolve()
+      return this.publishProgress(lease)
     }
     return this.finish(lease, settlement.kind === 'ok' ? { kind: 'failed', reason: 'reviewer failed' } : settlement)
   }
 
-  async reviewPosted(key: ReviewCheckKey, state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'): Promise<void> {
+  // The latest snapshot wins; it is published on the next sweep tick, which
+  // bounds progress PATCHes to one per lease per sweep interval.
+  reportActivity(taskId: string, activity: ReviewerActivity): void {
+    const uid = this.leaseByTask.get(taskId)
+    const lease = uid === undefined ? undefined : this.leases.get(uid)
+    if (lease === undefined || lease.outcome !== undefined) return
+    lease.activity = activity
+  }
+
+  async reviewPosted(
+    key: ReviewCheckKey,
+    state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED',
+    details?: ReviewCheckVerdictDetails,
+  ): Promise<void> {
     const normalized = normalizeKey(key)
-    const outcome: ReviewCheckOutcome = { kind: 'verdict', state }
+    const outcome: ReviewCheckOutcome = { kind: 'verdict', state, ...(details !== undefined ? { details } : {}) }
     const open = this.openLease(normalized)
     if (open !== undefined) return this.finish(open, outcome)
     // A verdict that lands after a failure was decided but before GitHub has
@@ -279,6 +340,8 @@ export class GithubReviewCheckTracker {
       ),
     )
     await this.publishDecided()
+    const open = [...this.leases.values()].filter((lease) => lease.outcome === undefined)
+    await Promise.all(open.map((lease) => this.publishProgress(lease)))
   }
 
   private createLease(key: ReviewCheckKey, startedAt: number): Lease {
@@ -294,6 +357,8 @@ export class GithubReviewCheckTracker {
       deadlineAt: this.now() + REVIEW_CHECK_REVIEWING_DEADLINE_MS,
       ref: undefined,
       started: Promise.resolve(),
+      tracked: false,
+      activity: null,
       outcomeVersion: 0,
       publishing: null,
     }
@@ -346,17 +411,45 @@ export class GithubReviewCheckTracker {
   // whichever lands last is what GitHub shows.
   private publish(lease: Lease): Promise<void> {
     if (lease.publishing !== null) return lease.publishing
-    const lockId = leaseId(lease.key)
-    const run = (this.publishLocks.get(lockId) ?? Promise.resolve()).then(() => this.publishUntilCurrent(lease))
+    lease.publishing = this.withPublishLock(lease.key, () => this.publishUntilCurrent(lease)).finally(() => {
+      lease.publishing = null
+    })
+    return lease.publishing
+  }
+
+  // Shares the completion's per-commit lock, and re-checks for an outcome once
+  // it holds it, so a progress update can never land after the completed check.
+  private publishProgress(lease: Lease): Promise<void> {
+    if (lease.ref?.mode !== 'check-run' || this.attachment?.publisher.progress === undefined) return Promise.resolve()
+    return this.withPublishLock(lease.key, async () => {
+      const attachment = this.attachment
+      const progress = attachment?.publisher.progress
+      const ref = lease.ref
+      if (progress === undefined || lease.outcome !== undefined || ref?.mode !== 'check-run') return
+      if (this.leases.get(lease.uid) !== lease) return
+      try {
+        await progress(lease.key, ref, {
+          phase: lease.phase,
+          startedAt: lease.startedAt,
+          now: this.now(),
+          ...(lease.reviewKind !== undefined ? { reviewKind: lease.reviewKind } : {}),
+          activity: lease.activity,
+        })
+      } catch (err) {
+        attachment?.logger.warn(`[github] review check progress failed for ${leaseId(lease.key)}: ${describe(err)}`)
+      }
+    }).catch(() => {})
+  }
+
+  private withPublishLock(key: ReviewCheckKey, fn: () => Promise<void>): Promise<void> {
+    const lockId = leaseId(key)
+    const run = (this.publishLocks.get(lockId) ?? Promise.resolve()).then(fn)
     const tail = run.catch(() => {})
     this.publishLocks.set(lockId, tail)
     void tail.then(() => {
       if (this.publishLocks.get(lockId) === tail) this.publishLocks.delete(lockId)
     })
-    lease.publishing = run.finally(() => {
-      lease.publishing = null
-    })
-    return lease.publishing
+    return run
   }
 
   private async publishUntilCurrent(lease: Lease): Promise<void> {
@@ -372,7 +465,11 @@ export class GithubReviewCheckTracker {
       const version = lease.outcomeVersion
       let result: ReviewCheckPublishResult
       try {
-        result = await attachment.publisher.finish(lease.key, lease.ref, outcome)
+        result = await attachment.publisher.finish(lease.key, lease.ref, outcome, {
+          startedAt: lease.startedAt,
+          decidedAt: lease.outcomeAt ?? this.now(),
+          tracked: lease.tracked,
+        })
       } catch (err) {
         attachment.logger.warn(`[github] review check finish failed for ${leaseId(lease.key)}: ${describe(err)}`)
         result = 'retry'
@@ -455,6 +552,7 @@ export class GithubReviewCheckTracker {
           ...lease.key,
           ref: lease.ref,
           startedAt: lease.startedAt,
+          ...(lease.tracked ? { tracked: true } : {}),
           ...(lease.outcome !== undefined ? { outcome: lease.outcome, outcomeAt: lease.outcomeAt } : {}),
         },
       ]
