@@ -202,7 +202,13 @@ When a logical turn ends with owed coverage and no provable continuation (no
 queued retry, no running child the coverage is deferred on, nothing queued),
 the router transfers that coverage at once to a **live-turn-ended** notice in
 the same target lane. It is imported into the same recovery outbox, and the
-running dispatcher delivers it without waiting for a restart. A later,
+running dispatcher delivers it without waiting for a restart. The exception is
+a logical turn opened by background work (a completed subagent's wake) rather
+than a user message: only a turn answering a user errors out in the channel, so
+such a turn settles what it holds as intentionally suppressed and posts no
+live-turn-ended, provider-error or empty-turn notice. The operator log keeps
+the failure (`background_wake_turn_ended_silently`,
+`provider_error_notice_suppressed reason=background_wake_turn`). A later,
 unrelated input never absorbs it: a fresh "Thanks!" turn settles only its own
 request. Idle eviction pins coverage that awaits a running deferred child (up
 to the stuck-child backstop). Otherwise it transfers remaining owed coverage

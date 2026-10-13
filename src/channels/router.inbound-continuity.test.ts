@@ -1334,16 +1334,14 @@ for (const next of ['an unrelated wake', 'a new request'] as const) {
     try {
       const parent = f.sessions[0]!
       await f.accept('child-a')
-      // The wake consumes the result and ends silent without starting more work: silence cannot
-      // answer a child result, so its turn transfers it as ended in this process, not as a restart.
+      // The wake consumes the result and ends silent without starting more work. Only a turn
+      // answering a user errors out, so the wake settles the result silently instead of a notice.
       await f.complete('child-a')
       await f.flush()
       const abandoned = await f.childRow('child-a')
-      expect(abandoned?.phase).toBe('notice-owned')
+      expect(abandoned).toMatchObject({ phase: 'closed', outcome: { kind: 'intentionally-suppressed' } })
       const notices = await f.outbox.list()
-      expect(notices).toHaveLength(1)
-      expect(notices[0]!.covers.map((cover) => cover.id)).toEqual([abandoned!.obligationId])
-      expect(recoveryNoticeCause(notices[0]!)).toBe('live-turn-ended')
+      expect(notices).toEqual([])
 
       parent.onPrompt = async () => f.reply(parent, 'Here is the answer.')
       // A completion with no durable obligation is a generic wake.
