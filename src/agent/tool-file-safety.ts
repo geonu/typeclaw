@@ -1,5 +1,17 @@
 import { constants, createWriteStream, lstatSync, type Stats } from 'node:fs'
-import { chmod, mkdir, mkdtemp, open, readdir, realpath, rm, stat, unlink, type FileHandle } from 'node:fs/promises'
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+  type FileHandle,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Transform } from 'node:stream'
@@ -53,6 +65,15 @@ export const PINNED_SNAPSHOT_GLOBAL_MAX_COUNT = TOOL_INPUT_MAX_COUNT.channel_upl
 export const PINNED_SNAPSHOT_MAX_WAITERS = 32
 const TOOL_OUTPUT_MAX_COUNT = 32
 const TREE_SNAPSHOT_MAX_ENTRIES = 4096
+// Names-only snapshots (ls/find) write empty placeholders, so an entry costs an
+// inode, not a copy; a long-lived agent's workspace easily outgrows 4096.
+const TREE_NAMES_SNAPSHOT_MAX_ENTRIES = 65_536
+// fd reads these to honor ignore rules, so find needs their real contents.
+const FIND_IGNORE_FILE_NAMES = new Set(['.gitignore', '.ignore', '.fdignore'])
+// ripgrep's own binary heuristic: a NUL in the leading block. rg skips such
+// files during recursive search, so grep snapshots them as empty placeholders.
+// rg transcodes BOM-prefixed UTF-16 before that check, so those stay searchable.
+const BINARY_SNIFF_BYTES = 8192
 const AGENT_ROOT_SNAPSHOT_EXCLUDED_DIRS = new Set(['.git', '.gitstore', 'node_modules'])
 
 export const TOOL_INPUT_TEMP_PREFIX = 'typeclaw-tool-input-'
@@ -930,7 +951,12 @@ async function snapshotDirectoryTree(options: {
       throw new Error(`tool input changed while waiting for snapshot capacity: ${options.source.original}`)
     }
     await mkdir(options.destination, { mode: 0o700 })
-    const state = { copied: 0, entries: 0, omittedLinks: { count: 0, names: [] as string[] } }
+    const state = {
+      copied: 0,
+      entries: 0,
+      omittedLinks: { count: 0, names: [] as string[] },
+      mode: treeSnapshotMode(options.tool),
+    }
     const identityVerifier = createPrivateSurfaceReadIdentityVerifier({
       tool: options.tool,
       agentDir: options.agentDir,
@@ -957,7 +983,12 @@ async function snapshotOpenedDirectory(
   directory: FileHandle,
   destination: string,
   options: Parameters<typeof snapshotDirectoryTree>[0],
-  state: { copied: number; entries: number; omittedLinks: { count: number; names: string[] } },
+  state: {
+    copied: number
+    entries: number
+    omittedLinks: { count: number; names: string[] }
+    mode: TreeSnapshotMode
+  },
   identityVerifier: PrivateSurfaceIdentityVerifier,
   isAgentRoot: boolean,
 ): Promise<void> {
@@ -968,8 +999,11 @@ async function snapshotOpenedDirectory(
     if (options.signal?.aborted === true) throw abortError(options.signal)
     if (isAgentRoot && AGENT_ROOT_SNAPSHOT_EXCLUDED_DIRS.has(entry.name)) continue
     state.entries += 1
-    if (state.entries > TREE_SNAPSHOT_MAX_ENTRIES) {
-      throw new Error(`directory snapshot exceeds entry limit (${state.entries} > ${TREE_SNAPSHOT_MAX_ENTRIES})`)
+    const maxEntries = state.mode === 'contents' ? TREE_SNAPSHOT_MAX_ENTRIES : TREE_NAMES_SNAPSHOT_MAX_ENTRIES
+    if (state.entries > maxEntries) {
+      throw new Error(
+        `directory snapshot exceeds entry limit (${state.entries} > ${maxEntries}); retry with a narrower path`,
+      )
     }
     const anchored = `${sourceRoot}/${entry.name}`
     const target = path.join(destination, entry.name)
@@ -989,7 +1023,10 @@ async function snapshotOpenedDirectory(
         const resolved = await realpath(`/proc/self/fd/${child.fd}`)
         if (isDeniedSnapshotPath(resolved, options)) continue
         await mkdir(target, { mode: 0o700 })
-        await snapshotOpenedDirectory(child, target, options, state, identityVerifier, false)
+        // ls lists one level and only asks whether each entry is a directory.
+        if (state.mode !== 'listing') {
+          await snapshotOpenedDirectory(child, target, options, state, identityVerifier, false)
+        }
         await chmod(target, 0o500)
       } finally {
         await child.close()
@@ -1007,6 +1044,10 @@ async function snapshotOpenedDirectory(
       enforceInputIdentityDenial(identityVerifier, opened)
       const resolved = await realpath(`/proc/self/fd/${source.fd}`)
       if (isDeniedSnapshotPath(resolved, options)) continue
+      if (await snapshotsAsPlaceholder(source, candidate, state.mode)) {
+        await writeFile(target, '', { flag: 'wx', mode: 0o400 })
+        continue
+      }
       state.copied += await streamSnapshot(
         source,
         target,
@@ -1022,6 +1063,40 @@ async function snapshotOpenedDirectory(
       await source.close()
     }
   }
+}
+
+// contents: grep reads file bodies. names: find needs the tree plus ignore
+// files. listing: ls needs one level of names and directory-ness.
+type TreeSnapshotMode = 'contents' | 'names' | 'listing'
+
+function treeSnapshotMode(tool: string): TreeSnapshotMode {
+  if (tool === 'ls') return 'listing'
+  if (tool === 'find') return 'names'
+  return 'contents'
+}
+
+async function snapshotsAsPlaceholder(source: FileHandle, candidate: string, mode: TreeSnapshotMode): Promise<boolean> {
+  if (mode === 'listing') return true
+  if (mode === 'names') return !isFindIgnoreFile(candidate)
+  const head = Buffer.alloc(BINARY_SNIFF_BYTES)
+  const { bytesRead } = await source.read(head, 0, BINARY_SNIFF_BYTES, 0)
+  const sniffed = head.subarray(0, bytesRead)
+  if (hasUtf16Bom(sniffed)) return false
+  return sniffed.includes(0)
+}
+
+function isFindIgnoreFile(candidate: string): boolean {
+  if (FIND_IGNORE_FILE_NAMES.has(path.basename(candidate))) return true
+  const parent = path.dirname(candidate)
+  return (
+    path.basename(candidate) === 'exclude' &&
+    path.basename(parent) === 'info' &&
+    path.basename(path.dirname(parent)) === '.git'
+  )
+}
+
+function hasUtf16Bom(head: Buffer): boolean {
+  return head.length >= 2 && ((head[0] === 0xff && head[1] === 0xfe) || (head[0] === 0xfe && head[1] === 0xff))
 }
 
 function assertRegularInputFile(stats: Stats, original: string): void {

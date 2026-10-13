@@ -2591,7 +2591,11 @@ describe('wrapSystemTool', () => {
             parameters: Type.Any(),
             async execute(_id, params) {
               const entries = await readdir(params.path as string)
-              const nested = await readFile(path.join(params.path as string, 'visible', 'nested', 'result.txt'), 'utf8')
+              // ls snapshots one level; find and ls get empty placeholders for file bodies.
+              const nested =
+                name === 'ls'
+                  ? ''
+                  : await readFile(path.join(params.path as string, 'visible', 'nested', 'result.txt'), 'utf8')
               return {
                 content: [{ type: 'text' as const, text: `${entries.sort().join('\n')}\n${nested}` }],
                 details: { path: params.path },
@@ -2611,7 +2615,7 @@ describe('wrapSystemTool', () => {
               undefined,
               {} as never,
             )
-            expect(textOfFirstContent(result)).toBe('visible\nvisible')
+            expect(textOfFirstContent(result)).toBe(name === 'grep' ? 'visible\nvisible' : 'visible\n')
             expect(result.details).toEqual({ path: '.' })
           } finally {
             await rm(agentDir, { recursive: true, force: true })
@@ -2670,10 +2674,13 @@ describe('wrapSystemTool', () => {
           const result = await tool.execute('c', args as never, undefined, undefined, {} as never)
           const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
           expect(text).toContain(name === 'grep' ? 'visible needle' : name === 'find' ? 'app/index.ts' : 'app')
-          expect(text).toContain('omitted')
-          expect(text).toContain('node_modules/shared')
-          expect(text).toContain('venv/bin/python')
-          expect(text).toContain('SingletonSocket')
+          // ls lists one level, so links nested under packages/app are never reached.
+          if (name !== 'ls') {
+            expect(text).toContain('omitted')
+            expect(text).toContain('node_modules/shared')
+            expect(text).toContain('venv/bin/python')
+            expect(text).toContain('SingletonSocket')
+          }
           expect(text).not.toContain('private-link')
           expect(text).not.toContain('private needle')
           expect(text).not.toContain('role-private-link')
@@ -2682,6 +2689,113 @@ describe('wrapSystemTool', () => {
         const read = tools.find((candidate) => candidate.name === 'read')
         if (read === undefined) throw new Error('missing read builtin')
         await expect(read.execute('c', { path: '.env' } as never, undefined, undefined, {} as never)).rejects.toThrow()
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'ls, find, and grep work on a tree whose file bytes exceed the snapshot byte limit',
+    async () => {
+      // given: a workspace holding more binary bytes than one snapshot may copy
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-large-tree-'))
+      const tree = path.join(agentDir, 'workspace')
+      await mkdir(path.join(tree, 'recordings'), { recursive: true })
+      await writeFile(path.join(tree, 'notes.md'), 'meeting needle')
+      await writeFile(path.join(tree, 'utf16le.txt'), Buffer.from('\ufeffutf16 needle', 'utf16le'))
+      await writeFile(path.join(tree, 'utf16be.txt'), Buffer.from('\ufeffutf16 needle', 'utf16le').swap16())
+      await writeFile(path.join(tree, 'recordings', 'memo.m4a'), '')
+      await truncate(path.join(tree, 'recordings', 'memo.m4a'), 80 * 1024 * 1024)
+      try {
+        const tools = buildBuiltinPiToolOverrides({ agentDir, sessionId: 'large-tree', hooks: createHookBus() })
+        const run = async (name: string, args: Record<string, unknown>): Promise<string> => {
+          const tool = tools.find((candidate) => candidate.name === name)
+          if (tool === undefined) throw new Error(`missing ${name} builtin`)
+          const result = await tool.execute('c', args as never, undefined, undefined, {} as never)
+          return result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
+        }
+
+        // when / then
+        const listed = await run('ls', { path: 'workspace' })
+        expect(listed).toContain('notes.md')
+        expect(listed).toContain('recordings/')
+        expect(await run('find', { path: 'workspace', pattern: '**/*.m4a' })).toContain('recordings/memo.m4a')
+        expect(await run('grep', { path: 'workspace', pattern: 'meeting needle' })).toContain('notes.md')
+        const utf16 = await run('grep', { path: 'workspace', pattern: 'utf16 needle' })
+        expect(utf16).toContain('utf16le.txt')
+        expect(utf16).toContain('utf16be.txt')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'find covers more entries than a contents snapshot allows and still honors ignore files',
+    async () => {
+      // given
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-many-entries-'))
+      const tree = path.join(agentDir, 'sessions')
+      await mkdir(tree)
+      await Promise.all(
+        Array.from({ length: 4200 }, (_, i) => writeFile(path.join(tree, `s-${String(i).padStart(4, '0')}.jsonl`), '')),
+      )
+      await writeFile(path.join(tree, '.gitignore'), 'skipped.log\n')
+      await writeFile(path.join(tree, 'skipped.log'), '')
+      const repo = path.join(tree, 'repo')
+      await mkdir(path.join(repo, '.git', 'info'), { recursive: true })
+      await writeFile(path.join(repo, '.git', 'info', 'exclude'), 'excluded.log\n')
+      await writeFile(path.join(repo, 'excluded.log'), '')
+      await writeFile(path.join(repo, 'kept.log'), '')
+      try {
+        const find = buildBuiltinPiToolOverrides({ agentDir, sessionId: 'many', hooks: createHookBus() }).find(
+          (tool) => tool.name === 'find',
+        )
+        if (find === undefined) throw new Error('missing find builtin')
+
+        // when
+        const result = await find.execute(
+          'c',
+          { path: 'sessions', pattern: 's-4199.jsonl' } as never,
+          undefined,
+          undefined,
+          {} as never,
+        )
+        const ignored = await find.execute(
+          'c',
+          { path: 'sessions', pattern: '*.log' } as never,
+          undefined,
+          undefined,
+          {} as never,
+        )
+
+        // then
+        const text = (r: typeof result) => r.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
+        expect(text(result)).toContain('s-4199.jsonl')
+        expect(text(ignored)).not.toContain('skipped.log')
+        expect(text(ignored)).toContain('kept.log')
+        expect(text(ignored)).not.toContain('excluded.log')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'grep still fails loudly when a tree has more text than one snapshot may copy',
+    async () => {
+      // given
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-large-text-'))
+      const tree = path.join(agentDir, 'logs')
+      await mkdir(tree)
+      const chunk = 'x'.repeat(1024 * 1024)
+      await Promise.all(Array.from({ length: 70 }, (_, i) => writeFile(path.join(tree, `${i}.log`), chunk)))
+      try {
+        // when / then
+        await expect(
+          enforceAndPinToolFiles({ tool: 'grep', args: { path: path.join(agentDir, 'logs') }, agentDir }),
+        ).rejects.toThrow(/aggregate byte limit|process-wide pinned byte budget/)
       } finally {
         await rm(agentDir, { recursive: true, force: true })
       }
@@ -2777,8 +2891,8 @@ describe('wrapSystemTool', () => {
       await mkdir(packageDir, { recursive: true })
       await writeFile(path.join(packageDir, 'index.js'), 'safe-package')
       const tool = definePiTool({
-        name: 'ls',
-        label: 'ls',
+        name: 'grep',
+        label: 'grep',
         description: '',
         parameters: Type.Any(),
         async execute(_id, params) {
@@ -2885,7 +2999,8 @@ describe('wrapSystemTool', () => {
           await symlink(secret, visible)
           release()
           const result = await resultPromise
-          expect(textOfFirstContent(result)).toBe('safe')
+          // find and ls snapshot names only: the body is an empty placeholder, never the swapped secret.
+          expect(textOfFirstContent(result)).toBe(name === 'grep' ? 'safe' : '')
           expect(result.details).toEqual({ path: '.' })
         } finally {
           release()
