@@ -296,7 +296,8 @@ export const DEFAULT_GITHUB_REVIEW_ON: GithubReviewOn = 'review_requested'
 // review posts via `gh api --input <file>`, so the `event` value lives in a
 // temp file the command interceptor never sees.
 //
-// `check` shows the agent's own review as a `typeclaw/review` check on the
+// `check` shows the agent's own review as a check named after the agent's
+// GitHub login (`slug` for an App's `slug[bot]`) on the
 // reviewed commit (in progress while reviewing, then the verdict). On by
 // default; a token without check/status write permission skips it silently
 // after one operator warning.

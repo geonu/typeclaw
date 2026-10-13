@@ -16,6 +16,8 @@ import { canonicalGithubRepo } from './github-repo'
 // and retried until GitHub acknowledges it, so a transient publish failure or a
 // detached adapter cannot strand the check either.
 
+// Fallback check name; the adapter names the check after the agent's GitHub
+// identity once known (see `reviewCheckName`).
 export const REVIEW_CHECK_NAME = 'typeclaw/review'
 
 // Backstop for the reviewing phase. The reviewer subagent's own ceiling
@@ -35,7 +37,7 @@ export const REVIEW_CHECK_PUBLISH_GIVE_UP_MS = 24 * 60 * 60_000
 
 export type ReviewCheckKey = { repo: string; pullRequest: number; headSha: string }
 
-export type ReviewCheckRef = { mode: 'check-run'; checkRunId: number } | { mode: 'status' }
+export type ReviewCheckRef = { mode: 'check-run'; checkRunId: number } | { mode: 'status'; context?: string }
 
 export type ReviewCheckOutcome =
   | { kind: 'verdict'; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' }
@@ -52,6 +54,9 @@ export type ReviewerSettlement =
 export type ReviewCheckPublishResult = 'published' | 'retry'
 
 export type ReviewCheckPublisher = {
+  // The name a new check (or commit-status context) is created under now.
+  // Defaults to REVIEW_CHECK_NAME.
+  name?: () => string
   // null: checks are disabled, not permitted, or the create failed — no check exists.
   start: (key: ReviewCheckKey) => Promise<ReviewCheckRef | null>
   // `ref: null` means no in-progress check exists; a publisher creates a
@@ -83,6 +88,8 @@ type Lease = {
   uid: string
   seq: number
   key: ReviewCheckKey
+  // Only a check written under the same name can replace this one on GitHub.
+  name: string
   startedAt: number
   owners: Set<string>
   ownerSucceeded: boolean
@@ -142,6 +149,7 @@ export class GithubReviewCheckTracker {
       if (this.holds(record)) continue
       const lease = this.createLease(normalizeKey(record), record.startedAt)
       lease.ref = record.ref
+      if (record.ref?.mode === 'status') lease.name = record.ref.context ?? REVIEW_CHECK_NAME
       this.claimCheck(lease)
       this.decide(lease, record.outcome ?? RESTARTED_OUTCOME, record.outcomeAt)
       restored++
@@ -182,6 +190,7 @@ export class GithubReviewCheckTracker {
       .then(
         (ref) => {
           lease.ref = ref
+          if (ref?.mode === 'status' && ref.context !== undefined) lease.name = ref.context
         },
         (err: unknown) => {
           attachment.logger.warn(`[github] review check start failed for ${leaseId(normalized)}: ${describe(err)}`)
@@ -277,6 +286,7 @@ export class GithubReviewCheckTracker {
       uid: randomUUID(),
       seq: this.nextSeq++,
       key,
+      name: this.attachment?.publisher.name?.() ?? REVIEW_CHECK_NAME,
       startedAt,
       owners: new Set(),
       ownerSucceeded: false,
@@ -385,15 +395,17 @@ export class GithubReviewCheckTracker {
     }
   }
 
-  // A queued outcome that would write the shared commit-status context (or
+  // A queued outcome that would write a shared commit-status context (or
   // create a new check run) must not overwrite a newer review of the same
-  // commit. An App check run has its own id, so completing it stays safe.
+  // commit under the same name. An App check run has its own id, and a check
+  // under another name is a separate check, so completing either stays safe.
   private isSuperseded(lease: Lease): boolean {
     if (lease.ref?.mode === 'check-run') return false
-    if ((this.newestCheckSeq.get(leaseId(lease.key)) ?? -1) > lease.seq) return true
+    if ((this.newestCheckSeq.get(checkId(lease)) ?? -1) > lease.seq) return true
     // A newer review whose check is still being created will overwrite it too.
     return [...this.leases.values()].some(
-      (other) => other.seq > lease.seq && other.ref === undefined && sameKey(other.key, lease.key),
+      (other) =>
+        other.seq > lease.seq && other.ref === undefined && sameKey(other.key, lease.key) && other.name === lease.name,
     )
   }
 
@@ -401,7 +413,7 @@ export class GithubReviewCheckTracker {
   // their next publish, so the persisted snapshot never holds one a restart
   // could replay over the newer review.
   private claimCheck(lease: Lease): void {
-    const id = leaseId(lease.key)
+    const id = checkId(lease)
     this.newestCheckSeq.set(id, Math.max(this.newestCheckSeq.get(id) ?? -1, lease.seq))
     for (const older of this.leases.values()) {
       if (
@@ -409,7 +421,8 @@ export class GithubReviewCheckTracker {
         older.outcome !== undefined &&
         older.ref !== undefined &&
         older.ref?.mode !== 'check-run' &&
-        sameKey(older.key, lease.key)
+        sameKey(older.key, lease.key) &&
+        older.name === lease.name
       ) {
         this.leases.delete(older.uid)
       }
@@ -418,8 +431,8 @@ export class GithubReviewCheckTracker {
 
   private drop(lease: Lease): void {
     if (this.leases.get(lease.uid) === lease) this.leases.delete(lease.uid)
-    if (![...this.leases.values()].some((other) => sameKey(other.key, lease.key))) {
-      this.newestCheckSeq.delete(leaseId(lease.key))
+    if (![...this.leases.values()].some((other) => sameKey(other.key, lease.key) && other.name === lease.name)) {
+      this.newestCheckSeq.delete(checkId(lease))
     }
   }
 
@@ -468,7 +481,14 @@ function sameKey(a: ReviewCheckKey, b: ReviewCheckKey): boolean {
 function sameRef(a: ReviewCheckRef | null | undefined, b: ReviewCheckRef | null): boolean {
   if (a === undefined || a === null || b === null) return a === b
   if (a.mode === 'check-run' && b.mode === 'check-run') return a.checkRunId === b.checkRunId
-  return a.mode === b.mode
+  if (a.mode === 'status' && b.mode === 'status') {
+    return (a.context ?? REVIEW_CHECK_NAME) === (b.context ?? REVIEW_CHECK_NAME)
+  }
+  return false
+}
+
+function checkId(lease: Lease): string {
+  return `${leaseId(lease.key)}:${lease.name}`
 }
 
 function leaseId(key: ReviewCheckKey): string {

@@ -101,7 +101,7 @@ These extend the [shared base config](/docs/reference/channel-adapters) for `cha
 | `repos`          | string[]                                  | `[]`                 | `owner/name` pairs; hooks auto-registered on start; members may push branches to them (see below)                |
 | `review.on`      | `'review_requested' \| 'opened' \| 'off'` | `'review_requested'` | When to fire a review                                                                                            |
 | `review.approve` | boolean                                   | `true`               | `false` downgrades APPROVE verdicts to COMMENT; a re-review that clears the bot's own block dismisses it instead |
-| `review.check`   | boolean                                   | `true`               | Show the bot's review as a `typeclaw/review` check on the reviewed commit; `false` opts out (see below)          |
+| `review.check`   | boolean                                   | `true`               | Show the bot's review as a check named after the bot on the reviewed commit; `false` opts out (see below)        |
 
 Default `eventAllowlist`:
 
@@ -159,7 +159,7 @@ Requires `pull_request.synchronize` in `eventAllowlist`. It is in the shipped de
 
 ### Review check
 
-With `review.check` on (the default), each review shows up as a `typeclaw/review` check on the commit being reviewed. It is in progress while the reviewer works and completes when the review is verified on GitHub:
+With `review.check` on (the default), each review shows up as a check on the commit being reviewed, named after the agent's GitHub login (an App's `my-agent[bot]` shows as `my-agent`; `typeclaw/review` only if the login is not yet known). Several agents reviewing the same PR therefore get one check each. It is in progress while the reviewer works and completes when the review is verified on GitHub:
 
 | Outcome                                                                     | GitHub App (check run) | PAT (commit status)        |
 | --------------------------------------------------------------------------- | ---------------------- | -------------------------- |
@@ -170,7 +170,7 @@ With `review.check` on (the default), each review shows up as a `typeclaw/review
 | Agent failure (reviewer error or timeout, review never posted, restart)     | `failure`              | `failure`                  |
 | Cancelled (review request removed, PR converted to draft, review cancelled) | `neutral`              | `success` ("Not reviewed") |
 
-A red check therefore means either requested changes or a review that did not happen; the check's description says which. Requesting the review again replaces it. A repository can make the check required in branch protection to gate merges on the bot's review.
+A red check therefore means either requested changes or a review that did not happen; the check's description says which. Requesting the review again replaces it. A repository can make the check required in branch protection to gate merges on the bot's review; require it by the agent's name.
 
 The runtime owns the check's lifecycle, not the model. A durable lease is registered when the reviewer starts and is closed by whichever comes first: the verified review, the reviewer failing or being cancelled, a deadline sweep (the reviewer settling late, or a finished review never being posted), or the next adapter start after a restart. A check is never left in progress.
 

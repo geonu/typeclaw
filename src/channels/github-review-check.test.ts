@@ -23,6 +23,7 @@ function harness(
   options: {
     start?: (key: ReviewCheckKey) => Promise<ReviewCheckRef | null>
     persisted?: PersistedReviewCheckLease[]
+    name?: string
   } = {},
 ) {
   let clock = 1_000
@@ -31,6 +32,7 @@ function harness(
   const publishResults: ReviewCheckPublishResult[] = []
   let saved: PersistedReviewCheckLease[] = options.persisted ?? []
   const publisher: ReviewCheckPublisher = {
+    ...(options.name !== undefined ? { name: () => options.name! } : {}),
     start: async (key) => {
       started.push(key)
       return options.start === undefined ? RUN : options.start(key)
@@ -312,6 +314,33 @@ describe('GithubReviewCheckTracker', () => {
     // then: nothing obsolete was saved, so the restart publishes nothing over the approval
     expect(h.saved()).toEqual([])
     expect(restarted.finished).toEqual([])
+  })
+
+  test('a pending status under an older check name survives a new-name review of the same commit', async () => {
+    // given: a legacy pending status restored after an upgrade, whose completion GitHub rejects
+    const legacy: PersistedReviewCheckLease = { ...NORMALIZED, ref: { mode: 'status' }, startedAt: 1 }
+    const h = harness({
+      name: 'my-agent',
+      start: async () => ({ mode: 'status', context: 'my-agent' }),
+      persisted: [legacy],
+    })
+    h.failNextPublish()
+    await h.attach()
+
+    // when: a review starts and is approved under the new name, then the sweep retries
+    await h.tracker.beginReview(KEY, 'bg_1')
+    expect(h.saved().map((l) => l.ref)).toEqual([{ mode: 'status' }, { mode: 'status', context: 'my-agent' }])
+    await h.tracker.reviewerSettled('bg_1', { kind: 'ok' })
+    await h.tracker.reviewPosted(KEY, 'APPROVED')
+    await h.tracker.sweep()
+
+    // then: the legacy status is still completed, separately from the new one
+    expect(h.finished.map((f) => [f.ref, f.outcome.kind])).toEqual([
+      [{ mode: 'status' }, 'failed'],
+      [{ mode: 'status', context: 'my-agent' }, 'verdict'],
+      [{ mode: 'status' }, 'failed'],
+    ])
+    expect(h.saved()).toEqual([])
   })
 
   test('a restart right after a replacement approval still closes an independent App check run', async () => {
