@@ -67,8 +67,10 @@ The default GitHub event allowlist already covers reviews. If you want to narrow
   repo but not read its files. Model-driven review, commenting, and triage do not require **Contents: write**, so keep
   that permission disabled for this recipe. If a finding needs a fix, a host-stage operator performs checkout and pull-
   request creation. The agent performs an eligible push to a configured GitHub remote through the broker, using GitHub
-  App auth, an authorized declared PAT, or the automatically refreshed trusted host `gh` store. The wizard's permission
-  note lists exactly what to enable.
+  App auth, an authorized declared PAT, or the automatically refreshed trusted host `gh` store. To show each review as a
+  `typeclaw/review` PR check (on by default, `review.check`), the App also needs **Checks: read/write**; a PAT needs
+  **Commit statuses: read/write** instead. Without it the check is skipped and reviews still post. The wizard's
+  permission note lists exactly what to enable.
 </Callout>
 
 <Callout type="warn" title="The preflight won't catch a missing Contents grant">

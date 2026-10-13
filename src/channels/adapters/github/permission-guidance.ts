@@ -28,6 +28,7 @@ export function githubRequiredPermissionsNote(includeWebhookNote: boolean): stri
   return [
     'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
     `Actions read/write, Metadata read, and ${webhooks}`,
+    'For the typeclaw/review PR check: Checks read/write (GitHub App) or Commit statuses read/write (PAT).',
   ].join('\n')
 }
 
