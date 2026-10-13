@@ -196,7 +196,10 @@ Auth, billing, quota, model-config, rate or usage limits, and unclassified
 failures keep the text notice, because someone has to act on them. Any adapter
 that can't render the reaction (GitHub's fixed set, reaction-less platforms) or
 whose reaction call fails also falls back to the text notice. The operator log
-line is unchanged.
+line is unchanged. A turn that already ran tools and promised nothing further
+posts no provider-error notice at all, and the coverage it still holds then
+settles silently instead of becoming a live-turn-ended notice, so the same
+failure never resurfaces through the recovery path.
 
 When a logical turn ends with owed coverage and no provable continuation (no
 queued retry, no running child the coverage is deferred on, nothing queued),

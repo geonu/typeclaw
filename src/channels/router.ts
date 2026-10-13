@@ -1321,6 +1321,11 @@ type LiveSession = {
   // its coverage settles silently, never as a provider-error, empty-turn or
   // live-turn-ended notice. Set by beginWakeupTurn, cleared by a real user batch.
   backgroundWakeLogicalTurn: boolean
+  // Set when this logical turn's provider-error notice was suppressed because
+  // the turn already ran tools. The same failure must not resurface as a
+  // live-turn-ended notice, so turn-end settles held coverage silently.
+  // Cleared with the other logical-turn state.
+  providerErrorSilencedThisLogicalTurn: boolean
   // Successful, non-communication, non-control tool output observed during
   // this logical turn. Unlike toolExecutionThisLogicalTurn, channel_reply and
   // todo/control calls cannot satisfy a later durable completion claim.
@@ -3313,6 +3318,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         githubReviewOutputTurn: null,
         toolExecutionThisLogicalTurn: false,
         backgroundWakeLogicalTurn: false,
+        providerErrorSilencedThisLogicalTurn: false,
         qualifyingWorkThisLogicalTurn: false,
         promisedWorkOutstandingThisLogicalTurn: false,
         statusOutputOutstandingThisLogicalTurn: false,
@@ -4854,6 +4860,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // record.
     if (live.toolExecutionThisLogicalTurn && !owesPromisedWork(live)) {
       live.pendingProviderError = null
+      live.providerErrorSilencedThisLogicalTurn = true
       logger.warn(
         `[channels] ${live.keyId}: provider_error_notice_suppressed reason=tool_activity_this_turn notice="${pending.safeMessage}"`,
       )
@@ -4936,6 +4943,40 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // are the exception: the process is restarting, so boot recovery owns them.
   // A failed transfer keeps the caches, so the next lifecycle decision retries;
   // the journal rows stay owed meanwhile.
+  // A logical turn that may not error out in the channel: one opened by background
+  // work rather than a user, or one whose provider-error notice was already
+  // suppressed because it ran tools. Whatever such a turn leaves owed settles
+  // silently instead of becoming a live-turn-ended notice, wherever it ends.
+  const silentTurnEnd = (live: LiveSession): { log: string; reason: string } | null =>
+    live.backgroundWakeLogicalTurn
+      ? { log: 'background_wake_turn_ended_silently', reason: 'background-wake-turn-ended' }
+      : live.providerErrorSilencedThisLogicalTurn
+        ? {
+            log: 'turn_end_notice_suppressed reason=provider_error_after_tool_activity',
+            reason: 'provider-error-after-tool-activity',
+          }
+        : null
+
+  // Settles a source turn's held rows by their exact generations, for when a fresh
+  // batch abandons a silent turn: the rows may be owned by a predecessor session,
+  // so they cannot go through the current turn's settlement. Call only in the lane.
+  const settleAbandonedSilentlyInLane = async (
+    live: LiveSession,
+    inbound: readonly InboundRecord[],
+    background: readonly BackgroundObligation[],
+    reason: string,
+  ): Promise<void> => {
+    const inboundRefs = inbound.map((row) => ({ inputId: row.inputId, generation: row.generation }))
+    const backgroundRefs = background.map((row) => ({ obligationId: row.obligationId, generation: row.generation }))
+    const outcome = { kind: 'intentionally-suppressed' as const, decisionId: randomUUID(), reason }
+    if (inboundRefs.length > 0) {
+      await inboundJournal.settle(inboundRefs, outcome, backgroundRefs, live.key)
+    } else if (backgroundRefs.length > 0) {
+      inboundJournal.assertAvailable()
+      await backgroundObligations.settle(backgroundRefs, outcome)
+    }
+  }
+
   const transferAbandonedTurnCoverage = async (live: LiveSession): Promise<void> => {
     const keepsCoverage = (): boolean =>
       restartShutdownPending ||
@@ -4951,18 +4992,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     try {
       await backgroundObligations.withTargetLane(live.key, async () => {
         if (keepsCoverage() || awaitsDeferredChild(live, 'turn-end-coverage')) return
-        // A background-opened turn that ended without answering settles what it
-        // holds silently instead of posting a live-turn-ended notice. Anything
-        // it cannot settle (owned elsewhere) still transfers below.
-        if (live.backgroundWakeLogicalTurn) {
+        // Anything a silent turn cannot settle (owned elsewhere) still transfers below.
+        const silentEnd = silentTurnEnd(live)
+        if (silentEnd !== null) {
           logger.warn(
-            `[channels] ${live.keyId}: background_wake_turn_ended_silently ` +
+            `[channels] ${live.keyId}: ${silentEnd.log} ` +
               `inbound=${live.inboundCoverage.length} background=${live.backgroundCoverage.length}`,
           )
           await settleBackgroundCoverageInLane(
             live,
             'intentionally-suppressed',
-            'background-wake-turn-ended',
+            silentEnd.reason,
             live.backgroundCoverage,
           )
         }
@@ -5014,6 +5054,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.githubReviewOutputTurn = null
     live.toolExecutionThisLogicalTurn = false
     live.backgroundWakeLogicalTurn = true
+    live.providerErrorSilencedThisLogicalTurn = false
     live.qualifyingWorkThisLogicalTurn = false
   }
 
@@ -5195,8 +5236,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             } else if (batchCount > 0 && !continuesSourceTurn) {
               // Nothing continues the source turn, so its debt ended with it. A new
               // human batch is independent work that never answers it: the remainder
-              // becomes a durable live-turn-ended notice, not debt on the new request.
-              await transferLostCoverageInLane(live.key, live.inboundCoverage, live.backgroundCoverage, sourceOwner)
+              // becomes a durable live-turn-ended notice, not debt on the new request,
+              // unless the source turn was one that may not error out.
+              const silentEnd = silentTurnEnd(live)
+              if (silentEnd !== null) {
+                logger.warn(
+                  `[channels] ${live.keyId}: ${silentEnd.log} abandoned_by=fresh_batch ` +
+                    `inbound=${deferred.length} background=${deferredBackground.length}`,
+                )
+                await settleAbandonedSilentlyInLane(live, deferred, deferredBackground, silentEnd.reason)
+              } else {
+                await transferLostCoverageInLane(live.key, live.inboundCoverage, live.backgroundCoverage, sourceOwner)
+              }
               live.coverageDeferredSince = null
               live.coverageDeferredParentSessionId = null
             } else {
@@ -5205,12 +5256,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
               // abandoned one ended with its turn: it is transferred as a live-turn-ended
               // notice rather than dropped from every live cache while still owed.
               if (!continuesSourceTurn && deferredBackground.length > 0) {
-                await transferLostCoverageInLane(
-                  live.key,
-                  [],
-                  deferredBackground.map((row) => row.obligationId),
-                  sourceOwner,
-                )
+                const silentEnd = silentTurnEnd(live)
+                if (silentEnd !== null) {
+                  logger.warn(
+                    `[channels] ${live.keyId}: ${silentEnd.log} abandoned_by=wake ` +
+                      `background=${deferredBackground.length}`,
+                  )
+                  await settleAbandonedSilentlyInLane(live, [], deferredBackground, silentEnd.reason)
+                } else {
+                  await transferLostCoverageInLane(
+                    live.key,
+                    [],
+                    deferredBackground.map((row) => row.obligationId),
+                    sourceOwner,
+                  )
+                }
               }
               const background = continuesSourceTurn
                 ? deferredBackground.map((row) => ({ obligationId: row.obligationId, generation: row.generation }))
@@ -5418,6 +5478,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.githubReviewOutputTurn = null
           live.toolExecutionThisLogicalTurn = false
           live.backgroundWakeLogicalTurn = false
+          live.providerErrorSilencedThisLogicalTurn = false
           live.qualifyingWorkThisLogicalTurn = false
           live.promisedWorkOutstandingThisLogicalTurn = false
           live.statusOutputOutstandingThisLogicalTurn = false

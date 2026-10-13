@@ -453,6 +453,9 @@ class ParentSession {
       message: assistantMessage(text, stopReason),
     }
   }
+  startTool() {
+    for (const listener of this.listeners) listener({ type: 'tool_execution_start' })
+  }
   // The provider rejects the call: the SDK emits the failed assistant message and ends the turn on it.
   failProvider(errorMessage: string) {
     const message = { ...assistantMessage('', 'error'), errorMessage }
@@ -1789,6 +1792,64 @@ for (const delivery of ['lands', 'is rejected'] as const) {
     }
   })
 }
+
+for (const ranTools of [true, false]) {
+  test(`a provider failure ${ranTools ? 'after' : 'without'} tool work ${ranTools ? 'settles the request silently' : 'still answers with its notice'}`, async () => {
+    const f = await debtFixture()
+    try {
+      const parent = f.sessions[0]!
+      parent.onPrompt = async () => {
+        if (ranTools) parent.startTool()
+        parent.failProvider('Codex error: server_is_overloaded')
+      }
+      const request = await f.route('Review the PR again.')
+      await f.flush()
+
+      if (ranTools) {
+        // The provider-error notice was suppressed for tool work, so the same failure must not
+        // resurface as a live-turn-ended notice either.
+        expect(f.sent).toEqual([])
+        expect(f.inputRow(request)).toMatchObject({
+          phase: 'closed',
+          outcome: { kind: 'intentionally-suppressed' },
+        })
+      } else {
+        expect(f.sent).toHaveLength(1)
+        expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
+      }
+      expect(await f.outbox.list()).toEqual([])
+    } finally {
+      await f.cleanup()
+    }
+  })
+}
+
+test('a provider failure after tool work stays silent when a follow-up is queued behind it', async () => {
+  const f = await debtFixture()
+  try {
+    // given: a follow-up arrives while the first turn runs tools and then fails
+    const parent = f.sessions[0]!
+    let followUp = ''
+    parent.onPrompt = async () => {
+      parent.startTool()
+      followUp = await f.route('Also check the CI.')
+      parent.onPrompt = async () => f.reply(parent, 'CI is green.')
+      parent.failProvider('Codex error: server_is_overloaded')
+    }
+
+    // when
+    const request = await f.route('Review the PR again.')
+    await f.flush()
+
+    // then: the fresh batch abandons the first request silently instead of a recovery notice
+    expect(f.sent).toEqual(['CI is green.'])
+    expect(f.inputRow(request)).toMatchObject({ phase: 'closed', outcome: { kind: 'intentionally-suppressed' } })
+    expect(f.inputRow(followUp)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
+    expect(await f.outbox.list()).toEqual([])
+  } finally {
+    await f.cleanup()
+  }
+})
 
 test('a provider-error notice settles only the generation it captured before sending', async () => {
   const f = await debtFixture()
