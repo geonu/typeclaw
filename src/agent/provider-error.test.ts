@@ -395,6 +395,7 @@ describe('isTransientProviderFailure', () => {
     '503 Service Unavailable',
     'socket hang up',
     '502 Bad Gateway',
+    'Codex error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.',
   ])('treats %p as a retry-and-see failure', (raw) => {
     expect(isTransientProviderFailure(raw)).toBe(true)
   })
@@ -423,6 +424,19 @@ describe('isRetryableSameRef', () => {
     expect(isRetryableSameRef('500 Internal Server Error')).toBe(true)
     expect(isRetryableSameRef('WebSocket closed 1000')).toBe(true)
     expect(isRetryableSameRef('websocket connection was closed normally')).toBe(true)
+  })
+
+  test.each([
+    'Codex error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.',
+    'Codex error: server_error',
+    '{"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+    'An internal error has occurred. Please retry or report in https://developers.generativeai.google/guide/troubleshooting',
+    '{"error":{"status":"INTERNAL"}}',
+    'Internal Server Error',
+    'Bad Gateway',
+    'Gateway Timeout',
+  ])('retries the provider-side server error %p with no status code', (raw) => {
+    expect(isRetryableSameRef(raw)).toBe(true)
   })
 
   test('does NOT same-ref retry throttle/overload — those fail OVER to another ref', () => {
