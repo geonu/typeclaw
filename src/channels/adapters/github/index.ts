@@ -463,8 +463,9 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           reconcileReplayedPrs.add(prReplayKey(message.workspace, message.chat))
         return receipt
       }
-      const runReconcile = (store: ReconcileCooldownStore): Promise<unknown> =>
+      const runReconcile = (store: ReconcileCooldownStore, includeHeldReviews: boolean): Promise<unknown> =>
         reconcileOpenPrs({
+          includeHeldReviews,
           repos,
           reviewOn: options.configRef().review.on,
           selfLogin,
@@ -485,12 +486,18 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         // routing can depend on boot progress that itself waits for this start()
         // to resolve. Awaiting it here stalled boot before tunnels started, so
         // webhooks never registered and no PR was reviewed.
-        void runReconcile(loadedReconcileCooldownStore).finally(() => {
+        // Only the boot pass re-checks held CHANGES_REQUESTED reviews: a restart
+        // is what kills an in-flight push follow-up, and a periodic tick could
+        // race a live one.
+        void runReconcile(loadedReconcileCooldownStore, true).finally(() => {
           if (reconcileGeneration === lifecycleGeneration) firstReconcilePending = false
         })
         const reconcileIntervalMs = options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS
         if (reconcileIntervalMs > 0) {
-          reconcileTimer = setIntervalFn(() => void runReconcile(loadedReconcileCooldownStore), reconcileIntervalMs)
+          reconcileTimer = setIntervalFn(
+            () => void runReconcile(loadedReconcileCooldownStore, false),
+            reconcileIntervalMs,
+          )
         }
       }
       // Periodically recover inbound deliveries that failed at the tunnel and
@@ -726,6 +733,7 @@ const REVIEW_TRIGGER_EVENT_KINDS: ReadonlySet<string> = new Set([
   'pull_request:opened',
   'pull_request:ready_for_review',
   'pull_request:review_requested',
+  'pull_request:synchronize:review-followup',
   'pull_request:reconcile',
 ])
 

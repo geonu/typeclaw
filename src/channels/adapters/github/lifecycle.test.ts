@@ -1424,7 +1424,10 @@ describe('createGithubAdapter lifecycle', () => {
       expect(calls.some((c) => c.url.includes('/pulls'))).toBe(false)
     })
 
-    function unreviewedPrFetch(prNumbers: readonly number[] = [7]): { fetch: typeof fetch; routedPrs: () => number } {
+    function unreviewedPrFetch(
+      prNumbers: readonly number[] = [7],
+      selfReviews: ReadonlyArray<Record<string, unknown>> = [],
+    ): { fetch: typeof fetch; routedPrs: () => number } {
       let routed = 0
       const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
         if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
@@ -1433,7 +1436,7 @@ describe('createGithubAdapter lifecycle', () => {
           if (method === 'GET') return Response.json([])
           if (method === 'POST') return Response.json({ id: 1 }, { status: 201 })
         }
-        if (url.match(/\/pulls\/\d+\/reviews/)) return Response.json([])
+        if (url.match(/\/pulls\/\d+\/reviews/)) return Response.json(selfReviews)
         if (url.includes('/pulls?')) {
           routed += 1
           return Response.json(
@@ -1444,7 +1447,7 @@ describe('createGithubAdapter lifecycle', () => {
               draft: false,
               updated_at: '2026-01-01T00:00:00Z',
               user: { login: 'alice', id: 10, type: 'User' },
-              head: { ref: 'feature' },
+              head: { ref: 'feature', sha: 'new-head' },
               base: { ref: 'main' },
               requested_reviewers: [],
             })),
@@ -1818,6 +1821,55 @@ describe('createGithubAdapter lifecycle', () => {
         expect(await coolingDown(reconcileDir, 700)).toBe(true)
         expect(await coolingDown(reconcileDir, 800)).toBe(true)
       } finally {
+        await rm(reconcileDir, { recursive: true, force: true })
+      }
+    })
+
+    test('the boot pass re-admits a push re-review a restart interrupted and supersedes its notice', async () => {
+      const reconcileDir = await mkdtemp(join(tmpdir(), 'gh-reconcile-lifecycle-'))
+      const routerDir = join(reconcileDir, 'router')
+      const journal = new InboundJournal(routerDir)
+      const receipts: string[] = []
+      const router = journaledRouter(routerDir, journal, receipts)
+      // given the bot's CHANGES_REQUESTED on PR #7 predates its current head
+      const heldReview = [{ state: 'CHANGES_REQUESTED', commit_id: 'old-head', user: { login: 'bot', type: 'User' } }]
+      const adapter = createGithubAdapter({
+        router,
+        configRef: reviewConfig('review_requested'),
+        secrets: patSecrets(),
+        agentDir: reconcileDir,
+        logger: silentLogger(),
+        fetchImpl: unreviewedPrFetch([7], heldReview).fetch,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+        tokenRefreshIntervalMs: 0,
+        reconcileIntervalMs: 0,
+      })
+      try {
+        // when the adapter boots and its reconcile pass settles
+        await adapter.start()
+        await waitUntil(
+          () =>
+            router.recoveryRedelivery?.(reviewNotice('pr:8'), ['pull_request:synchronize:review-followup']) !==
+            'pending',
+        )
+
+        // then the interrupted push follow-up is re-run instead of announced as dropped
+        expect(receipts).toEqual(['pr:7:accepted'])
+        expect(router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:synchronize:review-followup'])).toBe(
+          'redelivered',
+        )
+        // and a human thread reply on the same PR still gets its notice
+        expect(
+          router.recoveryRedelivery?.(reviewNotice('pr:7'), [
+            'pull_request:synchronize:review-followup',
+            'pull_request_review_comment:created',
+          ]),
+        ).toBe('not-redelivered')
+      } finally {
+        await adapter.stop()
+        await router.stop()
+        await journal.close()
         await rm(reconcileDir, { recursive: true, force: true })
       }
     })

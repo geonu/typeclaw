@@ -679,7 +679,7 @@ function buildReviewRound(
   }
 }
 
-function followupInstruction(thread: UnresolvedSelfReviewThread | null, selfBlocking: boolean): string {
+export function followupInstruction(thread: UnresolvedSelfReviewThread | null, selfBlocking: boolean): string {
   const threadPart =
     thread !== null
       ? `This session is scoped to one unresolved review thread you authored. Check whether the new commits ` +

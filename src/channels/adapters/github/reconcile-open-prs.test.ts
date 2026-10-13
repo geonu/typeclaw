@@ -3,6 +3,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  __resetReviewVerdictGuardForTest,
+  createApproveIdempotencyGuard,
+  registerGithubReviewRound,
+} from '@/channels/github-review-verdict-coordinator'
 import type { InboundMessage, RouteReceipt } from '@/channels/types'
 
 import {
@@ -27,6 +32,8 @@ type PrFixture = {
   requestedReviewers?: string[]
   requestedTeams?: string[]
   selfReviewed?: boolean
+  headSha?: string
+  selfReviews?: Array<{ state: string; commitId: string }>
   reviewerLogin?: string
   reviewerType?: 'User' | 'Bot'
 }
@@ -39,7 +46,7 @@ function prJson(pr: PrFixture): Record<string, unknown> {
     draft: pr.draft ?? false,
     updated_at: pr.updatedAt ?? '2026-01-01T00:00:00Z',
     user: { login: pr.authorLogin ?? 'alice', id: pr.authorId ?? 10, type: pr.authorType ?? 'User' },
-    head: { ref: pr.headRef ?? 'feature' },
+    head: { ref: pr.headRef ?? 'feature', sha: pr.headSha ?? 'head-sha' },
     base: { ref: pr.baseRef ?? 'main' },
     requested_reviewers: (pr.requestedReviewers ?? []).map((login) => ({ login })),
     requested_teams: (pr.requestedTeams ?? []).map((slug) => ({ slug })),
@@ -51,6 +58,12 @@ function teamChecker(memberSlugs: readonly string[]): TeamMembershipChecker {
 }
 
 function reviewsJson(pr: PrFixture): Array<Record<string, unknown>> {
+  if (pr.selfReviews !== undefined)
+    return pr.selfReviews.map((r) => ({
+      state: r.state,
+      commit_id: r.commitId,
+      user: { login: pr.reviewerLogin ?? 'bot', type: pr.reviewerType ?? 'Bot' },
+    }))
   if (!pr.selfReviewed) return []
   return [{ state: 'COMMENTED', user: { login: pr.reviewerLogin ?? 'bot', type: pr.reviewerType ?? 'Bot' } }]
 }
@@ -91,6 +104,7 @@ function baseOptions(
     },
     logger: { info: () => {}, warn: () => {} },
     fetchImpl: fakeGithub([]),
+    generateReviewRoundId: () => 'round-1',
     ...rest,
   }
 }
@@ -241,6 +255,170 @@ describe('reconcileOpenPrs', () => {
     const outcomes = await reconcileOpenPrs(baseOptions({ routed, repos: ['not-a-slug'], fetchImpl: spyFetch }))
     expect(fetched).toBe(false)
     expect(outcomes[0]).toMatchObject({ repo: 'not-a-slug', error: 'malformed repo slug' })
+  })
+})
+
+describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
+  const held = (overrides: Partial<PrFixture> = {}): PrFixture => ({
+    number: 7,
+    id: 700,
+    headSha: 'new-head',
+    selfReviews: [{ state: 'CHANGES_REQUESTED', commitId: 'old-head' }],
+    ...overrides,
+  })
+
+  test('replays a re-review when the head moved past the blocking review', async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([held()]) }))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.chat).toBe('pr:7')
+    expect(routed[0]?.thread).toBeNull()
+    expect(routed[0]?.eventKind).toBe('pull_request:reconcile')
+    expect(routed[0]?.externalMessageId).toBe('pr-700-reconcile-rereview-new-head-2026-01-01T00:00:00Z')
+    expect(routed[0]?.githubReviewRound).toEqual({
+      kind: 'push',
+      roundId: 'round-1',
+      workspace: 'acme/widgets',
+      prNumber: 7,
+      headSha: 'new-head',
+      carrierThread: null,
+    })
+  })
+
+  describe('formal verdict submission', () => {
+    afterEach(() => {
+      __resetReviewVerdictGuardForTest()
+    })
+
+    // The bot's CHANGES_REQUESTED still stands on GitHub, and the head is the new commit.
+    const verdictGuard = () =>
+      createApproveIdempotencyGuard({
+        resolveEffectiveApproval: async () => ({ ok: true, effective: 'CHANGES_REQUESTED' }),
+        resolveHeadSha: async () => 'new-head',
+      })
+
+    test('the replayed round lets a fresh REQUEST_CHANGES land over the standing block', async () => {
+      // given the boot replay routed and the router registered its round on drain
+      const routed: InboundMessage[] = []
+      await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([held()]) }))
+      const round = routed[0]?.githubReviewRound
+      expect(round).toBeDefined()
+      registerGithubReviewRound(round!)
+
+      // when the recovered session submits its blocking verdict at the new head
+      const blocked = await verdictGuard().guard({
+        callId: 'c1',
+        workspace: 'acme/widgets',
+        prNumber: 7,
+        verdict: 'REQUEST_CHANGES',
+        round,
+        thread: null,
+        reviewedHeadSha: 'new-head',
+      })
+
+      // then the formal review is allowed instead of degrading to a comment
+      expect(blocked).toBeNull()
+    })
+
+    test('without a round the same verdict is a standing duplicate', async () => {
+      const blocked = await verdictGuard().guard({
+        callId: 'c2',
+        workspace: 'acme/widgets',
+        prNumber: 7,
+        verdict: 'REQUEST_CHANGES',
+        thread: null,
+        reviewedHeadSha: 'new-head',
+      })
+      expect(blocked).toMatchObject({ kind: 'duplicate', duplicateSource: 'standing' })
+    })
+  })
+
+  test('a later COMMENTED review at the new head does not count as the re-review', async () => {
+    // The bot's own restart notice or thread reply posts a COMMENTED review at the new head.
+    const routed: InboundMessage[] = []
+    const pr = held({
+      selfReviews: [
+        { state: 'CHANGES_REQUESTED', commitId: 'old-head' },
+        { state: 'COMMENTED', commitId: 'new-head' },
+      ],
+    })
+    await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([pr]) }))
+    expect(routed).toHaveLength(1)
+  })
+
+  test('replays under review_requested even with no open request', async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({ routed, reviewOn: 'review_requested', includeHeldReviews: true, fetchImpl: fakeGithub([held()]) }),
+    )
+    expect(routed.map((m) => m.externalMessageId)).toEqual(['pr-700-reconcile-rereview-new-head-2026-01-01T00:00:00Z'])
+  })
+
+  test('a held block wins over an open review request so the replay carries a push round', async () => {
+    // given the author re-requested review after pushing fixes while the bot was offline
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        reviewOn: 'review_requested',
+        includeHeldReviews: true,
+        fetchImpl: fakeGithub([held({ requestedReviewers: ['bot'] })]),
+      }),
+    )
+    expect(routed.map((m) => m.externalMessageId)).toEqual(['pr-700-reconcile-rereview-new-head-2026-01-01T00:00:00Z'])
+    const round = routed[0]?.githubReviewRound
+    expect(round).toMatchObject({ kind: 'push', headSha: 'new-head', carrierThread: null })
+
+    // when the recovered session submits its blocking verdict
+    registerGithubReviewRound(round!)
+    const blocked = await createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'CHANGES_REQUESTED' }),
+      resolveHeadSha: async () => 'new-head',
+    }).guard({
+      callId: 'c3',
+      workspace: 'acme/widgets',
+      prNumber: 7,
+      verdict: 'REQUEST_CHANGES',
+      round,
+      thread: null,
+      reviewedHeadSha: 'new-head',
+    })
+
+    // then the formal review is allowed
+    expect(blocked).toBeNull()
+    __resetReviewVerdictGuardForTest()
+  })
+
+  test('periodic passes without includeHeldReviews leave a held review alone', async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(baseOptions({ routed, fetchImpl: fakeGithub([held()]) }))
+    expect(routed).toHaveLength(0)
+  })
+
+  test('skips a blocking review already at the current head', async () => {
+    const routed: InboundMessage[] = []
+    const pr = held({ selfReviews: [{ state: 'CHANGES_REQUESTED', commitId: 'new-head' }] })
+    await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([pr]) }))
+    expect(routed).toHaveLength(0)
+  })
+
+  test('skips a block the bot already cleared with an approval', async () => {
+    const routed: InboundMessage[] = []
+    const pr = held({
+      selfReviews: [
+        { state: 'CHANGES_REQUESTED', commitId: 'old-head' },
+        { state: 'APPROVED', commitId: 'old-head' },
+      ],
+    })
+    await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([pr]) }))
+    expect(routed).toHaveLength(0)
+  })
+
+  test('never re-reviews a PR the bot opened itself', async () => {
+    const routed: InboundMessage[] = []
+    const pr = held({ authorLogin: 'bot', authorType: 'Bot' })
+    await reconcileOpenPrs(baseOptions({ routed, includeHeldReviews: true, fetchImpl: fakeGithub([pr]) }))
+    expect(routed).toHaveLength(0)
   })
 })
 
