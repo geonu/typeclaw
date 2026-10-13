@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto'
+
 import type { GithubReviewOn } from '@/channels/schema'
 import type { InboundMessage, RouteReceipt } from '@/channels/types'
 
 import { describeError } from '../../describe-error'
 import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
+import { followupInstruction } from './inbound'
 import {
   DEFAULT_RECONCILE_COOLDOWN_MS,
   type ReconcileCooldownStore,
@@ -45,6 +48,13 @@ export type ReconcileOpenPrsOptions = {
   // Omitted in tests that assert the raw replay decision.
   cooldownStore?: ReconcileCooldownStore
   cooldownMs?: number
+  // Also replay PRs where the bot's standing CHANGES_REQUESTED predates the
+  // current head: a push follow-up a restart killed (or whose synchronize
+  // delivery was lost) is never re-sent, so the block would hold until a human
+  // pings. Boot-only on purpose: a periodic tick would race a live follow-up
+  // re-review still in flight for the same push.
+  includeHeldReviews?: boolean
+  generateReviewRoundId?: () => string
   now?: () => number
   // The pass runs detached from adapter start(), so it can outlive stop(). Once
   // cancelled it must not persist cooldowns, route, or prune for a lifecycle
@@ -106,8 +116,8 @@ async function reconcileRepo(
 
   let replayed = 0
   for (const pr of prs) {
-    const needs = await prNeedsReview({ pr, options, target, token, selfLogin, decoyLogin, fetchImpl })
-    if (!needs) continue
+    const kind = await prReplayKind({ pr, options, target, token, selfLogin, decoyLogin, fetchImpl })
+    if (kind === null) continue
     if (options.isCancelled?.() === true) return { repo, scanned: prs.length, replayed }
     let reservation: ReconcileReplayReservation | null = null
     if (cooldownStore !== undefined) {
@@ -143,7 +153,7 @@ async function reconcileRepo(
       await releaseReservation(options, repo, pr, reservation)
       return { repo, scanned: prs.length, replayed }
     }
-    if (await replayPr(options, target, pr, reservation)) replayed += 1
+    if (await replayPr(options, target, pr, kind, reservation)) replayed += 1
   }
 
   if (cooldownStore !== undefined && options.isCancelled?.() !== true) {
@@ -163,12 +173,13 @@ async function replayPr(
   options: ReconcileOpenPrsOptions,
   target: RepoTarget,
   pr: OpenPr,
+  kind: ReplayKind,
   reservation: ReconcileReplayReservation | null,
 ): Promise<boolean> {
   const repo = `${target.owner}/${target.repo}`
   let receipt: RouteReceipt
   try {
-    receipt = await options.route(buildSyntheticInbound(pr, target))
+    receipt = await options.route(buildSyntheticInbound(pr, target, kind, options.generateReviewRoundId ?? randomUUID))
   } catch (err) {
     options.logger.warn(`[github] reconcile ${repo}: PR #${pr.number} replay failed: ${describeError(err)}`)
     await releaseReservation(options, repo, pr, reservation)
@@ -198,7 +209,9 @@ async function releaseReservation(
   }
 }
 
-async function prNeedsReview(input: {
+type ReplayKind = 'review' | 'rereview'
+
+async function prReplayKind(input: {
   pr: OpenPr
   options: ReconcileOpenPrsOptions
   target: RepoTarget
@@ -206,23 +219,34 @@ async function prNeedsReview(input: {
   selfLogin: string
   decoyLogin: string | null
   fetchImpl: typeof fetch
-}): Promise<boolean> {
+}): Promise<ReplayKind | null> {
   const { pr, options, target, token, selfLogin, decoyLogin, fetchImpl } = input
-  if (isSelfAuthored(pr, selfLogin, decoyLogin)) return false
+  if (isSelfAuthored(pr, selfLogin, decoyLogin)) return null
+  let summary: SelfReviewSummary | undefined
+  const selfReviews = async (): Promise<SelfReviewSummary> =>
+    (summary ??= await fetchSelfReviewSummary(fetchImpl, token, target, pr.number, selfLogin))
+
+  // A held CHANGES_REQUESTED is the bot's own obligation whichever mode woke the
+  // first review, mirroring the live synchronize follow-up. It wins over an open
+  // review request (an author re-requesting after pushing fixes): only the
+  // re-review replay carries the push round a fresh blocking verdict needs.
+  if (options.includeHeldReviews === true) {
+    const { blockingCommitId } = await selfReviews()
+    if (blockingCommitId !== null && pr.headSha !== null && blockingCommitId !== pr.headSha) return 'rereview'
+  }
 
   if (options.reviewOn === 'review_requested') {
     // Only the explicit request wakes a review under this mode. A draft can
     // still carry a request, so draft state is irrelevant here. Mirrors the
     // live path's `isMeAsUser || isMyTeam`: a direct user request, OR a team
     // request the bot is a member of.
-    if (isUserReviewRequestedFromSelf(pr, selfLogin, decoyLogin)) return true
-    return await isTeamReviewRequestedFromSelf(pr, target, selfLogin, options.isBotInTeam)
+    if (isUserReviewRequestedFromSelf(pr, selfLogin, decoyLogin)) return 'review'
+    return (await isTeamReviewRequestedFromSelf(pr, target, selfLogin, options.isBotInTeam)) ? 'review' : null
   }
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
-  if (pr.draft) return false
-  return !(await botAlreadyReviewed(fetchImpl, token, target, pr.number, selfLogin))
+  return !pr.draft && !(await selfReviews()).reviewed ? 'review' : null
 }
 
 async function isTeamReviewRequestedFromSelf(
@@ -238,15 +262,27 @@ async function isTeamReviewRequestedFromSelf(
   return false
 }
 
-function buildSyntheticInbound(pr: OpenPr, target: RepoTarget): InboundMessage {
+function buildSyntheticInbound(
+  pr: OpenPr,
+  target: RepoTarget,
+  kind: ReplayKind,
+  generateReviewRoundId: () => string,
+): InboundMessage {
   const branchSegment = pr.headRef !== null && pr.baseRef !== null ? ` Branch: ${pr.headRef} → ${pr.baseRef}.` : ''
   const text =
-    `@${pr.authorLogin} opened PR #${pr.number}: "${pr.title}".${branchSegment}` +
-    ' Please review the changes line-by-line and post your feedback.'
-  // Distinct from the live `pr-<id>-opened-<updatedAt>` id so a replay never
-  // collides with a real opened delivery, while repeated reconciles for the
-  // same unchanged PR dedupe against each other (same updatedAt).
-  const externalMessageId = `pr-${pr.id}-reconcile-${pr.updatedAt}`
+    kind === 'rereview' && pr.headSha !== null
+      ? `PR #${pr.number}: "${pr.title}" received new commits (now at ${pr.headSha.slice(0, 7)}) since your ` +
+        `blocking review, and no re-review of them has been submitted yet. ${followupInstruction(null, true)}`
+      : `@${pr.authorLogin} opened PR #${pr.number}: "${pr.title}".${branchSegment}` +
+        ' Please review the changes line-by-line and post your feedback.'
+  // Distinct from the live `pr-<id>-opened-<updatedAt>` and push follow-up
+  // `pr-<n>-recheck-<sha>` ids: a duplicate of the very admission a restart
+  // interrupted would be deduped instead of re-run. Repeated reconciles for the
+  // same unchanged PR still dedupe against each other (same updatedAt).
+  const externalMessageId =
+    kind === 'rereview'
+      ? `pr-${pr.id}-reconcile-rereview-${pr.headSha}-${pr.updatedAt}`
+      : `pr-${pr.id}-reconcile-${pr.updatedAt}`
   return {
     adapter: 'github',
     workspace: `${target.owner}/${target.repo}`,
@@ -254,6 +290,21 @@ function buildSyntheticInbound(pr: OpenPr, target: RepoTarget): InboundMessage {
     thread: null,
     text,
     externalMessageId,
+    // A re-review must land a fresh blocking verdict at the new head, which the
+    // verdict coordinator allows over a standing CHANGES_REQUESTED only inside a
+    // current-head push round, exactly like the live push follow-up's.
+    ...(kind === 'rereview' && pr.headSha !== null
+      ? {
+          githubReviewRound: {
+            kind: 'push' as const,
+            roundId: generateReviewRoundId(),
+            workspace: `${target.owner}/${target.repo}`,
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            carrierThread: null,
+          },
+        }
+      : {}),
     eventKind: 'pull_request:reconcile',
     revision: pr.updatedAt,
     authorId: String(pr.authorId),
@@ -279,6 +330,7 @@ type OpenPr = {
   authorId: number
   authorIsBot: boolean
   headRef: string | null
+  headSha: string | null
   baseRef: string | null
   updatedAt: string
   requestedReviewerLogins: string[]
@@ -311,13 +363,23 @@ async function fetchOpenPrs(fetchImpl: typeof fetch, token: string, target: Repo
   return prs
 }
 
-async function botAlreadyReviewed(
+// `blockingCommitId` is the commit of the bot's latest DECISIVE review when that
+// review is CHANGES_REQUESTED. COMMENTED/PENDING never clear the block (see
+// review-state.ts), and the bot's own comment replies post COMMENTED reviews at
+// the new head, so only the decisive review's commit tells whether it was redone.
+type SelfReviewSummary = { reviewed: boolean; blockingCommitId: string | null }
+
+const DECISIVE_REVIEW_STATES = new Set(['CHANGES_REQUESTED', 'APPROVED', 'DISMISSED'])
+
+async function fetchSelfReviewSummary(
   fetchImpl: typeof fetch,
   token: string,
   target: RepoTarget,
   prNumber: number,
   selfLogin: string,
-): Promise<boolean> {
+): Promise<SelfReviewSummary> {
+  let reviewed = false
+  let lastDecisive: { state: string; commitId: string | null } | null = null
   let url: string | null =
     `${GITHUB_API_BASE}/repos/${target.owner}/${target.repo}/pulls/${prNumber}/reviews?per_page=100`
   while (url !== null) {
@@ -331,11 +393,17 @@ async function botAlreadyReviewed(
     for (const row of page) {
       const login = row.user?.login ?? null
       if (login === null) continue
-      if (isSelfLogin(login, row.user?.type === 'Bot', selfLogin)) return true
+      if (!isSelfLogin(login, row.user?.type === 'Bot', selfLogin)) continue
+      reviewed = true
+      if (typeof row.state === 'string' && DECISIVE_REVIEW_STATES.has(row.state))
+        lastDecisive = { state: row.state, commitId: typeof row.commit_id === 'string' ? row.commit_id : null }
     }
     url = nextLink(response.headers.get('link'))
   }
-  return false
+  return {
+    reviewed,
+    blockingCommitId: lastDecisive?.state === 'CHANGES_REQUESTED' ? lastDecisive.commitId : null,
+  }
 }
 
 function isUserReviewRequestedFromSelf(pr: OpenPr, selfLogin: string, decoyLogin: string | null): boolean {
@@ -385,13 +453,13 @@ type PrRow = {
   draft?: unknown
   updated_at?: unknown
   user?: { login?: unknown; id?: unknown; type?: unknown }
-  head?: { ref?: unknown }
+  head?: { ref?: unknown; sha?: unknown }
   base?: { ref?: unknown }
   requested_reviewers?: Array<{ login?: unknown }>
   requested_teams?: Array<{ slug?: unknown }>
 }
 
-type ReviewRow = { user?: { login?: string; type?: string } }
+type ReviewRow = { state?: unknown; commit_id?: unknown; user?: { login?: string; type?: string } }
 
 function parsePrRow(row: PrRow): OpenPr | null {
   const number = typeof row.number === 'number' ? row.number : null
@@ -407,6 +475,7 @@ function parsePrRow(row: PrRow): OpenPr | null {
     authorId: typeof row.user?.id === 'number' ? row.user.id : 0,
     authorIsBot: row.user?.type === 'Bot',
     headRef: typeof row.head?.ref === 'string' ? row.head.ref : null,
+    headSha: typeof row.head?.sha === 'string' ? row.head.sha : null,
     baseRef: typeof row.base?.ref === 'string' ? row.base.ref : null,
     updatedAt: typeof row.updated_at === 'string' ? row.updated_at : '',
     requestedReviewerLogins: (row.requested_reviewers ?? []).flatMap((r) =>
