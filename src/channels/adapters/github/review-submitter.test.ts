@@ -314,7 +314,16 @@ describe('github review submitter', () => {
     const result = await submit(request({ event: 'REQUEST_CHANGES' }))
 
     expect(result.ok).toBe(true)
-    expect(posted).toEqual([{ repo: 'acme/widgets', prNumber: 7, headSha: 'head-sha', state: 'CHANGES_REQUESTED' }])
+    expect(posted).toEqual([
+      {
+        repo: 'acme/widgets',
+        prNumber: 7,
+        headSha: 'head-sha',
+        state: 'CHANGES_REQUESTED',
+        reviewId: 123,
+        comments: [{ path: 'src/app.ts', line: 2, body: 'inline' }],
+      },
+    ])
   })
 
   test('does not report a review whose verification failed', async () => {

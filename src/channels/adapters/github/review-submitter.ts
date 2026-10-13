@@ -28,7 +28,14 @@ export function createGithubReviewSubmitter(deps: {
   token: (context?: GithubAuthContext) => Promise<string>
   allowApprove: () => boolean
   accountIdentity?: () => Promise<string | undefined>
-  onReviewPosted?: (posted: { repo: string; prNumber: number; headSha: string; state: VerifiedReviewState }) => void
+  onReviewPosted?: (posted: {
+    repo: string
+    prNumber: number
+    headSha: string
+    state: VerifiedReviewState
+    reviewId: number
+    comments: readonly ReviewFinding[]
+  }) => void
   fetchImpl?: typeof fetch
 }): ReviewSubmitter {
   const fetchImpl = deps.fetchImpl ?? fetch
@@ -88,6 +95,8 @@ export function createGithubReviewSubmitter(deps: {
       prNumber: target.prNumber,
       headSha: stable.headSha,
       state: verified.state,
+      reviewId: verified.reviewId,
+      comments: req.comments,
     })
     return {
       ok: true,

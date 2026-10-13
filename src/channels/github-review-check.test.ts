@@ -11,6 +11,7 @@ import {
   type ReviewCheckPublisher,
   type ReviewCheckPublishResult,
   type ReviewCheckRef,
+  type ReviewCheckTiming,
 } from './github-review-check'
 
 const KEY: ReviewCheckKey = { repo: 'Acme/Widgets', pullRequest: 7, headSha: 'A'.repeat(40) }
@@ -29,6 +30,7 @@ function harness(
   let clock = 1_000
   const started: ReviewCheckKey[] = []
   const finished: Finished[] = []
+  const timings: Array<ReviewCheckTiming | undefined> = []
   const publishResults: ReviewCheckPublishResult[] = []
   let saved: PersistedReviewCheckLease[] = options.persisted ?? []
   const publisher: ReviewCheckPublisher = {
@@ -37,8 +39,9 @@ function harness(
       started.push(key)
       return options.start === undefined ? RUN : options.start(key)
     },
-    finish: async (key, ref, outcome) => {
+    finish: async (key, ref, outcome, timing) => {
       finished.push({ key, ref, outcome })
+      timings.push(timing)
       return publishResults.shift() ?? 'published'
     },
   }
@@ -59,6 +62,7 @@ function harness(
     tracker,
     started,
     finished,
+    timings,
     attach,
     detach: () => tracker.detach(publisher),
     failNextPublish: () => publishResults.push('retry'),
@@ -214,6 +218,7 @@ describe('GithubReviewCheckTracker', () => {
         ...NORMALIZED,
         ref: RUN,
         startedAt: 1_000,
+        tracked: true,
         outcome: { kind: 'failed', reason: 'model error' },
         outcomeAt: 1_000,
       },
@@ -465,5 +470,132 @@ describe('GithubReviewCheckTracker', () => {
 
     expect(h.finished).toEqual([])
     expect(h.saved()).toEqual([])
+  })
+})
+
+describe('GithubReviewCheckTracker progress', () => {
+  function progressHarness() {
+    let clock = 1_000
+    const events: string[] = []
+    const progress: Array<{ phase: string; activity: unknown }> = []
+    const gate = deferred<void>()
+    const entered = deferred<void>()
+    let holdProgress = false
+    const publisher: ReviewCheckPublisher = {
+      start: async () => RUN,
+      finish: async (_key, _ref, outcome) => {
+        events.push(`finish:${outcome.kind}`)
+        return 'published'
+      },
+      progress: async (_key, _ref, p) => {
+        if (holdProgress) {
+          entered.resolve()
+          await gate.promise
+        }
+        events.push(`progress:${p.phase}`)
+        progress.push({ phase: p.phase, activity: p.activity })
+      },
+    }
+    const tracker = new GithubReviewCheckTracker(() => clock)
+    detachers.push(() => tracker.detach(publisher))
+    return {
+      tracker,
+      events,
+      progress,
+      hold: () => {
+        holdProgress = true
+      },
+      inFlight: entered.promise,
+      release: () => gate.resolve(),
+      advance: (ms: number) => {
+        clock += ms
+      },
+      attach: () =>
+        tracker.attach({
+          publisher,
+          store: { load: async () => [], save: async () => {} },
+          logger: { info: () => {}, warn: () => {} },
+        }),
+    }
+  }
+
+  const ACTIVITY = { started: true, filesRead: 3, commandsRun: 1, current: 'reading' as const, lastActivityAt: 1_500 }
+
+  test('the sweep publishes the latest reported reviewer activity for a running check', async () => {
+    const h = progressHarness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'bg_1', { reviewKind: 're-review' })
+
+    h.tracker.reportActivity('bg_1', ACTIVITY)
+    await h.tracker.sweep()
+
+    expect(h.progress).toEqual([{ phase: 'reviewing', activity: ACTIVITY }])
+  })
+
+  test('a successful reviewer publishes the posting phase at once', async () => {
+    const h = progressHarness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'bg_1')
+
+    await h.tracker.reviewerSettled('bg_1', { kind: 'ok' })
+
+    expect(h.events).toEqual(['progress:posting'])
+  })
+
+  test('an in-flight progress update never lands after the completed check', async () => {
+    // given: a progress update that is still in flight
+    const h = progressHarness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'bg_1')
+    h.hold()
+    const sweeping = h.tracker.sweep()
+    await h.inFlight
+
+    // when: the verdict arrives meanwhile, then the progress call returns
+    const posted = h.tracker.reviewPosted(KEY, 'APPROVED')
+    expect(h.events).toEqual([])
+    h.release()
+    await Promise.all([sweeping, posted])
+    await h.tracker.sweep()
+
+    // then: the completion is published last and no progress follows it
+    expect(h.events).toEqual(['progress:reviewing', 'finish:verdict'])
+  })
+
+  test('activity for an unknown or finished review is ignored', async () => {
+    const h = progressHarness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'bg_1')
+    await h.tracker.reviewerSettled('bg_1', { kind: 'failed', reason: 'boom' })
+
+    h.tracker.reportActivity('bg_1', ACTIVITY)
+    h.tracker.reportActivity('bg_unknown', ACTIVITY)
+    await h.tracker.sweep()
+
+    expect(h.progress).toEqual([])
+  })
+})
+
+describe('GithubReviewCheckTracker restart timing', () => {
+  test('a tracked verdict replayed after a restart keeps its review duration; an untracked one does not', async () => {
+    // given: a tracked review whose verdict publish fails, and an untracked verdict on another commit
+    const h = harness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'bg_1')
+    await h.tracker.reviewerSettled('bg_1', { kind: 'ok' })
+    h.advance(60_000)
+    h.failNextPublish()
+    await h.tracker.reviewPosted(KEY, 'APPROVED')
+    h.failNextPublish()
+    await h.tracker.reviewPosted({ ...KEY, headSha: 'b'.repeat(40) }, 'COMMENTED')
+
+    // when: the process restarts and republishes both
+    const restarted = harness({ persisted: h.saved() })
+    await restarted.attach()
+
+    // then: only the tracked one carries a duration-bearing timing
+    expect(h.saved().map((lease) => lease.tracked === true)).toEqual([true, false])
+    expect(restarted.timings.map((timing) => timing?.tracked)).toEqual([true, false])
+    expect(restarted.timings[0]).toMatchObject({ startedAt: 1_000, decidedAt: 61_000 })
   })
 })
