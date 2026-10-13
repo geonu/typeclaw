@@ -5581,7 +5581,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             session: live.session,
             text: promptText,
             shouldFailover: (err) => isFailoverWorthy(err.message),
-            authorizeRetryAfterCompletedToolResult: () => hasPendingContinueReply(live),
+            // The resume never re-runs a tool (it continues from the completed
+            // tool result), so the only duplicate it could cause is a second
+            // reply. Allow it while the user has seen nothing beyond a pending
+            // progress ack, and never after a /stop.
+            authorizeRetryAfterCompletedToolResult: () =>
+              live.backgroundStopVersion === stopVersion &&
+              (live.successfulChannelSends === successfulSendsBeforePrompt || hasPendingContinueReply(live)),
             ...(options.retryRandom !== undefined ? { retryRandom: options.retryRandom } : {}),
             ...(options.onRetryBackoffStart !== undefined ? { onRetryBackoffStart: options.onRetryBackoffStart } : {}),
             setModelForRef: async (ref) => {
