@@ -3,12 +3,13 @@ import { once } from 'node:events'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 
-import type { CodingAgentAuth, CodingAgentAuthResolver } from '@/secrets/coding-agent-auth'
+import type { CodingAgentAuth, CodingAgentAuthResolver, CodingAgentProvider } from '@/secrets/coding-agent-auth'
 
 const MAX_BODY = 32 * 1024 * 1024
 const MAX_STREAMS = 4
-const ROUTES = new Set(['/v1/messages', '/v1/messages/count_tokens'])
-const REQUEST_HEADERS = ['anthropic-version', 'anthropic-beta', 'user-agent', 'x-app'] as const
+const ANTHROPIC_ROUTES = new Set(['/v1/messages', '/v1/messages/count_tokens'])
+const ANTHROPIC_HEADERS = ['anthropic-version', 'anthropic-beta', 'user-agent', 'x-app'] as const
+const CODEX_HEADERS = ['user-agent', 'originator', 'version', 'session_id', 'x-codex-turn-metadata'] as const
 const REJECTED_HEADERS = [
   'proxy-authorization',
   'forwarded',
@@ -19,6 +20,8 @@ const REJECTED_HEADERS = [
   'x-organization-id',
   'x-workspace-id',
   'chatgpt-account-id',
+  'openai-organization',
+  'openai-project',
 ] as const
 
 export class SecretScrubber {
@@ -54,6 +57,7 @@ export type CodingBroker = {
 
 export async function startCodingBroker(
   options: {
+    provider?: CodingAgentProvider
     auth: CodingAgentAuthResolver
     allowedModels: readonly string[]
     deadline: number
@@ -62,10 +66,13 @@ export async function startCodingBroker(
   // Dependency injection for wire-level tests only. No config/tool operand can select a destination.
   testDependencies?: { upstream: URL },
 ): Promise<CodingBroker> {
+  const provider = options.provider ?? 'anthropic'
   const capability = randomBytes(32).toString('hex')
   const controller = new AbortController()
   const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal
-  const upstream = testDependencies?.upstream ?? new URL('https://api.anthropic.com')
+  const upstream =
+    testDependencies?.upstream ??
+    new URL(provider === 'anthropic' ? 'https://api.anthropic.com' : 'https://chatgpt.com')
   let active = 0
   let closed = false
   const server = createServer({ maxHeaderSize: 16 * 1024 }, (req, res) => {
@@ -120,9 +127,9 @@ export async function startCodingBroker(
     if (
       req.method !== 'POST' ||
       !route ||
-      !ROUTES.has(route) ||
+      !(provider === 'anthropic' ? ANTHROPIC_ROUTES.has(route) : route === '/v1/responses') ||
       extra !== undefined ||
-      (query !== undefined && query !== 'beta=true') ||
+      (query !== undefined && (provider !== 'anthropic' || query !== 'beta=true')) ||
       req.rawHeaders.length > 128
     ) {
       return reject(res, 400, 'unsupported_request')
@@ -162,12 +169,12 @@ export async function startCodingBroker(
       if (['url', 'base_url', 'baseURL', 'endpoint', 'upstream', 'destination'].some((key) => key in value)) {
         return reject(res, 400, 'unsupported_destination')
       }
-      let auth = await options.auth.resolve(requestSignal)
+      let auth = await options.auth.resolve(requestSignal, undefined, provider)
       const secrets = new Set(auth.secrets)
       let response = await forward(auth)
       if (response.statusCode === 401) {
         response.destroy()
-        auth = await options.auth.resolve(requestSignal, auth)
+        auth = await options.auth.resolve(requestSignal, auth, provider)
         auth.secrets.forEach((secret) => secrets.add(secret))
         response = await forward(auth)
       }
@@ -176,8 +183,13 @@ export async function startCodingBroker(
       const scrub = (text: string) => new SecretScrubber(allSecrets).push(text, true)
       for (const [key, value] of Object.entries(response.headers)) {
         if (typeof value !== 'string') continue
+        // Provider-prefixed rate-limit names are untrusted text too.
+        if (allSecrets.some((secret) => secret.length > 0 && key.includes(secret.toLowerCase()))) continue
         if (key === 'request-id' || key === 'x-request-id') res.setHeader(key, scrub(value).slice(0, 200))
-        if ((key === 'retry-after' || key.startsWith('anthropic-ratelimit-')) && /^[0-9T:Z.+-]{1,64}$/.test(value)) {
+        if (
+          (key === 'retry-after' || key.startsWith('anthropic-ratelimit-') || key.startsWith('x-ratelimit-')) &&
+          /^[0-9T:Z.+-]{1,64}$/.test(value)
+        ) {
           res.setHeader(key, scrub(value))
         }
       }
@@ -210,15 +222,20 @@ export async function startCodingBroker(
       res.end(scrubber.push(decoder.decode(), true))
 
       function forward(credential: CodingAgentAuth): Promise<IncomingMessage> {
+        if ((credential.provider ?? 'anthropic') !== provider)
+          throw new Error('Inference credential provider mismatch.')
         const headers: Record<string, string> = {
           'content-type': 'application/json',
-          'anthropic-version': '2023-06-01',
+          ...(provider === 'anthropic' ? { 'anthropic-version': '2023-06-01' } : { accept: 'text/event-stream' }),
         }
-        for (const key of REQUEST_HEADERS) {
+        for (const key of provider === 'anthropic' ? ANTHROPIC_HEADERS : CODEX_HEADERS) {
           const value = req.headers[key]
           if (typeof value === 'string') headers[key] = value
         }
-        if (credential.type === 'oauth') {
+        if (credential.provider === 'openai-codex') {
+          headers.authorization = `Bearer ${credential.token}`
+          headers['ChatGPT-Account-Id'] = credential.accountId
+        } else if (credential.type === 'oauth') {
           headers.authorization = `Bearer ${credential.token}`
           headers['anthropic-beta'] = [
             ...new Set([
@@ -232,7 +249,7 @@ export async function startCodingBroker(
         // node:https does not honor ambient HTTP_PROXY/CA/URL overrides. Never follow Location.
         return new Promise((resolve, rejectRequest) => {
           const request = (upstream.protocol === 'https:' ? httpsRequest : httpRequest)(
-            new URL(target, upstream),
+            new URL(provider === 'anthropic' ? target : '/backend-api/codex/responses', upstream),
             { method: 'POST', headers, signal: requestSignal, rejectUnauthorized: true },
             resolve,
           )
