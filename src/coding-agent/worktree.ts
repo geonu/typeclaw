@@ -125,7 +125,8 @@ export async function createCodingWorkspace(
   await assertCodingDirectory(source)
   await assertCodingDirectory(taskRoot)
   const identity = await lstat(source)
-  const git = (...args: string[]) => execute(['git', '-c', 'core.hooksPath=/dev/null', ...args], taskRoot)
+  const git = (...args: string[]) =>
+    execute(['git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', ...args], taskRoot)
   const root = (await git('-C', sourcePath, 'rev-parse', '--show-toplevel')).trim()
   if (root !== sourcePath) throw new Error('Select a repository root, not a subdirectory.')
   const baseSha = (await git('-C', sourcePath, 'rev-parse', '--verify', 'HEAD^{commit}')).trim()
@@ -168,7 +169,8 @@ export async function captureCodingChanges(
   const { taskRoot, baseSha } = workspace
   await assertCodingDirectory(taskRoot)
   const cwd = join(taskRoot, 'worktree')
-  const git = (...args: string[]) => execute(['git', '-c', 'core.hooksPath=/dev/null', ...args], cwd)
+  const git = (...args: string[]) =>
+    execute(['git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', ...args], cwd)
   const untrackedFiles = (await git('ls-files', '--others', '--exclude-standard', '-z')).split('\0').filter(Boolean)
   // Temporary index lives in sandbox scratch, not in the CLI's mutable index.
   const temporary = `/tmp/typeclaw-index-${crypto.randomUUID()}`
@@ -176,6 +178,8 @@ export async function captureCodingChanges(
   // The helper script is code we supply, with paths passed as positional parameters.
   const script = [
     'set -eu',
+    // A model-controlled replace ref must not redefine the recorded baseline.
+    'export GIT_NO_REPLACE_OBJECTS=1',
     'index="$(git rev-parse --git-path index)"',
     'objects="$(git rev-parse --git-path objects)"',
     'export GIT_INDEX_FILE="$1"',

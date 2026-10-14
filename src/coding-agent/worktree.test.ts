@@ -99,6 +99,19 @@ describe('task-private worktree', () => {
     await expect(lstat(join(task, 'worktree', 'untracked'))).rejects.toThrow()
   })
 
+  test('replacement refs cannot redefine the recorded patch baseline', async () => {
+    const workspace = await createCodingWorkspace(source, task, execute, source)
+    const cwd = join(task, 'worktree')
+    await writeFile(join(cwd, 'staged'), 'changed\n')
+    await execute(['git', 'add', '.'], cwd)
+    await execute(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'child'], cwd)
+    const changed = (await execute(['git', 'rev-parse', 'HEAD'], cwd)).trim()
+    await execute(['git', 'replace', workspace.baseSha, changed], cwd)
+    const artifacts = await captureCodingChanges(workspace, execute, (path, text) => writeFile(path, text))
+    expect(artifacts.changedFiles).toContain('staged')
+    expect(await readFile(artifacts.patchPath, 'utf8')).toContain('+changed')
+  })
+
   test('includes committed and staged new files even when later ignored', async () => {
     const workspace = await createCodingWorkspace(source, task, execute, source)
     const cwd = join(task, 'worktree')
@@ -115,13 +128,17 @@ describe('task-private worktree', () => {
   })
 
   test('rejects protected paths in the selected revision only', async () => {
+    const clean = (await execute(['git', 'rev-parse', 'HEAD'], source)).trim()
     await writeFile(join(source, 'secrets.json'), 'fixture-canary')
     await execute(['git', 'add', '.'], source)
     await execute(
       ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'protected'],
       source,
     )
+    const protectedRevision = (await execute(['git', 'rev-parse', 'HEAD'], source)).trim()
+    await execute(['git', 'replace', protectedRevision, clean], source)
     await expect(createCodingWorkspace(source, task, execute, source)).rejects.toThrow('protected')
+    await execute(['git', 'replace', '-d', protectedRevision], source)
     await execute(['git', 'rm', 'secrets.json'], source)
     await execute(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'clean'], source)
     expect((await createCodingWorkspace(source, task, execute, source)).baseSha).toMatch(/^[a-f0-9]{40}$/)
