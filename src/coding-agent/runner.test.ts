@@ -57,6 +57,12 @@ describe('headless runner', () => {
     await execute(['git', 'init', source], root)
     await writeFile(join(source, 'source.txt'), 'baseline\n')
     await writeFile(join(source, '.gitignore'), 'workspace/\n.typeclaw/\n')
+    // Real agent HEADs contain force-backed-up private data. Delegation already
+    // requires private-surface authority; these are not canonical credentials.
+    await mkdir(join(source, 'memory'))
+    await mkdir(join(source, 'sessions'))
+    await writeFile(join(source, 'memory', 'topic.md'), 'Authorized private context.\n')
+    await writeFile(join(source, 'sessions', 'session.jsonl'), '{"type":"fixture"}\n')
     await execute(['git', 'add', '.'], source)
     await execute(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'base'], source)
     const fake = join(root, 'fake-claude.js')

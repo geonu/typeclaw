@@ -34,9 +34,7 @@ export const CODING_MASK_FILES = [
 ] as const
 
 export function codingSourceMaskDirs(source: string, taskRoot: string): readonly string[] {
-  return source === resolve(taskRoot, '../../..')
-    ? [...CODING_MASK_DIRS, 'workspace', 'sessions', 'memory']
-    : CODING_MASK_DIRS
+  return source === resolve(taskRoot, '../../..') ? [...CODING_MASK_DIRS, 'workspace'] : CODING_MASK_DIRS
 }
 
 export type CodingSandboxOptions = {
