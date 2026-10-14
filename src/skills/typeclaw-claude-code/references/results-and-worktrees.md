@@ -2,7 +2,7 @@
 
 Container task files live under `/agent/workspace/coding-agents/<task-id>/`: `git/`, `worktree/`, `claude/`, and `output/`. They survive container recreation through the agent bind mount and do not enter session/memory backups.
 
-The source revision is committed HEAD. Dirty source edits are reported and excluded; dirty-input snapshots and authenticated submodule imports are not supported. Never auto-commit the source to prepare a task. The task uses copied objects and an actual detached worktree in a private Git database, not the live source repository's administrative files.
+The source revision is committed HEAD. Every receipt warns that uncommitted source edits are excluded; dirty-input snapshots and authenticated submodule imports are not supported. Never auto-commit the source to prepare a task. Bootstrap reads only the source's Git metadata; the live source worktree and credential write directory are never mounted or inspected for dirty status. The task uses copied objects and an actual detached worktree in a private Git database.
 
 The receipt records the task, source, base SHA, worktree, terminal state, final message, exit status, changed and untracked files, patch path, and safe diagnostic. `changes.patch` is binary-capable and covers staged/unstaged edits, untracked files, deletions, executable modes, and symlinks. `changes.json` records the inventory. Oversized artifacts are explicitly incomplete, not silently truncated.
 

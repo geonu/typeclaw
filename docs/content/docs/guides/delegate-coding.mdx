@@ -26,7 +26,7 @@ Ask the main agent to delegate a substantial task to Claude Code. It briefs a ba
 }
 ```
 
-Choose a compatible configured/curated Anthropic model. Repositories may be the agent root, a configured mount root (including read-only mounts), or an accessible workspace repository. The tool uses **committed HEAD**, reports excluded dirty source edits, and never stages or commits them. Dirty-input snapshots, linked source worktrees whose Git administration is outside the selected root, and authenticated recursive submodule imports are not supported.
+Choose a compatible configured/curated Anthropic model. Repositories may be the agent root, a configured mount root (including read-only mounts), or an accessible workspace repository. The tool uses **committed HEAD** and always warns that uncommitted source edits are excluded; it never stages or commits them. The live source worktree is not mounted or inspected for dirty status. Only its Git metadata is exposed during snapshot bootstrap. Dirty-input snapshots, linked source worktrees whose Git administration is outside the selected root, and authenticated recursive submodule imports are not supported.
 
 The receipt includes `taskId`, `state`, `baseSha`, source/model identity, `worktreePath`, `finalMessage`, changed/untracked files, `patchPath`, exit code, and a safe diagnostic. Continue with `action:"run"`, `engine:"claude"`, the same `taskId`, and a new prompt. Do not supply a CLI session ID or select the latest conversation. Repository and model stay fixed. Concurrent resumes fail with "task already running."
 
@@ -36,7 +36,7 @@ Use `mode:"plan"` for a read-only worktree and Git database; explicitly choose `
 
 Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/`, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
 
-`output/changes.patch` captures staged/unstaged edits, untracked files, deletions, modes, symlinks, and binary changes without changing the CLI's index. Oversized artifacts are marked incomplete rather than truncated. Review the patch and run acceptance checks before applying it through normal tools. The tool does not commit, merge, push, create PRs, or publish to channels.
+`output/changes.patch` captures staged/unstaged edits, untracked files, deletions, modes, symlinks, and binary changes without changing the CLI's index. Capture clears assume-unchanged and skip-worktree flags only in a temporary index, so flagged tracked edits are included too. Oversized artifacts are marked incomplete rather than truncated. Review the patch and run acceptance checks before applying it through normal tools. The tool does not commit, merge, push, create PRs, or publish to channels.
 
 Fetch a receipt with `{"action":"result","taskId":"<returned UUID>"}`. Task IDs are not authorization: unrelated speakers/sibling operators cannot take ownership, and lower-authority continuations are denied. People already allowed to read the shared workspace can inspect its non-secret artifacts; separate agents remain the cross-trust-domain boundary.
 

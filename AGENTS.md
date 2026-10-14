@@ -58,6 +58,8 @@ Two live examples of the _diagnosability_ half of the same failure: issue **#137
 
 Never weaken canonical masks, `resolvePrivilegedSandboxRuntime` default denial, PID/parent-death isolation, or proc probes. Git source inspection/snapshot/diff work also runs inside bwrap. Plan mode binds worktree/Git read-only. `.typeclaw/coding-agent-tasks.json` is runtime authority, not writable CLI artifacts. Test both denied attacks and valid work after denial.
 
+Never live-bind the source worktree or credential write directory into a coding child. Snapshot bootstrap binds only the source's `.git`; execution and artifact capture bind only task-private files. Existing-file masks cannot cover atomic credential rotation siblings or inode replacement. Committed-HEAD exclusion notices are unconditional because live dirty status is not inspected. Artifact capture clears assume-unchanged and skip-worktree flags only in its temporary index, never the CLI's real index.
+
 Claude profile exports, custom credential aliases, and TypeClaw Stop/SessionStart hooks are removed. Codex's separate legacy workflow remains unchanged and `coding_agent` rejects its engine as not yet available. No new operator config is required. The new core tool/plugin reference is a public surface and meets the release minor trigger.
 
 Before release, qualify the pinned official Claude binary through the production broker/bwrap profile on Linux amd64 and arm64: subscription first turn, real tools, explicit resume, refresh, compaction, redacted two-sided trace, and complete diff recovery. Fake upstreams cannot establish live subscription acceptance. Never substitute token injection for a failed gate.
