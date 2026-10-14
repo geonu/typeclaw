@@ -308,13 +308,13 @@ export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
 // post-tool follow-up turn — can run the model's full output capability
 // (~116s of garbage) before `stopReason: 'length'`. The terminal-reply hook
 // below removes the turn that triggers this; the cap bounds any other path that
-// still reaches a channel LLM call. 4096 fits a thinking block plus a nontrivial
-// reply (healthy channel turns observed at ~317 output tokens including
-// reasoning). Deliberately NOT lowered in `providers.ts`, where `maxTokens` is
+// still reaches a channel LLM call. 16384 leaves reasoning models room to think
+// and reply: 4096 (sized from kimi's ~317-token healthy turns) truncated ordinary
+// glm-5.3 channel turns that need 4-9K tokens. Deliberately NOT lowered in `providers.ts`, where `maxTokens` is
 // the model's true capability that compaction math reads.
-export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
+export const CHANNEL_MAX_OUTPUT_TOKENS = 16384
 // Raised output-token budget threaded into the ONE re-prompt that follows a
-// `stopReason:'length'` empty turn. The default 4096 backstop bounds kimi's
+// `stopReason:'length'` empty turn. The default backstop bounds kimi's
 // degenerate repetition loop, but it is the same ceiling a *legitimate*
 // reasoning-heavy turn hits when it spends the whole pool thinking and emits no
 // prose — re-prompting under the identical cap reproduces the truncation. A
@@ -323,7 +323,7 @@ export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
 // turn that IS looping still can't burn the model's full output capability. Consumed
 // one-shot via `LiveSession.nextPromptMaxTokens`, then reset at the next real
 // user turn so the raised budget never leaks past the turn that needed it.
-export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 16384
+export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 32768
 // Ceiling on automatic re-prompts for a turn that ended with NO user-facing
 // reply AND no attempted send — the pure "the model burned its budget thinking
 // and produced nothing" failure. The canonical trigger is Fireworks'
@@ -4003,11 +4003,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return stream
       }
       let maxTokens = streamOptions?.maxTokens
-      if (maxTokens === undefined && live.nextPromptMaxTokens !== undefined) {
-        maxTokens = live.nextPromptMaxTokens
-        live.nextPromptMaxTokens = undefined
+      if (maxTokens === undefined) {
+        let budget = CHANNEL_MAX_OUTPUT_TOKENS
+        if (live.nextPromptMaxTokens !== undefined) {
+          budget = live.nextPromptMaxTokens
+          live.nextPromptMaxTokens = undefined
+        }
+        // Router-chosen budgets never exceed the model's own output maximum: pi-ai
+        // clamps an explicit maxTokens only to remaining context, and endpoints that
+        // enforce a smaller output limit reject the request outright.
+        maxTokens = model.maxTokens > 0 ? Math.min(budget, model.maxTokens) : budget
       }
-      return await inner(model, context, { ...streamOptions, maxTokens: maxTokens ?? CHANNEL_MAX_OUTPUT_TOKENS })
+      return await inner(model, context, { ...streamOptions, maxTokens })
     }
   }
 
@@ -7386,7 +7393,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       } else if (outputKind === 'status') {
         live.statusOutputOutstandingThisLogicalTurn = true
       }
-      live.lastSendLeafId = live.session.sessionManager.getLeafEntry()?.id ?? null
+      live.lastSendLeafId = branchLeafEntry(live.session)?.id ?? null
       live.policyDeniedToolSendsThisTurn.delete(sendKey)
       // Don't stop the heartbeat here: the agent may still be mid-turn and
       // about to send another reply. drain()'s finally block owns turn-end
@@ -7746,7 +7753,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         return
       }
-      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
+      if (branchLeafEntry(live.session)?.id === live.lastSendLeafId) return
     }
 
     if (unfinishedToolUseWithoutReply) {
@@ -10402,7 +10409,7 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 function recoverableAssistantText(
   session: AgentSession,
 ): { text: string; source: 'leaf' | 'mid-turn' | 'pre-tool' | 'length-leaf' } | null {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf) return null
 
   if (leaf.type === 'message' && leaf.message.role === 'assistant') {
@@ -10452,6 +10459,21 @@ function recoverableAssistantText(
   return null
 }
 
+// The session's last entry, skipping trailing pi `context_edit` entries. pi
+// 0.99's truncated-response and auto-retry recovery appends a `context_edit`
+// (`replacement: null`) after the attempt it omits from model projection, and
+// when that recovery does not go on to retry, the edit is the raw leaf. Every
+// turn-end check here keys on the last message's role and stopReason, so reading
+// the raw leaf turned a `length` truncation into a "no assistant message" turn:
+// the raised-budget empty-turn retry was skipped and the turn-ended notice posted.
+function branchLeafEntry(session: AgentSession): SessionEntry | undefined {
+  let entry = session.sessionManager.getLeafEntry()
+  for (let depth = 0; depth < 32 && entry?.type === 'context_edit'; depth++) {
+    entry = entry.parentId ? session.sessionManager.getEntry(entry.parentId) : undefined
+  }
+  return entry
+}
+
 // The non-terminal stop reason when the leaf is an assistant message that did
 // NOT cleanly finish — `length` (hit the token cap, the canonical kimi
 // reasoning-loop), `error` (an upstream provider failure), or `aborted` (the
@@ -10461,7 +10483,7 @@ function recoverableAssistantText(
 // diverts to the provider-error notice, `length` gets a raised retry budget,
 // `aborted` retries under the default backstop.
 function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'aborted' | undefined {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return undefined
   const stop = leaf.message.stopReason
   if (stop === 'length' || stop === 'error' || stop === 'aborted') return stop
@@ -10481,7 +10503,7 @@ function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'a
 // to re-prompt a turn that strands mid-work after a `more_work_this_turn: true` status
 // reply instead of ending in silence.
 function leafIsStrandedToolUse(session: AgentSession): boolean {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf || leaf.type !== 'message') return false
   if (leaf.message.role === 'assistant') {
     return leaf.message.stopReason === 'toolUse' && visibleAssistantText(leaf.message).trim() === ''
@@ -10565,7 +10587,7 @@ function repairDanglingToolUseBranch(session: AgentSession, timestamp: number): 
 // of this shape: `channel_reply({ more_work_this_turn: true })` via `continueReplyTurn`, and
 // `channel_send` acks via the willingness phrase table.
 function isFreshEmptyStopAfterSend(live: LiveSession): boolean {
-  const leaf = live.session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(live.session)
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
   if (leaf.message.stopReason !== 'stop') return false
   if (hasToolCall(leaf.message) || visibleAssistantText(leaf.message).trim() !== '') return false
@@ -10607,7 +10629,7 @@ function hasToolCall(message: AssistantMessage): boolean {
 // `toolUse`, not `stop`. Depth-bounded like the other branch walks so a
 // malformed session can't loop.
 function attemptMadeToolCall(session: AgentSession): boolean {
-  let cursor: SessionEntry | undefined = session.sessionManager.getLeafEntry()
+  let cursor: SessionEntry | undefined = branchLeafEntry(session)
   for (let depth = 0; depth < 32 && cursor; depth++) {
     if (cursor.type === 'message') {
       if (cursor.message.role === 'user') return false
