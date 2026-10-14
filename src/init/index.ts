@@ -1003,9 +1003,8 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
 // shaped, or the access token is absent/blank.
 //
 // The token lives under `access` — pi-ai's secrets.json shape (`{ type:
-// 'oauth', access, refresh, expires, accountId }`), the same field
-// `export-codex-auth-file.ts` reads. NOT `access_token`: that key belongs to
-// the unrelated `~/.codex/auth.json` export (`{ tokens: { access_token } }`).
+// 'oauth', access, refresh, expires, accountId }`). NOT `access_token`, which
+// belongs to the native Codex auth.json format that TypeClaw no longer exports.
 // Reading `access_token` here silently returned false for every real
 // credential, re-running the browser login on resume instead of reusing it.
 //
