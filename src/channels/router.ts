@@ -4003,11 +4003,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return stream
       }
       let maxTokens = streamOptions?.maxTokens
-      if (maxTokens === undefined && live.nextPromptMaxTokens !== undefined) {
-        maxTokens = live.nextPromptMaxTokens
-        live.nextPromptMaxTokens = undefined
+      if (maxTokens === undefined) {
+        let budget = CHANNEL_MAX_OUTPUT_TOKENS
+        if (live.nextPromptMaxTokens !== undefined) {
+          budget = live.nextPromptMaxTokens
+          live.nextPromptMaxTokens = undefined
+        }
+        // Router-chosen budgets never exceed the model's own output maximum: pi-ai
+        // clamps an explicit maxTokens only to remaining context, and endpoints that
+        // enforce a smaller output limit reject the request outright.
+        maxTokens = model.maxTokens > 0 ? Math.min(budget, model.maxTokens) : budget
       }
-      return await inner(model, context, { ...streamOptions, maxTokens: maxTokens ?? CHANNEL_MAX_OUTPUT_TOKENS })
+      return await inner(model, context, { ...streamOptions, maxTokens })
     }
   }
 

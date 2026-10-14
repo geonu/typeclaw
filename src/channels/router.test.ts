@@ -294,9 +294,9 @@ async function tempDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'channels-router-'))
 }
 
-async function streamOnce(session: FakeSession): Promise<void> {
+async function streamOnce(session: FakeSession, model: Partial<Parameters<StreamFn>[0]> = {}): Promise<void> {
   await session.agent.streamFunction(
-    {} as Parameters<StreamFn>[0],
+    model as Parameters<StreamFn>[0],
     normalizeContext({ systemPrompt: '', messages: [], tools: [] }),
     undefined as Parameters<StreamFn>[2],
   )
@@ -7875,6 +7875,36 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(budgetsPerPrompt[1]).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
     expect(sent.map((s) => s.text)).toEqual(['표 다시 보낼게'])
     expect(logs.some((m) => m.includes('no recoverable assistant text in branch'))).toBe(false)
+  })
+
+  test('empty-turn guard: default and length-retry budgets are clamped to the model output maximum', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    const budgetsPerPrompt: Array<number | undefined> = []
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      await streamOnce(sessions[0]!, { maxTokens: 8192 })
+      budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
+      if (attempt === 1) {
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
+        return
+      }
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here is your answer' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(budgetsPerPrompt).toEqual([8192, 8192])
+    expect(sent.map((s) => s.text)).toEqual(['here is your answer'])
   })
 
   test('empty-turn guard: the raised retry budget does not leak into the next fresh user turn', async () => {
