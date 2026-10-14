@@ -54,15 +54,15 @@ Two live examples of the _diagnosability_ half of the same failure: issue **#137
 
 ## Brokered coding delegation
 
-`coding_agent` is the supported Claude Code delegation path. The authorized workflow is headless coding in a task-private Git database/worktree, supervised by an existing background operator. The threat is the entire model-controlled CLI tree obtaining reusable provider credentials. Keep those credentials in the trusted fixed-upstream broker; give the child only a scoped, deadline-bound local capability and explicit credential-free environment.
+`coding_agent` is the supported Claude Code and Codex delegation path. The authorized workflow is headless coding in a task-private Git database/worktree, supervised by an existing background operator. The threat is the entire model-controlled CLI tree obtaining reusable provider credentials. Keep those credentials in the trusted fixed-upstream broker; give the child only a scoped, deadline-bound local capability and explicit credential-free environment.
 
 Never weaken canonical masks, `resolvePrivilegedSandboxRuntime` default denial, PID/parent-death isolation, or proc probes. Git source inspection/snapshot/diff work also runs inside bwrap. Plan mode binds worktree/Git read-only. `.typeclaw/coding-agent-tasks.json` is runtime authority, not writable CLI artifacts. Test both denied attacks and valid work after denial.
 
 Never live-bind the source worktree or credential write directory into a coding child. Snapshot bootstrap binds only the source's `.git`; execution and artifact capture bind only task-private files. Existing-file masks cannot cover atomic credential rotation siblings or inode replacement. Committed-HEAD exclusion notices are unconditional because live dirty status is not inspected. Artifact capture clears assume-unchanged and skip-worktree flags only in its temporary index, never the CLI's real index.
 
-Claude profile exports, custom credential aliases, and TypeClaw Stop/SessionStart hooks are removed. Codex's separate legacy workflow remains unchanged and `coding_agent` rejects its engine as not yet available. No new operator config is required. The new core tool/plugin reference is a public surface and meets the release minor trigger.
+Claude/Codex profile exporters, Claude custom credential aliases, TypeClaw Stop/SessionStart hooks, and runtime-HOME seeds are removed. Codex uses a custom Responses provider in per-task `CODEX_HOME`, never `auth.json` or fabricated JWTs. Its only broker route is `POST /v1/responses` to the fixed ChatGPT Codex backend; bearer and account ID come from the trusted `openai-codex` credential, never the request. Disable WebSockets and remote compaction; use local compaction. TypeClaw alone owns refresh through the existing canonical-store lock. No new operator config is required. The core tool/plugin reference is a public surface and meets the release minor trigger.
 
-Before release, qualify the pinned official Claude binary through the production broker/bwrap profile on Linux amd64 and arm64: subscription first turn, real tools, explicit resume, refresh, compaction, redacted two-sided trace, and complete diff recovery. Fake upstreams cannot establish live subscription acceptance. Never substitute token injection for a failed gate.
+Before release, qualify pinned Claude Code 2.1.299 and Codex CLI 0.162.1 through the production broker/bwrap profile on Linux amd64 and arm64: subscription first turn, real tools, explicit resume, refresh, compaction, redacted two-sided trace, and complete diff recovery. The live ChatGPT subscription gate remains outstanding. Fake upstreams cannot establish live subscription acceptance. Never substitute token injection for a failed gate.
 
 ## Debugging the system prompt
 

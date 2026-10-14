@@ -1,18 +1,25 @@
 ---
 title: Delegate coding
-description: Run Claude Code through a credential broker in a persistent isolated worktree
+description: Run Claude Code or Codex through a credential broker in a persistent isolated worktree
 icon: Code
 ---
 
 ## Host setup
 
-Enable `docker.file.claudeCode:true` in the host agent folder's `typeclaw.json`, configure Anthropic with `typeclaw provider add anthropic`, then run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces and native FD-bind support. An older bwrap without `--bind-fd`/`--ro-bind-fd` requires a container-image rebuild. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
+Enable the chosen engine in the host agent folder's `typeclaw.json` and configure its provider:
 
-The installation pins Claude Code 2.1.299 under `/usr/local`. API-key and subscription credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate; local fake-upstream tests do not establish paid-provider acceptance.
+| Engine      | Installation toggle           | Host provider setup                  | Authentication                                    |
+| ----------- | ----------------------------- | ------------------------------------ | ------------------------------------------------- |
+| Claude Code | `docker.file.claudeCode:true` | `typeclaw provider add anthropic`    | Anthropic API key or subscription OAuth           |
+| Codex       | `docker.file.codexCli:true`   | `typeclaw provider add openai-codex` | ChatGPT subscription OAuth, not an OpenAI API key |
+
+Run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces and native FD-bind support. An older bwrap without `--bind-fd`/`--ro-bind-fd` requires a container-image rebuild. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
+
+The installation pins Claude Code 2.1.299 and Codex CLI 0.162.1 under `/usr/local`. Provider credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate for each engine. The live ChatGPT subscription gate is outstanding; fake-upstream and fake-executable tests do not establish paid-provider acceptance.
 
 ## Delegate and continue
 
-Ask the main agent to delegate a substantial task to Claude Code. It briefs a background operator; that operator calls:
+Ask the main agent to delegate a substantial task to Claude Code or Codex. It briefs a background operator; that operator calls:
 
 ```json
 {
@@ -26,15 +33,29 @@ Ask the main agent to delegate a substantial task to Claude Code. It briefs a ba
 }
 ```
 
-Choose a compatible configured/curated Anthropic model. Repositories may be the agent root, a configured mount root (including read-only mounts), or an accessible workspace repository. The tool uses **committed HEAD** and always warns that uncommitted source edits are excluded; it never stages or commits them. The live source worktree is not mounted or inspected for dirty status. Only its Git metadata is exposed during snapshot bootstrap. Dirty-input snapshots, linked source worktrees whose Git administration is outside the selected root, and authenticated recursive submodule imports are not supported.
+For Codex, use the same tool and lifecycle:
 
-The receipt includes `taskId`, `state`, `baseSha`, source/model identity, `worktreePath`, `finalMessage`, changed/untracked files, `patchPath`, exit code, and a safe diagnostic. Continue with `action:"run"`, `engine:"claude"`, the same `taskId`, and a new prompt. Do not supply a CLI session ID or select the latest conversation. Repository and model stay fixed. Concurrent resumes fail with "task already running."
+```json
+{
+  "action": "run",
+  "engine": "codex",
+  "repo": "/agent/mounts/project",
+  "modelRef": "openai-codex/gpt-6-sol",
+  "mode": "code",
+  "prompt": "Implement the requested change and run its tests.",
+  "timeoutSeconds": 1800
+}
+```
 
-Use `mode:"plan"` for a read-only worktree and Git database; explicitly choose `mode:"code"` for approved implementation. A final-message question needs a follow-up, not a sentinel polling loop.
+Choose a compatible configured/curated model: `anthropic/...` for Claude or `openai-codex/...` for Codex. Repositories may be the agent root, a configured mount root (including read-only mounts), or an accessible workspace repository. The tool uses **committed HEAD** and always warns that uncommitted source edits are excluded; it never stages or commits them. The live source worktree is not mounted or inspected for dirty status. Only its Git metadata is exposed during snapshot bootstrap. Dirty-input snapshots, linked source worktrees whose Git administration is outside the selected root, and authenticated recursive submodule imports are not supported.
+
+The receipt includes `taskId`, `engine`, `state`, `baseSha`, source/model identity, `worktreePath`, `finalMessage`, changed/untracked files, `patchPath`, exit code, and a safe diagnostic. Continue with `action:"run"`, the same engine and `taskId`, and a new prompt. Do not supply a CLI session ID or select the latest conversation. Engine, repository, and model stay fixed. Concurrent resumes fail with "task already running."
+
+Use `mode:"plan"` for a read-only worktree and Git database; explicitly choose `mode:"code"` for approved implementation. Codex receives a planning prompt under that profile, not an invented native plan flag. The runtime uses `codex exec --json`, records `thread.started`, and resumes that thread explicitly with `codex exec resume`. It reads completed agent-message items and terminal turn events plus process exit, not private rollout files or Stop hooks. A final-message question needs a follow-up, not a sentinel polling loop.
 
 ## Review and preserve results
 
-Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/`, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
+Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/` or `codex/` state, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
 
 `output/changes.patch` captures staged/unstaged edits, untracked files, deletions, modes, symlinks, and binary changes without changing the CLI's index. Capture clears assume-unchanged and skip-worktree flags only in a temporary index, so flagged tracked edits are included too. Oversized artifacts are marked incomplete rather than truncated. Review the patch and run acceptance checks before applying it through normal tools. The tool does not commit, merge, push, create PRs, or publish to channels.
 
@@ -50,10 +71,12 @@ Discard a stopped task only when its work is no longer needed:
 
 ## Authentication and limitations
 
-Missing/revoked credentials affect this task, not startup or other providers. Re-login on the **host** with `typeclaw provider add anthropic`; never paste tokens into chat or inspect protected profiles. Missing binary/sandbox errors require a host rebuild or namespace-policy repair. Ordinary `bash("claude ...")` does not receive broker authority.
+Missing/revoked credentials affect this task, not startup or other providers. Re-login on the **host** with `typeclaw provider add anthropic` or `typeclaw provider add openai-codex`; never paste tokens into chat or inspect protected profiles. Missing binary/sandbox errors require a host rebuild or namespace-policy repair. Ordinary shell execution of `claude` or `codex` does not receive broker authority.
 
-The broker permits only bounded inference requests for the task's primary and explicit helper model. Account management, connectors, remote control, and arbitrary authenticated cloud routes are not available. Capabilities expire at invocation end and grant inference use, not possession of provider credentials. They are not hard monetary budgets.
+The broker permits only bounded inference requests for the task's primary model and Claude's explicit helper-model set. Codex uses a generated custom Responses provider, no `auth.json`, and a local capability environment key. The only Codex route is `POST /v1/responses`, mapped to the fixed ChatGPT Codex backend; the trusted credential supplies both bearer and account ID. WebSockets and remote compaction are disabled; local compaction uses the same inference route.
+
+Account management, connectors, remote control, and arbitrary authenticated cloud routes are not available. Capabilities expire at invocation end and grant inference use, not possession of provider credentials. They are not hard monetary budgets.
 
 Credentials already exposed through `.env`, prompts, or arbitrary source objects are outside this confidentiality guarantee. Selected revisions containing protected canonical paths are rejected for that task; this is not a general history secret scanner.
 
-`engine:"codex"` returns "not yet available." Installing Codex does not enable this brokered workflow.
+TypeClaw owns token refresh for both engines. It no longer exports Claude/Codex credential profiles or installs TypeClaw Stop/SessionStart hooks. The Codex runner's externally sandboxed flags apply only inside outer bwrap; they are not a host invocation recipe.
