@@ -13,6 +13,7 @@ import { createCodingAgentAuthResolver, type CodingAgentAuthResolver } from '@/s
 
 import { CLAUDE_AUXILIARY_MODELS, CLAUDE_CODE_VERSION } from './claude'
 import { CODEX_CLI_VERSION } from './codex'
+import { OMO_CLI_VERSION, omoModelSchema } from './omo'
 import { runCodingAgent, type CodingRunOptions, type CodingRunResult } from './runner'
 import {
   captureCodingChanges,
@@ -31,7 +32,7 @@ import {
 export const codingRequestSchema = z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('run'),
-    engine: z.enum(['claude', 'codex']),
+    engine: z.enum(['claude', 'codex', 'omo']),
     repo: z.string().min(1).optional(),
     modelRef: z.string().min(1).optional(),
     taskId: z.string().uuid().optional(),
@@ -43,32 +44,44 @@ export const codingRequestSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('dispose'), taskId: z.string().uuid(), discard: z.literal(true) }),
 ])
 export type CodingRequest = z.infer<typeof codingRequestSchema>
-const taskSchema = z.object({
-  // PR2 registries predate the engine field and contain only Claude tasks.
-  engine: z.enum(['claude', 'codex']).default('claude'),
-  taskId: z.string().uuid(),
-  ownerSessionId: z.string(),
-  parentSessionId: z.string().optional(),
-  principal: z.string(),
-  role: z.string(),
-  modelRef: z.string(),
-  model: z.string(),
-  mode: z.enum(['plan', 'code']),
-  permissions: z.array(z.string()),
-  allowedModels: z.array(z.string()),
-  engineVersion: z.string(),
-  source: z.string(),
-  sourceIdentity: z.string(),
-  baseSha: z.string(),
-  sessionId: z.string().uuid().optional(),
-  state: z.enum(['running', 'completed', 'incomplete', 'failed', 'cancelled', 'interrupted']),
-  finalMessage: z.string().default(''),
-  exitCode: z.number().nullable().default(null),
-  diagnostic: z.string().default(''),
-  changedFiles: z.array(z.string()).default([]),
-  untrackedFiles: z.array(z.string()).default([]),
-  oversized: z.boolean().default(false),
-})
+const taskSchema = z
+  .object({
+    // PR2 registries predate the engine field and contain only Claude tasks.
+    engine: z.enum(['claude', 'codex', 'omo']).default('claude'),
+    provider: z.enum(['anthropic', 'openai-codex']).optional(),
+    modelMetadata: omoModelSchema.optional(),
+    taskId: z.string().uuid(),
+    ownerSessionId: z.string(),
+    parentSessionId: z.string().optional(),
+    principal: z.string(),
+    role: z.string(),
+    modelRef: z.string(),
+    model: z.string(),
+    mode: z.enum(['plan', 'code']),
+    permissions: z.array(z.string()),
+    allowedModels: z.array(z.string()),
+    engineVersion: z.string(),
+    source: z.string(),
+    sourceIdentity: z.string(),
+    baseSha: z.string(),
+    sessionId: z.string().uuid().optional(),
+    state: z.enum(['running', 'completed', 'incomplete', 'failed', 'cancelled', 'interrupted']),
+    finalMessage: z.string().default(''),
+    exitCode: z.number().nullable().default(null),
+    diagnostic: z.string().default(''),
+    changedFiles: z.array(z.string()).default([]),
+    untrackedFiles: z.array(z.string()).default([]),
+    oversized: z.boolean().default(false),
+  })
+  .refine((task) => task.engine !== 'omo' || (task.provider !== undefined && task.modelMetadata?.id === task.model), {
+    message: 'OmO tasks require recorded provider and model metadata.',
+  })
+  .transform((task) => ({
+    ...task,
+    provider: task.provider ?? (task.engine === 'claude' ? ('anthropic' as const) : ('openai-codex' as const)),
+  }))
+const ENGINE_VERSIONS = { claude: CLAUDE_CODE_VERSION, codex: CODEX_CLI_VERSION, omo: OMO_CLI_VERSION } as const
+const ENGINE_TOGGLES = { claude: 'claudeCode', codex: 'codexCli', omo: 'omoCli' } as const
 type CodingTask = z.infer<typeof taskSchema>
 export type CodingCaller = {
   readonly sessionId: string
@@ -189,7 +202,7 @@ export class CodingAgentService {
         ) {
           throw new Error('A resumed task keeps its recorded engine, repository and model.')
         }
-        if (task.engineVersion !== (task.engine === 'claude' ? CLAUDE_CODE_VERSION : CODEX_CLI_VERSION))
+        if (task.engineVersion !== ENGINE_VERSIONS[task.engine])
           throw new Error('Task CLI version changed; preserve and review its diff before migrating.')
         if (!task.sessionId)
           throw new Error('This task has no resumable CLI session. Its partial work remains available.')
@@ -215,11 +228,22 @@ export class CodingAgentService {
     if (!request.repo || !request.modelRef)
       throw new Error('A new task requires repo and a concrete engine-compatible modelRef.')
     const config = getConfig()
-    const toggle = request.engine === 'claude' ? 'claudeCode' : 'codexCli'
-    const provider = request.engine === 'claude' ? 'anthropic' : 'openai-codex'
+    const toggle = ENGINE_TOGGLES[request.engine]
+    const provider =
+      request.engine === 'omo'
+        ? request.modelRef.startsWith('anthropic/')
+          ? 'anthropic'
+          : request.modelRef.startsWith('openai-codex/')
+            ? 'openai-codex'
+            : undefined
+        : request.engine === 'claude'
+          ? 'anthropic'
+          : 'openai-codex'
     if (!config.docker.file[toggle] && !this.dependencies.run) {
       throw new Error(`Enable docker.file.${toggle} on the host and run \`typeclaw start\` to rebuild the image.`)
     }
+    if (!provider)
+      throw new Error('OmO requires an anthropic or openai-codex modelRef; other providers are not brokered.')
     if (
       !request.modelRef.startsWith(`${provider}/`) ||
       !(
@@ -228,7 +252,8 @@ export class CodingAgentService {
       )
     )
       throw new Error(`Select a configured or curated ${provider} modelRef.`)
-    const model = resolveModel(request.modelRef).id
+    const resolvedModel = resolveModel(request.modelRef)
+    const model = resolvedModel.id
     const source = await resolveCodingSource(
       this.agentDir,
       request.repo,
@@ -240,6 +265,8 @@ export class CodingAgentService {
     const identity = await lstat(source)
     const task: CodingTask = {
       engine: request.engine,
+      provider,
+      ...(request.engine === 'omo' ? { modelMetadata: omoModelSchema.parse(resolvedModel) } : {}),
       taskId,
       ownerSessionId: caller.sessionId,
       ...(caller.origin?.kind === 'subagent' ? { parentSessionId: caller.origin.parentSessionId } : {}),
@@ -250,7 +277,7 @@ export class CodingAgentService {
       model,
       mode: request.mode ?? 'code',
       allowedModels: [...new Set([model, ...(request.engine === 'claude' ? CLAUDE_AUXILIARY_MODELS : [])])],
-      engineVersion: request.engine === 'claude' ? CLAUDE_CODE_VERSION : CODEX_CLI_VERSION,
+      engineVersion: ENGINE_VERSIONS[request.engine],
       source,
       sourceIdentity: `${identity.dev}:${identity.ino}`,
       baseSha: '',
@@ -295,11 +322,13 @@ export class CodingAgentService {
       const source = await lstat(task.source)
       if (`${source.dev}:${source.ino}` !== task.sourceIdentity) throw new Error('Source repository identity changed.')
       const auth = await this.resolver()
-      await auth.resolve(combined, undefined, task.engine === 'claude' ? 'anthropic' : 'openai-codex')
+      await auth.resolve(combined, undefined, task.provider)
       task.state = 'running'
       await this.save()
       const result = await (this.dependencies.run ?? runCodingAgent)({
         engine: task.engine,
+        provider: task.provider,
+        ...(task.modelMetadata ? { modelMetadata: task.modelMetadata } : {}),
         workspace,
         auth,
         model: task.model,
@@ -373,6 +402,7 @@ export class CodingAgentService {
       baseSha: task.baseSha,
       source: task.source,
       engine: task.engine,
+      provider: task.provider,
       modelRef: task.modelRef,
       engineVersion: task.engineVersion,
       worktreePath: join(root, 'worktree'),

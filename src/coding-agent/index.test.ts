@@ -231,7 +231,7 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
     await expect(service.execute(request, channelCaller)).rejects.toThrow()
   })
 
-  test.each(['claude', 'codex'] as const)(
+  test.each(['claude', 'codex', 'omo'] as const)(
     '%s plan resumes stay read-only until an explicit code transition',
     async (engine) => {
       const modes: string[] = []
@@ -291,5 +291,104 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
     expect((await service.execute(runRequest(), caller)).state).toBe('completed')
     missing = false
     expect((await service.execute(codex, caller)).state).toBe('completed')
+  })
+
+  test.each(['openai/gpt-6', 'google/gemini', 'anthropic/not-configured'])(
+    'rejects non-brokered OmO selection %s before authentication',
+    async (modelRef) => {
+      let resolved = false
+      service = new CodingAgentService(root, {
+        run: async () => result,
+        auth: async () => {
+          resolved = true
+          throw new Error('must not resolve')
+        },
+      })
+      await expect(
+        service.execute(codingRequestSchema.parse({ ...runRequest(), engine: 'omo', modelRef }), caller),
+      ).rejects.toThrow()
+      expect(resolved).toBe(false)
+    },
+  )
+
+  test('missing OmO provider auth leaves other engines and providers available', async () => {
+    let missing = true
+    service = new CodingAgentService(root, {
+      executor: () => local,
+      sourcePath: (source) => source,
+      writeArtifact: (path, text) => writeFile(path, text),
+      run: async () => result,
+      auth: async () => ({
+        resolve: async (_signal, _rejected, provider = 'anthropic') => {
+          if (provider === 'anthropic') return { provider, type: 'api_key', token: 'fixture', secrets: ['fixture'] }
+          if (missing) throw new Error('Missing fixture subscription')
+          return { provider, type: 'oauth', token: 'fixture', accountId: 'fixture-account', secrets: ['fixture'] }
+        },
+      }),
+    })
+    const omo = codingRequestSchema.parse({ ...runRequest(), engine: 'omo', modelRef: 'openai-codex/gpt-6-sol' })
+    await expect(service.execute(omo, caller)).rejects.toThrow('Missing fixture subscription')
+    expect((await service.execute(runRequest(), caller)).state).toBe('completed')
+    expect((await service.execute(codingRequestSchema.parse({ ...runRequest(), engine: 'omo' }), caller)).state).toBe(
+      'completed',
+    )
+    expect(await local(['/bin/sh', '-c', 'printf ordinary-command'], root)).toBe('ordinary-command')
+    missing = false
+    expect((await service.execute(omo, caller)).state).toBe('completed')
+  })
+
+  test.each(['claude', 'codex'] as const)('loads legacy %s tasks without a stored provider', async (engine) => {
+    service = makeService()
+    const taskId = idOf(
+      await service.execute(
+        codingRequestSchema.parse({
+          ...runRequest(),
+          engine,
+          modelRef: engine === 'claude' ? 'anthropic/claude-opus-5-5' : 'openai-codex/gpt-6-sol',
+        }),
+        caller,
+      ),
+    )
+    await service.stop()
+    const path = join(root, '.typeclaw', 'coding-agent-tasks.json')
+    const records = JSON.parse(await readFile(path, 'utf8'))
+    delete records[0].provider
+    if (engine === 'claude') delete records[0].engine
+    await writeFile(path, JSON.stringify(records))
+    service = makeService()
+    expect(await service.execute(codingRequestSchema.parse({ action: 'result', taskId }), caller)).toMatchObject({
+      engine,
+      provider: engine === 'claude' ? 'anthropic' : 'openai-codex',
+      state: 'completed',
+    })
+  })
+
+  test('OmO resume rejects changed model and CLI version without losing its result', async () => {
+    service = makeService()
+    const taskId = idOf(await service.execute(codingRequestSchema.parse({ ...runRequest(), engine: 'omo' }), caller))
+    await expect(
+      service.execute(
+        codingRequestSchema.parse({
+          action: 'run',
+          engine: 'omo',
+          taskId,
+          modelRef: 'openai-codex/gpt-6-sol',
+          prompt: 'change provider',
+        }),
+        caller,
+      ),
+    ).rejects.toThrow('recorded engine')
+    await service.stop()
+    const path = join(root, '.typeclaw', 'coding-agent-tasks.json')
+    const records = JSON.parse(await readFile(path, 'utf8'))
+    records[0].engineVersion = '0.0.0'
+    await writeFile(path, JSON.stringify(records))
+    service = makeService()
+    await expect(
+      service.execute(codingRequestSchema.parse({ action: 'run', engine: 'omo', taskId, prompt: 'resume' }), caller),
+    ).rejects.toThrow('version changed')
+    expect((await service.execute(codingRequestSchema.parse({ action: 'result', taskId }), caller)).state).toBe(
+      'completed',
+    )
   })
 })

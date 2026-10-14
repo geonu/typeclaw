@@ -54,7 +54,7 @@ Two live examples of the _diagnosability_ half of the same failure: issue **#137
 
 ## Brokered coding delegation
 
-`coding_agent` is the supported Claude Code and Codex delegation path. The authorized workflow is headless coding in a task-private Git database/worktree, supervised by an existing background operator. The threat is the entire model-controlled CLI tree obtaining reusable provider credentials. Keep those credentials in the trusted fixed-upstream broker; give the child only a scoped, deadline-bound local capability and explicit credential-free environment.
+`coding_agent` is the supported Claude Code, Codex, and OmO Native delegation path. The authorized workflow is headless coding in a task-private Git database/worktree, supervised by an existing background operator. The threat is the entire model-controlled CLI tree obtaining reusable provider credentials. Keep those credentials in the trusted fixed-upstream broker; give the child only a scoped, deadline-bound local capability and explicit credential-free environment.
 
 Never weaken canonical masks, `resolvePrivilegedSandboxRuntime` default denial, PID/parent-death isolation, or proc probes. Git source inspection/snapshot/diff work also runs inside bwrap. Plan mode binds worktree/Git read-only. `.typeclaw/coding-agent-tasks.json` is runtime authority, not writable CLI artifacts. Test both denied attacks and valid work after denial.
 
@@ -63,6 +63,8 @@ Never live-bind the source worktree or credential write directory into a coding 
 Claude/Codex profile exporters, Claude custom credential aliases, TypeClaw Stop/SessionStart hooks, and runtime-HOME seeds are removed. Codex uses a custom Responses provider in per-task `CODEX_HOME`, never `auth.json` or fabricated JWTs. Its only broker route is `POST /v1/responses` to the fixed ChatGPT Codex backend; bearer and account ID come from the trusted `openai-codex` credential, never the request. Disable WebSockets and remote compaction; use local compaction. TypeClaw alone owns refresh through the existing canonical-store lock. No new operator config is required. The core tool/plugin reference is a public surface and meets the release minor trigger.
 
 Before release, qualify pinned Claude Code 2.1.299 and Codex CLI 0.162.1 through the production broker/bwrap profile on Linux amd64 and arm64: subscription first turn, real tools, explicit resume, refresh, compaction, redacted two-sided trace, and complete diff recovery. The live ChatGPT subscription gate remains outstanding. Fake upstreams cannot establish live subscription acceptance. Never substitute token injection for a failed gate.
+
+OmO Native 5.1.19 is optional via `docker.file.omoCli` (restart-required under `docker.file`). Its backing provider and model metadata are persisted per task. Main, category, named-agent, and compaction calls use one brokered model; memory side models, telemetry, updates, ambient OAuth extensions, and MCP startup are disabled. Its Codex route is the exact `/v1/codex/responses` alias with bounded zstd decoding; its Anthropic OAuth capability prefix selects client request shaping without exposing a real token. Preserve the exact-session existence check and project-config operand masks. Live subscription and Linux amd64/arm64 bwrap acceptance remain release gates. The new installation field is a public configuration surface and meets the release minor trigger.
 
 ## Debugging the system prompt
 

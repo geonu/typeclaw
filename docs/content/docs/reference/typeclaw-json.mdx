@@ -162,22 +162,23 @@ For canonical host paths worth mounting per use case — voice memos, screenshot
 
 ## `docker.file`
 
-| Toggle        | Default  | Effect                                                                                                                                                   |
-| ------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gh`          | `true`   | install GitHub CLI                                                                                                                                       |
-| `python`      | `true`   | install Python 3 + uv                                                                                                                                    |
-| `tmux`        | `true`   | install tmux                                                                                                                                             |
-| `ffmpeg`      | `false`  | install ffmpeg                                                                                                                                           |
-| `cjkFonts`    | `'auto'` | install `fonts-noto-cjk` so Chromium renders CJK glyphs; `'auto'` installs only when the host locale is CJK (ja/ko/zh)                                   |
-| `cloudflared` | `false`  | install cloudflared for `cloudflare-quick` tunnels (`tunnel add` / `channel add github` flip this on automatically)                                      |
-| `xvfb`        | `true`   | install Xvfb for headed Chrome                                                                                                                           |
-| `claudeCode`  | `false`  | install Claude Code 2.1.299 under `/usr/local/lib/typeclaw-coding-agents/claude/2.1.299/`, linked from `/usr/local/bin/claude`                           |
-| `codexCli`    | `false`  | install `@openai/codex@0.162.1` (launcher and native binary) under `/usr/local/lib/typeclaw-coding-agents/codex/`, with the launcher in `/usr/local/bin` |
-| `append`      | `[]`     | extra Dockerfile lines appended verbatim                                                                                                                 |
+| Toggle        | Default  | Effect                                                                                                                                                       |
+| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gh`          | `true`   | install GitHub CLI                                                                                                                                           |
+| `python`      | `true`   | install Python 3 + uv                                                                                                                                        |
+| `tmux`        | `true`   | install tmux                                                                                                                                                 |
+| `ffmpeg`      | `false`  | install ffmpeg                                                                                                                                               |
+| `cjkFonts`    | `'auto'` | install `fonts-noto-cjk` so Chromium renders CJK glyphs; `'auto'` installs only when the host locale is CJK (ja/ko/zh)                                       |
+| `cloudflared` | `false`  | install cloudflared for `cloudflare-quick` tunnels (`tunnel add` / `channel add github` flip this on automatically)                                          |
+| `xvfb`        | `true`   | install Xvfb for headed Chrome                                                                                                                               |
+| `claudeCode`  | `false`  | install Claude Code 2.1.299 under `/usr/local/lib/typeclaw-coding-agents/claude/2.1.299/`, linked from `/usr/local/bin/claude`                               |
+| `codexCli`    | `false`  | install `@openai/codex@0.162.1` (launcher and native binary) under `/usr/local/lib/typeclaw-coding-agents/codex/`, with the launcher in `/usr/local/bin`     |
+| `omoCli`      | `false`  | Install digest-verified OmO Native 5.1.19 for Linux arm64/amd64 under `/usr/local/lib/typeclaw-coding-agents/omo/5.1.19/`, linked from `/usr/local/bin/omo`. |
+| `append`      | `[]`     | extra Dockerfile lines appended verbatim                                                                                                                     |
 
-Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` and `codexCli` are boolean-only; their version pins are owned by the TypeClaw release. Their root-owned executable paths under `/usr/local` are visible inside model bash's bwrap sandbox; enabling them does not expose protected authentication profiles. `cjkFonts` accepts `true`/`false`/`'auto'`: `'auto'` (the default) resolves at `typeclaw start` from the host locale, while an explicit boolean forces the decision.
+Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode`, `codexCli`, and `omoCli` are boolean-only; their version pins are owned by the TypeClaw release. Their root-owned executable paths under `/usr/local` are visible inside model bash's bwrap sandbox; enabling them does not expose protected authentication profiles. `cjkFonts` accepts `true`/`false`/`'auto'`: `'auto'` (the default) resolves at `typeclaw start` from the host locale, while an explicit boolean forces the decision.
 
-Both installation toggles support the same brokered `coding_agent` tool. Claude uses `providers.anthropic`; Codex uses ChatGPT subscription OAuth in `providers.openai-codex`, not an OpenAI API key. Provider credentials remain runtime-private; per-task CLI state contains no exported auth profile. No global TypeClaw Stop/SessionStart hooks or runtime-HOME seeds are installed. See [Delegate coding](/docs/guides/delegate-coding) for setup, explicit resume, and read-only planning. The pinned versions are compatibility candidates; live subscription and production Linux bwrap qualification are release gates, not implied by successful installation.
+All three installation toggles support the same brokered `coding_agent` tool. Claude uses `providers.anthropic`; Codex uses ChatGPT subscription OAuth in `providers.openai-codex`, not an OpenAI API key. OmO selects either provider from its task model and pins internal model calls to that brokered model. Provider credentials remain runtime-private; per-task CLI state contains no exported auth profile. No global TypeClaw Stop/SessionStart hooks or runtime-HOME seeds are installed. See [Delegate coding](/docs/guides/delegate-coding) for setup, explicit resume, and read-only planning. The pinned versions are compatibility candidates; live subscription and production Linux bwrap qualification are release gates, not implied by successful installation.
 
 ## Hot reload
 

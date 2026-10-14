@@ -5,11 +5,14 @@ import { join } from 'node:path'
 import { readOomEvents, toolOomNote } from '@/container/oom-events'
 import { withToolOomPriorityArgv } from '@/container/tool-oom-priority'
 import { prepareCodingCommand } from '@/sandbox/coding-agent'
-import type { CodingAgentAuthResolver } from '@/secrets/coding-agent-auth'
+import type { CodingAgentAuthResolver, CodingAgentProvider } from '@/secrets/coding-agent-auth'
 
 import { SecretScrubber, startCodingBroker, type CodingBroker } from './broker'
 import { ClaudeStreamParser, claudeArguments, claudeEnvironment, type CodingMode } from './claude'
 import { CodexStreamParser, codexArguments, codexConfig, codexEnvironment } from './codex'
+import { omoArguments, omoConfiguration, omoEnvironment, type OmoModel } from './omo'
+import { hasOmoSession, prepareOmoDirectories } from './omo-state'
+import { OmoStreamParser } from './omo-stream'
 import type { CodingWorkspace } from './worktree'
 
 export type CodingRunResult = {
@@ -21,7 +24,9 @@ export type CodingRunResult = {
 }
 
 export type CodingRunOptions = {
-  readonly engine?: 'claude' | 'codex'
+  readonly engine?: 'claude' | 'codex' | 'omo'
+  readonly provider?: CodingAgentProvider
+  readonly modelMetadata?: OmoModel
   readonly workspace: CodingWorkspace
   readonly auth: CodingAgentAuthResolver
   readonly model: string
@@ -52,31 +57,65 @@ export async function runCodingAgent(
   const timer = setTimeout(() => timeout.abort(), options.timeoutSeconds * 1000)
   let broker: CodingBroker | undefined
   let cleanupPrepared: (() => Promise<void>) | undefined
-  const parser = engine === 'claude' ? new ClaudeStreamParser() : new CodexStreamParser()
+  const cwd = join(options.workspace.taskRoot, 'worktree')
+  const parser =
+    engine === 'claude'
+      ? new ClaudeStreamParser()
+      : engine === 'codex'
+        ? new CodexStreamParser()
+        : new OmoStreamParser({ sessionId: options.sessionId, cwd })
   let stdout = ''
+  let stdoutTail = ''
   let stderr = ''
   let exitCode: number | null = null
   let failure = false
+  let missingSession = false
   const oom = readOomEvents()
   try {
     signal.throwIfAborted()
+    const provider = options.provider ?? (engine === 'claude' ? 'anthropic' : 'openai-codex')
+    const configDir = join(options.workspace.taskRoot, engine)
+    if (engine === 'omo') {
+      if (!options.provider || options.modelMetadata?.id !== options.model)
+        throw new Error('Missing OmO model metadata.')
+      if (options.resume && !(await hasOmoSession(configDir, options.sessionId, cwd))) {
+        missingSession = true
+        throw new Error('OmO session is missing or unsafe.')
+      }
+      await prepareOmoDirectories(configDir)
+    }
     broker = await (testDependencies?.broker ?? startCodingBroker)({
-      provider: engine === 'claude' ? 'anthropic' : 'openai-codex',
+      engine,
+      provider,
       auth: options.auth,
       allowedModels: options.allowedModels,
       deadline,
       signal,
     })
-    const configDir = join(options.workspace.taskRoot, engine)
     if (engine === 'codex') {
       await options.writeArtifact(join(configDir, 'config.toml'), codexConfig(options.model, broker.baseUrl))
+    }
+    if (engine === 'omo' && options.modelMetadata) {
+      const config = omoConfiguration({ configDir, baseUrl: broker.baseUrl, provider, model: options.modelMetadata })
+      for (const [path, value] of [
+        ['agent/models.json', config.models],
+        ['agent/settings.json', config.settings],
+        ['home/.omo/omo.jsonc', config.orchestration],
+      ] as const)
+        await options.writeArtifact(join(configDir, path), JSON.stringify(value, null, 2))
     }
     const env =
       engine === 'claude'
         ? claudeEnvironment(configDir, broker.baseUrl, broker.capability)
-        : codexEnvironment(configDir, broker.capability)
-    const args = engine === 'claude' ? claudeArguments(options) : codexArguments(options)
-    const cwd = join(options.workspace.taskRoot, 'worktree')
+        : engine === 'codex'
+          ? codexEnvironment(configDir, broker.capability)
+          : omoEnvironment(configDir, broker.capability)
+    const args =
+      engine === 'claude'
+        ? claudeArguments(options)
+        : engine === 'codex'
+          ? codexArguments(options)
+          : omoArguments({ ...options, configDir })
     const prepared: {
       argv: string[]
       env: Record<string, string>
@@ -90,6 +129,7 @@ export async function runCodingAgent(
           cwd,
           mode: options.mode,
           env,
+          engine,
         }).then((command) => ({
           argv: ['bash', '-c', `exec ${command.commandString}`],
           env: command.spawnEnv,
@@ -143,11 +183,18 @@ export async function runCodingAgent(
       const final = scrubber.push(decoder.decode(), true)
       if (output) {
         stdout += final
-        parser.push(final)
-        parser.finish()
+        stdoutTail = final
       } else stderr += final
     }
-    const reads = [consume(child.stdout, true), consume(child.stderr, false)]
+    // Observe pipe/parser failures immediately, including the decoder's final
+    // flush. Waiting for process exit before attaching a rejection handler can
+    // leave an oversized final JSONL record as an unhandled rejection.
+    const reads = [consume(child.stdout, true), consume(child.stderr, false)].map((read) =>
+      read.catch(() => {
+        failure = true
+        kill()
+      }),
+    )
     signal.addEventListener('abort', kill, { once: true })
     child.stdin.on('error', () => {
       failure = true
@@ -156,13 +203,17 @@ export async function runCodingAgent(
       if (signal.aborted) kill()
       else
         child.stdin.end(
-          engine === 'codex' && options.mode === 'plan'
+          engine !== 'claude' && options.mode === 'plan'
             ? `Plan this task without modifying the repository. The worktree and Git database are read-only.\n\n${options.prompt}`
             : options.prompt,
         )
       const [code, killedBy] = await closed
       exitCode = typeof code === 'number' ? code : killedBy === 'SIGKILL' ? 137 : null
       await Promise.all(reads)
+      // The decoder/scrubber tail is available only at EOF. Validate it after
+      // reaping, rather than attempting to kill a process already exiting.
+      parser.push(stdoutTail)
+      parser.finish()
     } finally {
       signal.removeEventListener('abort', kill)
       kill()
@@ -185,11 +236,13 @@ export async function runCodingAgent(
     ? 'incomplete'
     : options.signal?.aborted
       ? 'cancelled'
-      : failure || exitCode !== 0 || parser.failed || parser.malformed
-        ? 'failed'
-        : !parser.terminal || parser.permissionDenied || (engine === 'codex' && !parser.sessionId)
-          ? 'incomplete'
-          : 'completed'
+      : missingSession
+        ? 'incomplete'
+        : failure || exitCode !== 0 || parser.failed || parser.malformed
+          ? 'failed'
+          : !parser.terminal || parser.permissionDenied || (engine !== 'claude' && !parser.sessionId)
+            ? 'incomplete'
+            : 'completed'
   return {
     state,
     finalMessage: parser.finalMessage,
@@ -199,10 +252,12 @@ export async function runCodingAgent(
       toolOomNote(oom, exitCode ?? 0, 'coding_agent') ??
       (state === 'completed'
         ? ''
-        : timedOut
-          ? 'Invocation timed out; partial work is preserved.'
-          : parser.permissionDenied
-            ? 'The coding CLI reported a permission denial; review the task and continue explicitly.'
-            : 'Invocation did not complete. Inspect the saved output and partial diff; verify the installed CLI and sandbox.'),
+        : missingSession
+          ? 'The recorded OmO session is missing or unsafe. Restore its task-local session file before resuming; partial work is preserved.'
+          : timedOut
+            ? 'Invocation timed out; partial work is preserved.'
+            : parser.permissionDenied
+              ? 'The coding CLI reported a permission denial; review the task and continue explicitly.'
+              : 'Invocation did not complete. Inspect the saved output and partial diff; verify the installed CLI and sandbox.'),
   }
 }

@@ -17,14 +17,14 @@ export function createCodingAgentTool(options: {
     name: 'coding_agent',
     label: 'Coding Agent',
     description:
-      'Run headless Claude Code or Codex in an isolated persistent Git worktree through the credential broker. ' +
-      'Use a background operator for long runs. New tasks require repo and an anthropic (claude) or openai-codex (codex) modelRef; continuation uses taskId. ' +
+      'Run headless Claude Code, Codex or OmO in an isolated persistent Git worktree through the credential broker. ' +
+      'Use a background operator for long runs. New tasks require repo and an anthropic (claude/omo) or openai-codex (codex/omo) modelRef; continuation uses taskId. ' +
       'The baseline is committed HEAD, not dirty source files. Inspect state, finalMessage and the complete patch before applying. ' +
       'Plan mode makes the worktree and Git database read-only. result reads a receipt; dispose requires explicit discard:true.',
     parameters: Type.Union([
       Type.Object({
         action: Type.Literal('run'),
-        engine: Type.Union([Type.Literal('claude'), Type.Literal('codex')]),
+        engine: Type.Union([Type.Literal('claude'), Type.Literal('codex'), Type.Literal('omo')]),
         repo: Type.Optional(Type.String()),
         modelRef: Type.Optional(Type.String()),
         taskId: Type.Optional(Type.String()),
