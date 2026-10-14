@@ -177,7 +177,7 @@ For canonical host paths worth mounting per use case — voice memos, screenshot
 
 Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` and `codexCli` are boolean-only; their version pins are owned by the TypeClaw release. Their root-owned executable paths under `/usr/local` are visible inside model bash's bwrap sandbox; enabling them does not expose protected authentication profiles. `cjkFonts` accepts `true`/`false`/`'auto'`: `'auto'` (the default) resolves at `typeclaw start` from the host locale, while an explicit boolean forces the decision.
 
-Claude Code uses a pinned `/usr/local` executable visible to bwrap. Its provider credentials remain runtime-private; see [Delegate coding](/docs/guides/delegate-coding). The Codex installation toggle does not enable brokered delegation: `coding_agent` currently rejects `engine:"codex"`.
+Both installation toggles support the same brokered `coding_agent` tool. Claude uses `providers.anthropic`; Codex uses ChatGPT subscription OAuth in `providers.openai-codex`, not an OpenAI API key. Provider credentials remain runtime-private; per-task CLI state contains no exported auth profile. No global TypeClaw Stop/SessionStart hooks or runtime-HOME seeds are installed. See [Delegate coding](/docs/guides/delegate-coding) for setup, explicit resume, and read-only planning. The pinned versions are compatibility candidates; live subscription and production Linux bwrap qualification are release gates, not implied by successful installation.
 
 ## Hot reload
 

@@ -301,7 +301,7 @@ describe('codexCli toggle', () => {
     expect(out).not.toContain('"approval_policy": "never"')
   })
 
-  test('codexCli toggle does NOT touch any Claude Code paths — distinct hook script names (typeclaw-cx-* vs typeclaw-cc-*) and distinct settings file (~/.codex/hooks.json vs ~/.claude/settings.json) so an agent with BOTH toggles on does not have the two CLIs racing on the same sentinel files', () => {
+  test('codexCli does not install Claude Code', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true, claudeCode: false }))
     expect(out).not.toContain('typeclaw-cc-')
     expect(out).not.toContain('.claude/settings.json')
@@ -312,253 +312,10 @@ describe('codexCli toggle', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true, claudeCode: true }))
     expect(out).toContain('@openai/codex')
     expect(out).toContain('claude.ai/install.sh')
-    expect(out).toContain('typeclaw-cx-stop-hook')
-    expect(out).not.toContain('typeclaw-cc-stop-hook')
-    expect(out).toContain('.codex/hooks.json')
-    expect(out).not.toContain('.claude/settings.json')
-  })
-})
-
-describe('Codex CLI global Stop hook (pre-baked into the image)', () => {
-  function extractStopHookScript(out: string): string {
-    const match = out.match(
-      /cat > \/usr\/local\/bin\/typeclaw-cx-stop-hook <<'TYPECLAW_CX_STOP_HOOK_EOF'\n([\s\S]*?)TYPECLAW_CX_STOP_HOOK_EOF/,
-    )
-    if (!match || !match[1]) throw new Error('typeclaw-cx-stop-hook heredoc not found')
-    return match[1]
-  }
-
-  function extractGlobalHooks(out: string): unknown {
-    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.codex\/hooks\.json"/)
-    if (!match || !match[1]) throw new Error('~/.codex/hooks.json printf not found')
-    return JSON.parse(match[1])
-  }
-
-  test('codexCli: true writes the hook script at /usr/local/bin/typeclaw-cx-stop-hook (stable absolute path) and chmods it executable in the same chmod call as the SessionStart hook', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('cat > /usr/local/bin/typeclaw-cx-stop-hook')
-    expect(out).toMatch(/chmod \+x [^\n]*\/usr\/local\/bin\/typeclaw-cx-stop-hook/)
-  })
-
-  test('hook script is delivered via a single-quoted heredoc so $PWD and $sid survive docker build and are expanded at runtime (NOT at build time)', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain("<<'TYPECLAW_CX_STOP_HOOK_EOF'")
-    const script = extractStopHookScript(out)
-    expect(script).toContain('${PWD}/sentinel-${sid}.json')
-    expect(script).toContain('${PWD}/.done-${sid}')
-  })
-
-  test('hook script writes to $PWD, NOT $CLAUDE_PROJECT_DIR or any Codex equivalent — same critical-bug guard as the Claude Code Stop hook', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).not.toContain('CLAUDE_PROJECT_DIR')
-    expect(script).not.toContain('CODEX_PROJECT_DIR')
-  })
-
-  test('hook script encodes session_id in the filename — concurrent-codex race safety', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('sentinel-${sid}.json')
-    expect(script).toContain('.done-${sid}')
-    expect(script).not.toMatch(/"\$\{PWD\}\/sentinel\.json"/)
-  })
-
-  test('hook script extracts session_id via `bun -e` (real JSON parser, not sed) — defense against shadow attacks where last_assistant_message contains escaped `"session_id":"..."` text that greedy sed would extract instead of the structural top-level field', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('bun -e ')
-    expect(script).toContain('Bun.file')
-    expect(script).toContain('.session_id')
-    expect(script).not.toContain('sed -n ')
-    expect(script).not.toContain('jq ')
-    expect(script).not.toContain('python3')
-  })
-
-  test('hook script validates extracted session_id against UUID shape (8-4-4-4-12 hex)', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('case "$sid" in')
-    expect(script).toMatch(
-      /\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]/,
-    )
-  })
-
-  test('hook script falls back to sid=malformed when session_id extraction or validation fails', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('sid=malformed')
-  })
-
-  test('hook script writes sentinel atomically via temp-then-rename — the polling loop never sees a partial JSON payload. The temp file lives under .cx-stop-hook-in.<PID> (distinct from the Claude Code .cc-stop-hook-in.<PID>) so an agent with both toggles on does not race on the same temp file', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('.cx-stop-hook-in')
-    expect(script).not.toContain('.cc-stop-hook-in')
-    expect(script).toMatch(/cat > "\$tmp_in"[\s\S]*mv "\$tmp_in" "\$\{PWD\}\/sentinel-/)
-  })
-
-  test('Stop hook script reads the temp file via process.argv[1] (NOT argv[2]) — bun -e strips the -e flag and code-string from argv, unlike Node which preserves them', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('process.argv[1]')
-    expect(script).not.toContain('process.argv[2]')
-  })
-
-  test('hook script touches .done-<sid> AFTER moving sentinel-<sid>.json into place — polling loop watches .done as the readiness signal', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    const mvIdx = script.indexOf('mv "$tmp_in"')
-    const touchIdx = script.indexOf('touch "${PWD}/.done-${sid}"')
-    expect(mvIdx).toBeGreaterThan(-1)
-    expect(touchIdx).toBeGreaterThan(-1)
-    expect(mvIdx).toBeLessThan(touchIdx)
-  })
-
-  test('hook script sets `set -eu` for fail-fast on missing PWD or extraction errors', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('set -eu')
-  })
-
-  test('hook script has a POSIX shebang (/bin/sh, not /bin/bash)', () => {
-    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script.startsWith('#!/bin/sh')).toBe(true)
-  })
-
-  test('global hooks.json is written at ~/.codex/hooks.json (user-level scope, applies to every codex invocation regardless of cwd)', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('mkdir -p "$HOME/.codex"')
-    expect(out).toContain('"$HOME/.codex/hooks.json"')
-  })
-
-  test('global hooks.json registers BOTH the SessionStart hook and the Stop hook with the correct shape', () => {
-    const parsed = extractGlobalHooks(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(parsed).toEqual({
-      hooks: {
-        SessionStart: [
-          {
-            matcher: 'startup|resume',
-            hooks: [{ type: 'command', command: '/usr/local/bin/typeclaw-cx-session-start-hook', args: [] }],
-          },
-        ],
-        Stop: [
-          {
-            matcher: '*',
-            hooks: [{ type: 'command', command: '/usr/local/bin/typeclaw-cx-stop-hook', args: [] }],
-          },
-        ],
-      },
-    })
-  })
-
-  test('SessionStart matcher is `startup|resume` (the two upstream-documented Codex session-origin types — Codex has no `/clear` command or auto-compaction event that Claude Code matches against)', () => {
-    const parsed = extractGlobalHooks(buildDockerfile(dockerfileSchema.parse({ codexCli: true }))) as {
-      hooks: { SessionStart: Array<{ matcher: string }> }
-    }
-    expect(parsed.hooks.SessionStart[0]?.matcher).toBe('startup|resume')
-  })
-
-  test('hooks.json uses exec form (args: []) so Codex CLI invokes via execvp with kernel-handled shebang and no shell tokenization', () => {
-    const parsed = extractGlobalHooks(buildDockerfile(dockerfileSchema.parse({ codexCli: true }))) as {
-      hooks: { Stop: Array<{ hooks: Array<{ args?: unknown[] }> }> }
-    }
-    const args = parsed.hooks.Stop[0]?.hooks[0]?.args
-    expect(args).toBeDefined()
-    expect(Array.isArray(args)).toBe(true)
-    expect(args).toEqual([])
-  })
-
-  test('global hooks.json command paths are absolute, not relative — user-level hooks fire with arbitrary cwds', () => {
-    const parsed = extractGlobalHooks(buildDockerfile(dockerfileSchema.parse({ codexCli: true }))) as {
-      hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> }
-    }
-    const cmd = parsed.hooks.Stop[0]?.hooks[0]?.command
-    expect(cmd).toBeDefined()
-    expect(cmd?.startsWith('/')).toBe(true)
-  })
-
-  test('global hooks.json payload contains no single quotes — required by the printf %s shell-quoting pattern, guaranteed by JSON.stringify', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.codex\/hooks\.json"/)
-    expect(match).not.toBeNull()
-    expect(match?.[1]).toBeDefined()
-    expect(match?.[1]).not.toContain("'")
-  })
-
-  test('hook script + global hooks.json are ALL omitted when codexCli: false (no orphan artifacts for agents that do not use codex)', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: false }))
     expect(out).not.toContain('typeclaw-cx-stop-hook')
-    expect(out).not.toContain('typeclaw-cx-session-start-hook')
+    expect(out).not.toContain('typeclaw-cc-stop-hook')
     expect(out).not.toContain('.codex/hooks.json')
-  })
-
-  test('hook script + global hooks.json appear in the versioned (base-image) form too — drift guard so GHCR-base users get the same hook wiring as dev/inline users', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }), { baseImageVersion: '0.1.1' })
-    expect(out).toContain('typeclaw-cx-stop-hook')
-    expect(out).toContain('"$HOME/.codex/hooks.json"')
-  })
-
-  test('hook layer runs BEFORE the entrypoint shim — same final-layer-is-last invariant as the rest of the toggle layers', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    const hookIdx = out.indexOf('typeclaw-cx-stop-hook')
-    const shimIdx = out.indexOf(TYPECLAW_ENTRYPOINT_PATH)
-    expect(hookIdx).toBeGreaterThan(-1)
-    expect(shimIdx).toBeGreaterThan(-1)
-    expect(hookIdx).toBeLessThan(shimIdx)
-  })
-
-  test('the heredoc is the only build-time mechanism that writes the Stop hook script (no second printf-based copy that could drift) — single source of truth for the script body', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    const heredocMatches = out.match(/cat > \/usr\/local\/bin\/typeclaw-cx-stop-hook/g) ?? []
-    expect(heredocMatches.length).toBe(1)
-  })
-})
-
-describe('Codex CLI global SessionStart hook (pre-baked into the image)', () => {
-  function extractSessionStartScript(out: string): string {
-    const match = out.match(
-      /cat > \/usr\/local\/bin\/typeclaw-cx-session-start-hook <<'TYPECLAW_CX_SESSION_START_HOOK_EOF'\n([\s\S]*?)TYPECLAW_CX_SESSION_START_HOOK_EOF/,
-    )
-    if (!match || !match[1]) throw new Error('typeclaw-cx-session-start-hook heredoc not found')
-    return match[1]
-  }
-
-  test('codexCli: true writes the SessionStart hook script at /usr/local/bin/typeclaw-cx-session-start-hook', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('cat > /usr/local/bin/typeclaw-cx-session-start-hook')
-    expect(out).toContain('chmod +x /usr/local/bin/typeclaw-cx-session-start-hook')
-  })
-
-  test('SessionStart hook script writes $PWD/.session-id with the validated UUID — operator polls this file after spawning codex to learn the session UUID', () => {
-    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('"${PWD}/.session-id"')
-    expect(script).toContain('printf')
-  })
-
-  test('SessionStart hook script uses a PID-scoped temp filename (.session-id.$$.tmp) — without it, two SessionStart hooks firing concurrently in the same cwd race on .session-id.tmp', () => {
-    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('.session-id.$$.tmp')
-  })
-
-  test('SessionStart hook script extracts session_id via `bun -e` and validates against UUID shape — same security model as the Stop hook', () => {
-    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toContain('bun -e ')
-    expect(script).toContain('Bun.stdin')
-    expect(script).toContain('case "$sid" in')
-    expect(script).toContain('sid=malformed')
-    expect(script).not.toContain('sed -n ')
-  })
-
-  test('SessionStart hook writes .session-id atomically via temp-then-rename', () => {
-    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).toMatch(/printf '%s\\n' "\$sid" > "\$tmp_out"\nmv "\$tmp_out" "\$\{PWD\}\/.session-id"/)
-  })
-
-  test('SessionStart hook script does NOT use $CLAUDE_PROJECT_DIR or $CODEX_PROJECT_DIR — operator-controlled cwd via tmux -c is the source of truth', () => {
-    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ codexCli: true })))
-    expect(script).not.toContain('CLAUDE_PROJECT_DIR')
-    expect(script).not.toContain('CODEX_PROJECT_DIR')
-  })
-
-  test('SessionStart hook layer is omitted when codexCli: false', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: false }))
-    expect(out).not.toContain('typeclaw-cx-session-start-hook')
-  })
-
-  test('both hook scripts are made executable in the SAME chmod +x invocation — defense against a future edit that accidentally only chmods one', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('chmod +x /usr/local/bin/typeclaw-cx-session-start-hook /usr/local/bin/typeclaw-cx-stop-hook')
+    expect(out).not.toContain('.claude/settings.json')
   })
 })
 
@@ -1124,25 +881,19 @@ describe('network egress entrypoint shim', () => {
     expect(executable).not.toMatch(/(?:501|:20\b)/)
   })
 
-  test('creates and seeds the ephemeral runtime HOME unconditionally, then chowns it only when host identity is available', () => {
+  test('creates a clean runtime HOME and chowns it only when host identity is available', () => {
     const shim = buildEntrypointShim()
-    expect(shim).toContain('seed_runtime_home() {')
-    // Only Codex still consumes the legacy image-baked hook profile.
+    expect(shim).not.toContain('seed_runtime_home')
     expect(shim).not.toContain('.claude.json')
     expect(shim).not.toContain('.claude/settings.json')
-    expect(shim).toContain('.codex/hooks.json')
-    // cp -n keeps the helper idempotent within one container life.
-    expect(shim).toMatch(/cp -n "\$_src\/\.codex\/hooks\.json"/)
+    expect(shim).not.toContain('.codex/hooks.json')
     const runtimeHomeIdx = shim.indexOf('runtime_home="${TYPECLAW_RUNTIME_HOME:-/home/agent}"')
     const mkdirIdx = shim.indexOf('mkdir -p "$runtime_home"', runtimeHomeIdx)
-    const seedCallIdx = shim.indexOf('seed_runtime_home "$HOME" "$runtime_home"')
     const identityGuardIdx = shim.indexOf('if [ -n "${TYPECLAW_HOST_UID:-}" ]', runtimeHomeIdx)
     const chownIdx = shim.indexOf('chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$runtime_home"')
     expect(runtimeHomeIdx).toBeGreaterThan(-1)
     expect(mkdirIdx).toBeGreaterThan(runtimeHomeIdx)
-    expect(seedCallIdx).toBeGreaterThan(mkdirIdx)
-    expect(identityGuardIdx).toBeGreaterThan(seedCallIdx)
-    expect(seedCallIdx).toBeGreaterThan(-1)
+    expect(identityGuardIdx).toBeGreaterThan(mkdirIdx)
     expect(chownIdx).toBeGreaterThan(identityGuardIdx)
   })
 
@@ -1673,7 +1424,7 @@ exec "$@"
     rmSync(envWorkdir, { recursive: true, force: true })
   })
 
-  test('host UID/GID re-exec seeds only Codex settings into the effective runtime HOME', async () => {
+  test('host UID/GID re-exec does not copy coding CLI profiles into runtime HOME', async () => {
     const seedWorkdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-seed-'))
     const seedBin = join(seedWorkdir, 'bin')
     await mkdir(seedBin, { recursive: true })
@@ -1733,12 +1484,12 @@ exit 0
     expect(dumped).toContain(`HOME=${expectedRuntimeHome}`)
     expect(dumped).not.toContain('claude_json={"onboarded":true}')
     expect(dumped).not.toContain('claude_settings={"hooks":"cc"}')
-    expect(dumped).toContain('codex_hooks={"hooks":"cx"}')
+    expect(dumped).not.toContain('codex_hooks={"hooks":"cx"}')
     expect(readFileSync(chownDump, 'utf8').trim()).toBe(`-R 12345:23456 ${expectedRuntimeHome}`)
     rmSync(seedWorkdir, { recursive: true, force: true })
   })
 
-  test('root fallback creates and seeds TYPECLAW_RUNTIME_HOME without a host identity, then execs the agent with that HOME', async () => {
+  test('root fallback creates TYPECLAW_RUNTIME_HOME without a host identity, then execs the agent with that HOME', async () => {
     const rootWorkdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-root-home-'))
     const rootBin = join(rootWorkdir, 'bin')
     await mkdir(rootBin, { recursive: true })
