@@ -9,6 +9,7 @@ import type { CodingAgentAuthResolver } from '@/secrets/coding-agent-auth'
 
 import { SecretScrubber, startCodingBroker, type CodingBroker } from './broker'
 import { ClaudeStreamParser, claudeArguments, claudeEnvironment, type CodingMode } from './claude'
+import { CodexStreamParser, codexArguments, codexConfig, codexEnvironment } from './codex'
 import type { CodingWorkspace } from './worktree'
 
 export type CodingRunResult = {
@@ -20,6 +21,7 @@ export type CodingRunResult = {
 }
 
 export type CodingRunOptions = {
+  readonly engine?: 'claude' | 'codex'
   readonly workspace: CodingWorkspace
   readonly auth: CodingAgentAuthResolver
   readonly model: string
@@ -43,13 +45,14 @@ export async function runCodingAgent(
     broker?: typeof startCodingBroker
   },
 ): Promise<CodingRunResult> {
+  const engine = options.engine ?? 'claude'
   const deadline = Date.now() + options.timeoutSeconds * 1000
   const timeout = new AbortController()
   const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal
   const timer = setTimeout(() => timeout.abort(), options.timeoutSeconds * 1000)
   let broker: CodingBroker | undefined
   let cleanupPrepared: (() => Promise<void>) | undefined
-  const parser = new ClaudeStreamParser()
+  const parser = engine === 'claude' ? new ClaudeStreamParser() : new CodexStreamParser()
   let stdout = ''
   let stderr = ''
   let exitCode: number | null = null
@@ -58,13 +61,21 @@ export async function runCodingAgent(
   try {
     signal.throwIfAborted()
     broker = await (testDependencies?.broker ?? startCodingBroker)({
+      provider: engine === 'claude' ? 'anthropic' : 'openai-codex',
       auth: options.auth,
       allowedModels: options.allowedModels,
       deadline,
       signal,
     })
-    const env = claudeEnvironment(join(options.workspace.taskRoot, 'claude'), broker.baseUrl, broker.capability)
-    const args = claudeArguments(options)
+    const configDir = join(options.workspace.taskRoot, engine)
+    if (engine === 'codex') {
+      await options.writeArtifact(join(configDir, 'config.toml'), codexConfig(options.model, broker.baseUrl))
+    }
+    const env =
+      engine === 'claude'
+        ? claudeEnvironment(configDir, broker.baseUrl, broker.capability)
+        : codexEnvironment(configDir, broker.capability)
+    const args = engine === 'claude' ? claudeArguments(options) : codexArguments(options)
     const cwd = join(options.workspace.taskRoot, 'worktree')
     const prepared: {
       argv: string[]
@@ -143,7 +154,12 @@ export async function runCodingAgent(
     })
     try {
       if (signal.aborted) kill()
-      else child.stdin.end(options.prompt)
+      else
+        child.stdin.end(
+          engine === 'codex' && options.mode === 'plan'
+            ? `Plan this task without modifying the repository. The worktree and Git database are read-only.\n\n${options.prompt}`
+            : options.prompt,
+        )
       const [code, killedBy] = await closed
       exitCode = typeof code === 'number' ? code : killedBy === 'SIGKILL' ? 137 : null
       await Promise.all(reads)
@@ -171,7 +187,7 @@ export async function runCodingAgent(
       ? 'cancelled'
       : failure || exitCode !== 0 || parser.failed || parser.malformed
         ? 'failed'
-        : !parser.terminal || parser.permissionDenied
+        : !parser.terminal || parser.permissionDenied || (engine === 'codex' && !parser.sessionId)
           ? 'incomplete'
           : 'completed'
   return {
@@ -186,7 +202,7 @@ export async function runCodingAgent(
         : timedOut
           ? 'Invocation timed out; partial work is preserved.'
           : parser.permissionDenied
-            ? 'Claude reported a permission denial; review the task and continue explicitly.'
+            ? 'The coding CLI reported a permission denial; review the task and continue explicitly.'
             : 'Invocation did not complete. Inspect the saved output and partial diff; verify the installed CLI and sandbox.'),
   }
 }

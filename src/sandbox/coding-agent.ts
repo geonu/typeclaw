@@ -129,11 +129,17 @@ export async function prepareCodingCommand(
       'Coding delegation requires a verified safe /proc sandbox. Fix the container user-namespace policy and retry.',
     )
   const policy = await codingSandboxPolicy(options, proc)
-  const capability = options.env?.ANTHROPIC_AUTH_TOKEN
-  if (capability) {
-    const { ANTHROPIC_AUTH_TOKEN: _capability, ...settings } = options.env
-    policy.env = { set: settings, inherit: ['ANTHROPIC_AUTH_TOKEN'] }
+  const capabilities: Record<string, string> = {}
+  const settings = { ...options.env }
+  for (const name of ['ANTHROPIC_AUTH_TOKEN', 'TYPECLAW_CODING_AGENT_CAPABILITY']) {
+    const value = settings[name]
+    if (value) {
+      capabilities[name] = value
+      delete settings[name]
+    }
   }
+  // Capabilities travel in the explicit environment, never visible process argv.
+  policy.env = { set: settings, inherit: Object.keys(capabilities) }
   const opened: Awaited<ReturnType<typeof createAndOpenAnchoredDirectory>>[] = []
   const extraFiles: Array<number | 'ignore'> = []
   try {
@@ -159,7 +165,7 @@ export async function prepareCodingCommand(
     const built = buildSandboxedCommand(`exec ${formatCommand([...argv])}`, policy)
     return {
       ...built,
-      spawnEnv: { ...built.spawnEnv, ...(capability ? { ANTHROPIC_AUTH_TOKEN: capability } : {}) },
+      spawnEnv: { ...built.spawnEnv, ...capabilities },
       extraFiles,
       cleanup: async () => {
         await Promise.all(opened.map((file) => file.close()))
