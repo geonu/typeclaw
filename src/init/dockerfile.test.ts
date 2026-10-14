@@ -220,12 +220,12 @@ describe('claudeCode toggle', () => {
 
   test('claudeCode: true emits the curl-piped install layer in the inline (dev) form', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
-    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash')
+    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.299')
   })
 
   test('claudeCode: true emits the install layer in the versioned (base-image) form too — drift guard', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }), { baseImageVersion: '0.1.1' })
-    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash')
+    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.299')
   })
 
   test('install layer renders before the entrypoint shim so the shim is always the final RUN', () => {
@@ -237,9 +237,15 @@ describe('claudeCode toggle', () => {
     expect(claudeIdx).toBeLessThan(shimIdx)
   })
 
-  test('install layer symlinks ~/.local/bin/claude into /usr/local/bin (the Anthropic installer emits a "~/.local/bin is not in your PATH" warning on bun:1-slim; without the symlink every `which claude` returns empty)', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
-    expect(out).toContain('ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude')
+  test('both branches copy the resolved Claude executable under /usr/local before linking the launcher', () => {
+    for (const options of [{}, { baseImageVersion: '0.1.1' }]) {
+      const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }), options)
+      expect(out).toContain(
+        'install -D -m 0755 "$(readlink -f "$HOME/.local/bin/claude")" /usr/local/lib/typeclaw-coding-agents/claude/2.1.299/claude',
+      )
+      expect(out).toContain('ln -sf /usr/local/lib/typeclaw-coding-agents/claude/2.1.299/claude /usr/local/bin/claude')
+      expect(out).not.toMatch(/ln -sf ["']?(?:\/root|\$HOME)\//)
+    }
   })
 
   test('install layer smoke-tests the binary with `claude --version` so a broken install fails the build instead of the first delegation', () => {
@@ -596,12 +602,25 @@ describe('codexCli toggle', () => {
 
   test('codexCli: true emits the bun-install layer in the inline (dev) form', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('bun install -g @openai/codex')
+    expect(out).toContain('bun install -g @openai/codex@0.162.1')
   })
 
   test('codexCli: true emits the install layer in the versioned (base-image) form too — drift guard', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }), { baseImageVersion: '0.1.1' })
-    expect(out).toContain('bun install -g @openai/codex')
+    expect(out).toContain('bun install -g @openai/codex@0.162.1')
+  })
+
+  test('both branches install the Codex launcher and native packages under /usr/local', () => {
+    for (const options of [{}, { baseImageVersion: '0.1.1' }]) {
+      const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }), options)
+      expect(out).toContain(
+        'BUN_INSTALL=/usr/local/lib/typeclaw-coding-agents/codex BUN_INSTALL_BIN=/usr/local/lib/typeclaw-coding-agents/codex/bin bun install -g @openai/codex@0.162.1',
+      )
+      expect(out).toContain('exec /usr/local/bin/bun /usr/local/lib/typeclaw-coding-agents/codex/bin/codex "$@"')
+      expect(out).toContain('> /usr/local/bin/codex')
+      expect(out).toContain('chmod 0755 /usr/local/bin/codex')
+      expect(out).not.toMatch(/ln -sf ["']?(?:\/root|\$HOME)\//)
+    }
   })
 
   test('install layer renders before the entrypoint shim so the shim is always the final RUN', () => {
@@ -2728,7 +2747,9 @@ describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)',
       expect(df).not.toContain('--mount')
       // The commands the mounts used to wrap are intact and well-formed.
       expect(df).toContain('RUN apt-get update')
-      expect(df).toContain('RUN bun install -g @openai/codex')
+      expect(df).toContain(
+        'RUN BUN_INSTALL=/usr/local/lib/typeclaw-coding-agents/codex BUN_INSTALL_BIN=/usr/local/lib/typeclaw-coding-agents/codex/bin bun install -g @openai/codex@0.162.1',
+      )
       // No artifacts from mechanical rewriting: no double RUN, no dangling `\`,
       // no `RUN ` with a stray gap where a mount used to be.
       expect(df).not.toContain('RUN RUN')
