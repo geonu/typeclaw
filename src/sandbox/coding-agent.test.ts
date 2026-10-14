@@ -66,7 +66,7 @@ test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
       [
         '/bin/sh',
         '-c',
-        'test ! -s /typeclaw-coding-source/secrets.json && test ! -e /home/agent && ! touch blocked && printf safe',
+        'for fd in /proc/self/fd/*; do test ! -d "$fd" || exit 90; done; test ! -s /typeclaw-coding-source/secrets.json && test ! -e /home/agent && ! touch blocked && printf safe',
       ],
       { source, taskRoot, mode: 'plan', cwd: join(taskRoot, 'worktree') },
     )

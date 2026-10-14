@@ -6,7 +6,7 @@ icon: Code
 
 ## Host setup
 
-Enable `docker.file.claudeCode:true` in the host agent folder's `typeclaw.json`, configure Anthropic with `typeclaw provider add anthropic`, then run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
+Enable `docker.file.claudeCode:true` in the host agent folder's `typeclaw.json`, configure Anthropic with `typeclaw provider add anthropic`, then run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces and native FD-bind support. An older bwrap without `--bind-fd`/`--ro-bind-fd` requires a container-image rebuild. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
 
 The installation pins Claude Code 2.1.299 under `/usr/local`. API-key and subscription credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate; local fake-upstream tests do not establish paid-provider acceptance.
 

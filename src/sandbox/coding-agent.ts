@@ -13,7 +13,7 @@ import {
   CANONICAL_HOME_SECRET_FILES,
 } from './canonical-secrets'
 import { verifyHiddenMaskTargets } from './hidden-paths'
-import type { SandboxPolicy, SandboxProcStrategy } from './policy'
+import { DEFAULT_SANDBOX_ENV, type SandboxMount, type SandboxPolicy, type SandboxProcStrategy } from './policy'
 import { formatCommand } from './quote'
 import { CANONICAL_AGENT_RUNTIME_PRIVATE_FILES } from './runtime-private'
 
@@ -107,6 +107,12 @@ export async function prepareCodingCommand(
   options: CodingSandboxOptions,
 ): Promise<SandboxedCommand & { extraFiles: Array<number | 'ignore'>; cleanup(): Promise<void> }> {
   await ensureBwrapAvailable()
+  fdBindSupport ??= supportsFdBinds()
+  if (!(await fdBindSupport)) {
+    throw new Error(
+      'Coding delegation requires bwrap --bind-fd support. Rebuild the TypeClaw container image; ordinary bash is unaffected.',
+    )
+  }
   const proc =
     config.sandbox.realProc && (await canMountRealProc())
       ? 'real-proc'
@@ -126,15 +132,25 @@ export async function prepareCodingCommand(
   const opened: Awaited<ReturnType<typeof createAndOpenAnchoredDirectory>>[] = []
   const extraFiles: Array<number | 'ignore'> = (policy.masks?.files ?? []).map(() => 'ignore')
   try {
-    // Bind through explicitly inherited non-secret directory descriptors. A
-    // sibling process swapping a pathname cannot redirect a mount after approval.
+    const mounts: SandboxMount[] = []
+    // Native FD binds verify inode identity after mounting AND consume the FD.
+    // A plain bind of /proc/self/fd/N does neither: it resolves the path and
+    // leaves a directory handle capable of bypassing masks in the final child.
     for (const mount of policy.mounts ?? []) {
-      if (mount.type !== 'bind' && mount.type !== 'ro-bind') continue
+      if (mount.type !== 'bind' && mount.type !== 'ro-bind') {
+        mounts.push(mount)
+        continue
+      }
       const file = await createAndOpenAnchoredDirectory(mount.source, false)
       opened.push(file)
-      mount.source = `/proc/self/fd/${3 + extraFiles.length}`
+      mounts.push({
+        type: mount.type === 'bind' ? 'bind-fd' : 'ro-bind-fd',
+        fd: 3 + extraFiles.length,
+        dest: mount.dest,
+      })
       extraFiles.push(file.fd)
     }
+    policy.mounts = mounts
     const built = buildSandboxedCommand(`exec ${formatCommand([...argv])}`, policy)
     return {
       ...built,
@@ -148,4 +164,11 @@ export async function prepareCodingCommand(
     await Promise.all(opened.map((file) => file.close()))
     throw error
   }
+}
+
+let fdBindSupport: Promise<boolean> | undefined
+async function supportsFdBinds(): Promise<boolean> {
+  const child = Bun.spawn(['bwrap', '--help'], { env: DEFAULT_SANDBOX_ENV, stdout: 'pipe', stderr: 'ignore' })
+  const help = await new Response(child.stdout).text()
+  return (await child.exited) === 0 && help.includes('--bind-fd') && help.includes('--ro-bind-fd')
 }
