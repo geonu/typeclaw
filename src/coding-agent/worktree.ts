@@ -177,7 +177,7 @@ export async function captureCodingChanges(
   // Each bwrap invocation has fresh /tmp: construct and consume the index in ONE process.
   // The helper script is code we supply, with paths passed as positional parameters.
   const script = [
-    'set -eu',
+    'set -euo pipefail',
     // A model-controlled replace ref must not redefine the recorded baseline.
     'export GIT_NO_REPLACE_OBJECTS=1',
     'index="$(git rev-parse --git-path index)"',
@@ -188,6 +188,9 @@ export async function captureCodingChanges(
     'mkdir "$GIT_OBJECT_DIRECTORY"',
     'trap \'rm -f "$GIT_INDEX_FILE"; rm -rf "$GIT_OBJECT_DIRECTORY"\' EXIT',
     'if [ -f "$index" ]; then cp "$index" "$GIT_INDEX_FILE"; else git -c core.hooksPath=/dev/null read-tree HEAD; fi',
+    // Clear each flag separately: Git applies only one flag operation per update.
+    'git ls-files -z | git -c core.hooksPath=/dev/null update-index --no-assume-unchanged -z --stdin',
+    'git ls-files -z | git -c core.hooksPath=/dev/null update-index --no-skip-worktree -z --stdin',
     'git -c core.hooksPath=/dev/null add -A -- .',
     'if [ "$3" = patch ]; then',
     '  git -c core.hooksPath=/dev/null diff --cached --binary --full-index --no-ext-diff --no-textconv "$2" --',

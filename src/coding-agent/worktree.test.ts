@@ -113,6 +113,27 @@ describe.skipIf(process.platform === 'win32')('task-private worktree', () => {
     expect(await readFile(artifacts.patchPath, 'utf8')).toContain('+changed')
   })
 
+  test('captures tracked edits hidden by either or both index flags without changing the CLI index', async () => {
+    const workspace = await createCodingWorkspace(source, task, execute, source)
+    const cwd = join(task, 'worktree')
+    await execute(['git', 'update-index', '--assume-unchanged', 'staged', 'mode'], cwd)
+    await execute(['git', 'update-index', '--skip-worktree', 'unstaged', 'mode'], cwd)
+    await writeFile(join(cwd, 'staged'), 'assumed edit\n')
+    await writeFile(join(cwd, 'unstaged'), 'skipped edit\n')
+    await writeFile(join(cwd, 'mode'), 'both flags\n')
+    const indexPath = join(task, 'git', 'worktrees', 'worktree', 'index')
+    const childIndex = await readFile(indexPath)
+
+    const artifacts = await captureCodingChanges(workspace, execute, (path, text) => writeFile(path, text))
+
+    expect(artifacts.changedFiles.toSorted()).toEqual(['mode', 'staged', 'unstaged'])
+    const patch = await readFile(artifacts.patchPath, 'utf8')
+    expect(patch).toContain('+assumed edit')
+    expect(patch).toContain('+skipped edit')
+    expect(patch).toContain('+both flags')
+    expect(await readFile(indexPath)).toEqual(childIndex)
+  })
+
   test('includes committed and staged new files even when later ignored', async () => {
     const workspace = await createCodingWorkspace(source, task, execute, source)
     const cwd = join(task, 'worktree')
