@@ -7386,7 +7386,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       } else if (outputKind === 'status') {
         live.statusOutputOutstandingThisLogicalTurn = true
       }
-      live.lastSendLeafId = live.session.sessionManager.getLeafEntry()?.id ?? null
+      live.lastSendLeafId = branchLeafEntry(live.session)?.id ?? null
       live.policyDeniedToolSendsThisTurn.delete(sendKey)
       // Don't stop the heartbeat here: the agent may still be mid-turn and
       // about to send another reply. drain()'s finally block owns turn-end
@@ -7746,7 +7746,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         return
       }
-      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
+      if (branchLeafEntry(live.session)?.id === live.lastSendLeafId) return
     }
 
     if (unfinishedToolUseWithoutReply) {
@@ -10402,7 +10402,7 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 function recoverableAssistantText(
   session: AgentSession,
 ): { text: string; source: 'leaf' | 'mid-turn' | 'pre-tool' | 'length-leaf' } | null {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf) return null
 
   if (leaf.type === 'message' && leaf.message.role === 'assistant') {
@@ -10452,6 +10452,21 @@ function recoverableAssistantText(
   return null
 }
 
+// The session's last entry, skipping trailing pi `context_edit` entries. pi
+// 0.99's truncated-response and auto-retry recovery appends a `context_edit`
+// (`replacement: null`) after the attempt it omits from model projection, and
+// when that recovery does not go on to retry, the edit is the raw leaf. Every
+// turn-end check here keys on the last message's role and stopReason, so reading
+// the raw leaf turned a `length` truncation into a "no assistant message" turn:
+// the raised-budget empty-turn retry was skipped and the turn-ended notice posted.
+function branchLeafEntry(session: AgentSession): SessionEntry | undefined {
+  let entry = session.sessionManager.getLeafEntry()
+  for (let depth = 0; depth < 32 && entry?.type === 'context_edit'; depth++) {
+    entry = entry.parentId ? session.sessionManager.getEntry(entry.parentId) : undefined
+  }
+  return entry
+}
+
 // The non-terminal stop reason when the leaf is an assistant message that did
 // NOT cleanly finish — `length` (hit the token cap, the canonical kimi
 // reasoning-loop), `error` (an upstream provider failure), or `aborted` (the
@@ -10461,7 +10476,7 @@ function recoverableAssistantText(
 // diverts to the provider-error notice, `length` gets a raised retry budget,
 // `aborted` retries under the default backstop.
 function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'aborted' | undefined {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return undefined
   const stop = leaf.message.stopReason
   if (stop === 'length' || stop === 'error' || stop === 'aborted') return stop
@@ -10481,7 +10496,7 @@ function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'a
 // to re-prompt a turn that strands mid-work after a `more_work_this_turn: true` status
 // reply instead of ending in silence.
 function leafIsStrandedToolUse(session: AgentSession): boolean {
-  const leaf = session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(session)
   if (!leaf || leaf.type !== 'message') return false
   if (leaf.message.role === 'assistant') {
     return leaf.message.stopReason === 'toolUse' && visibleAssistantText(leaf.message).trim() === ''
@@ -10565,7 +10580,7 @@ function repairDanglingToolUseBranch(session: AgentSession, timestamp: number): 
 // of this shape: `channel_reply({ more_work_this_turn: true })` via `continueReplyTurn`, and
 // `channel_send` acks via the willingness phrase table.
 function isFreshEmptyStopAfterSend(live: LiveSession): boolean {
-  const leaf = live.session.sessionManager.getLeafEntry()
+  const leaf = branchLeafEntry(live.session)
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
   if (leaf.message.stopReason !== 'stop') return false
   if (hasToolCall(leaf.message) || visibleAssistantText(leaf.message).trim() !== '') return false
@@ -10607,7 +10622,7 @@ function hasToolCall(message: AssistantMessage): boolean {
 // `toolUse`, not `stop`. Depth-bounded like the other branch walks so a
 // malformed session can't loop.
 function attemptMadeToolCall(session: AgentSession): boolean {
-  let cursor: SessionEntry | undefined = session.sessionManager.getLeafEntry()
+  let cursor: SessionEntry | undefined = branchLeafEntry(session)
   for (let depth = 0; depth < 32 && cursor; depth++) {
     if (cursor.type === 'message') {
       if (cursor.message.role === 'user') return false

@@ -215,6 +215,22 @@ class FakeSession {
       this.leafEntry = entry
       return id
     },
+    appendContextEdit: (targetId: string, replacement: null): string => {
+      const parentId = this.leafEntry?.id ?? null
+      if (this.leafEntry) this.entriesById.set(this.leafEntry.id, this.leafEntry)
+      const id = `edit-${this.entriesById.size + 1}`
+      const entry: SessionEntry = {
+        type: 'context_edit',
+        id,
+        parentId,
+        timestamp: '2026-10-14T02:08:26.613Z',
+        targetId,
+        replacement,
+      }
+      this.entriesById.set(id, entry)
+      this.leafEntry = entry
+      return id
+    },
   }
 
   private subscribers = new Set<(event: Record<string, unknown> & { type: string }) => void>()
@@ -7822,6 +7838,43 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(budgetsPerPrompt[1]).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
     expect(sent.map((s) => s.text)).toEqual(['here is your answer'])
     expect(sent.some((s) => s.text === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+  })
+
+  test('empty-turn guard: a length truncation pi omitted with a trailing context_edit still gets the raised-budget retry', async () => {
+    // Regression (2026-10-14): pi 0.99's truncated-response recovery appended a
+    // `context_edit` omitting the `length` attempt and did not retry, so the raw
+    // leaf was the edit. The router read it as "no assistant message", skipped
+    // the raised-budget retry, and posted the turn-ended notice instead.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '다시 한 번 보내봐' }))
+    const budgetsPerPrompt: Array<number | undefined> = []
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      await streamOnce(sessions[0]!)
+      budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
+      if (attempt === 1) {
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
+        sessions[0]!.sessionManager.appendContextEdit(sessions[0]!.leafEntry!.id, null)
+        return
+      }
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '표 다시 보낼게' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(budgetsPerPrompt[1]).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
+    expect(sent.map((s) => s.text)).toEqual(['표 다시 보낼게'])
+    expect(logs.some((m) => m.includes('no recoverable assistant text in branch'))).toBe(false)
   })
 
   test('empty-turn guard: the raised retry budget does not leak into the next fresh user turn', async () => {
