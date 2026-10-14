@@ -64,7 +64,7 @@ export const PINNED_SNAPSHOT_GLOBAL_MAX_BYTES = TOOL_INPUT_MAX_BYTES.channel_upl
 export const PINNED_SNAPSHOT_GLOBAL_MAX_COUNT = TOOL_INPUT_MAX_COUNT.channel_upload
 export const PINNED_SNAPSHOT_MAX_WAITERS = 32
 const TOOL_OUTPUT_MAX_COUNT = 32
-const TREE_SNAPSHOT_MAX_ENTRIES = 4096
+export const TREE_SNAPSHOT_MAX_ENTRIES = 4096
 // Names-only snapshots (ls/find) write empty placeholders, so an entry costs an
 // inode, not a copy; a long-lived agent's workspace easily outgrows 4096.
 const TREE_NAMES_SNAPSHOT_MAX_ENTRIES = 65_536
