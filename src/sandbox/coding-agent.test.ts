@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, posix } from 'node:path'
 
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
-import { CODEX_CLI_VERSION } from '@/coding-agent/codex'
+import { CODEX_CLI_VERSION, codexEnvironment } from '@/coding-agent/codex'
 import { runCodingProcess } from '@/coding-agent/worktree'
 
 import { buildSandboxedCommand } from './build'
@@ -45,7 +45,7 @@ test.each(['code', 'plan', 'snapshot'] as const)('excludes credential write loca
       taskRoot,
       mode,
       cwd: join(taskRoot, 'worktree'),
-      env: { TYPECLAW_CODING_AGENT_CAPABILITY: 'local-capability', CODEX_HOME: join(taskRoot, 'codex') },
+      env: codexEnvironment(join(taskRoot, 'codex'), 'local-capability'),
     },
     'proc-bind',
   )

@@ -56,6 +56,16 @@ const frames = (await response.text()).split('\\n\\n').filter(Boolean).map(line=
 const tool = frames.find(frame=>frame.type==='response.output_item.done').item;
 const args = JSON.parse(tool.arguments);
 await Bun.write('generated.txt', args.text + prompt);
+if (await Bun.file('source.txt').exists()) {
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const mark = Bun.spawn(['git','update-index',flag,'--','source.txt'], {
+      env:{PATH:'/usr/bin:/bin',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'},
+      stdout:'ignore',stderr:'ignore'
+    });
+    if (await mark.exited !== 0) process.exit(16);
+  }
+  await Bun.write('source.txt', 'tracked: ' + prompt);
+}
 const command = Bun.spawn(['/bin/sh','-c','printf command-ran'],{env:{PATH:'/usr/bin:/bin'},stdout:'pipe'});
 const commandOutput = await new Response(command.stdout).text();
 if (await command.exited !== 0 || commandOutput !== 'command-ran') process.exit(15);
@@ -125,13 +135,14 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
     const before = await execute(['git', 'rev-parse', 'HEAD'], source)
     const server = upstream()
     const brokers: CodingBroker[] = []
+    const childIndexes: Buffer[] = []
     const service = new CodingAgentService(source, {
       executor: () => execute,
       sourcePath: (path) => path,
       writeArtifact: (path, text) => writeFile(path, text),
       auth: async () => auth,
-      run: (options) =>
-        runCodingAgent(options, {
+      run: async (options) => {
+        const result = await runCodingAgent(options, {
           command: async (argv, env) => ({
             argv: [...argv],
             env: { ...DEFAULT_SANDBOX_ENV, PATH: `${root}/bin:/usr/bin:/bin`, ...env },
@@ -141,7 +152,10 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
             brokers.push(broker)
             return broker
           },
-        }),
+        })
+        childIndexes.push(await readFile(join(options.workspace.taskRoot, 'git', 'worktrees', 'worktree', 'index')))
+        return result
+      },
     })
     const caller = {
       sessionId: 'parent',
@@ -163,8 +177,12 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
         state: 'completed',
         engine: 'codex',
         finalMessage: '완료했습니다',
-        changedFiles: ['generated.txt'],
+        changedFiles: ['generated.txt', 'source.txt'],
       })
+      if (typeof first.worktreePath !== 'string') throw new Error('Missing worktree')
+      const taskRoot = join(first.worktreePath, '..')
+      const indexPath = join(taskRoot, 'git', 'worktrees', 'worktree', 'index')
+      expect(childIndexes[0]).toEqual(await readFile(indexPath))
       const second = await service.execute(
         codingRequestSchema.parse({
           action: 'run',
@@ -178,7 +196,9 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
       if (typeof second.patchPath !== 'string' || typeof second.worktreePath !== 'string')
         throw new Error('Missing artifacts')
       expect(await readFile(second.patchPath, 'utf8')).toContain('次の作業')
-      const taskRoot = join(second.worktreePath, '..')
+      expect(await readFile(second.patchPath, 'utf8')).toContain('+tracked: 次の作業')
+      expect(second.changedFiles).toEqual(['generated.txt', 'source.txt'])
+      expect(childIndexes[1]).toEqual(await readFile(indexPath))
       const observed = JSON.parse(await readFile(join(taskRoot, 'codex', 'observed.json'), 'utf8'))
       expect(observed.argv).toEqual([
         'exec',
@@ -251,7 +271,6 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
         taskRoot: root,
         baseSha: 'a'.repeat(40),
         sourceIdentity: 'fixture',
-        dirtySource: false,
       },
       auth,
       model: 'gpt-6-sol',
@@ -303,7 +322,6 @@ describe.skipIf(process.platform === 'win32')('Codex runner integration', () => 
         taskRoot: root,
         baseSha: 'a'.repeat(40),
         sourceIdentity: 'fixture',
-        dirtySource: false,
       },
       auth,
       model: 'gpt-6-sol',
