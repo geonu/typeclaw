@@ -57,7 +57,7 @@ describe('operator subagent declaration', () => {
   test('declares only builtin tools the spawner already holds (spawning grants no new capability)', () => {
     const sub = createOperatorSubagent()
     const names = (sub.tools ?? []).map((tool) => (tool as { __builtinTool: string }).__builtinTool)
-    expect(names.toSorted()).toEqual(['bash', 'edit', 'find', 'grep', 'ls', 'read', 'write'])
+    expect(names.toSorted()).toEqual(['bash', 'coding_agent', 'edit', 'find', 'grep', 'ls', 'read', 'write'])
   })
 
   test('declares canSpawnSubagents=true (orchestration tools are wired into its session)', () => {
@@ -73,7 +73,7 @@ describe('operator subagent declaration', () => {
   test('tools include read+grep+find+ls+bash AND write+edit (write-capable)', () => {
     const sub = createOperatorSubagent()
     const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
-    expect(toolNames).toEqual(['bash', 'edit', 'find', 'grep', 'ls', 'read', 'write'])
+    expect(toolNames).toEqual(['bash', 'coding_agent', 'edit', 'find', 'grep', 'ls', 'read', 'write'])
   })
 
   test('tool-result budget is larger than explorers (multi-step work generates more transcript)', () => {

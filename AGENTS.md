@@ -52,6 +52,16 @@ Two live examples of the _diagnosability_ half of the same failure: issue **#137
 - **Test both directions.** The threat must fail, and representative legitimate operations must still pass. A guard test that only asserts the block is half a test.
 - **Verify the actual credential/runtime flow first.** Across dev, host, container, and bwrap. Don't generalize from one adapter, one auth mode, or one deployment state — `d477c8b6` did exactly that.
 
+## Brokered coding delegation
+
+`coding_agent` is the supported Claude Code delegation path. The authorized workflow is headless coding in a task-private Git database/worktree, supervised by an existing background operator. The threat is the entire model-controlled CLI tree obtaining reusable provider credentials. Keep those credentials in the trusted fixed-upstream broker; give the child only a scoped, deadline-bound local capability and explicit credential-free environment.
+
+Never weaken canonical masks, `resolvePrivilegedSandboxRuntime` default denial, PID/parent-death isolation, or proc probes. Git source inspection/snapshot/diff work also runs inside bwrap. Plan mode binds worktree/Git read-only. `.typeclaw/coding-agent-tasks.json` is runtime authority, not writable CLI artifacts. Test both denied attacks and valid work after denial.
+
+Claude profile exports, custom credential aliases, and TypeClaw Stop/SessionStart hooks are removed. Codex's separate legacy workflow remains unchanged and `coding_agent` rejects its engine as not yet available. No new operator config is required. The new core tool/plugin reference is a public surface and meets the release minor trigger.
+
+Before release, qualify the pinned official Claude binary through the production broker/bwrap profile on Linux amd64 and arm64: subscription first turn, real tools, explicit resume, refresh, compaction, redacted two-sided trace, and complete diff recovery. Fake upstreams cannot establish live subscription acceptance. Never substitute token injection for a failed gate.
+
 ## Debugging the system prompt
 
 `bun run debug:prompt` dumps the TypeClaw-composed system prompt for each session-origin kind (`tui`, `cron`, `channel`, `subagent` — a default subagent through the standard composer, not a `systemPromptOverride` subagent) with placeholder values, plus a per-section char/byte breakdown and a chars/4 token estimate (not a tokenizer count). It shows the preamble `composeSystemPrompt` builds; pi appends project context (`AGENTS.md` and friends), the skill catalog, and cwd afterwards when it assembles the session.

@@ -1,0 +1,59 @@
+---
+title: Delegate coding
+description: Run Claude Code through a credential broker in a persistent isolated worktree
+icon: Code
+---
+
+## Host setup
+
+Enable `docker.file.claudeCode:true` in the host agent folder's `typeclaw.json`, configure Anthropic with `typeclaw provider add anthropic`, then run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
+
+The installation pins Claude Code 2.1.299 under `/usr/local`. API-key and subscription credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate; local fake-upstream tests do not establish paid-provider acceptance.
+
+## Delegate and continue
+
+Ask the main agent to delegate a substantial task to Claude Code. It briefs a background operator; that operator calls:
+
+```json
+{
+  "action": "run",
+  "engine": "claude",
+  "repo": "/agent",
+  "modelRef": "anthropic/claude-opus-5-5",
+  "mode": "code",
+  "prompt": "Implement the requested change and run its tests.",
+  "timeoutSeconds": 1800
+}
+```
+
+Choose a compatible configured/curated Anthropic model. Repositories may be the agent root, a configured mount root (including read-only mounts), or an accessible workspace repository. The tool uses **committed HEAD**, reports excluded dirty source edits, and never stages or commits them. Dirty-input snapshots, linked source worktrees whose Git administration is outside the selected root, and authenticated recursive submodule imports are not supported.
+
+The receipt includes `taskId`, `state`, `baseSha`, source/model identity, `worktreePath`, `finalMessage`, changed/untracked files, `patchPath`, exit code, and a safe diagnostic. Continue with `action:"run"`, `engine:"claude"`, the same `taskId`, and a new prompt. Do not supply a CLI session ID or select the latest conversation. Repository and model stay fixed. Concurrent resumes fail with "task already running."
+
+Use `mode:"plan"` for a read-only worktree and Git database; explicitly choose `mode:"code"` for approved implementation. A final-message question needs a follow-up, not a sentinel polling loop.
+
+## Review and preserve results
+
+Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/`, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
+
+`output/changes.patch` captures staged/unstaged edits, untracked files, deletions, modes, symlinks, and binary changes without changing the CLI's index. Oversized artifacts are marked incomplete rather than truncated. Review the patch and run acceptance checks before applying it through normal tools. The tool does not commit, merge, push, create PRs, or publish to channels.
+
+Fetch a receipt with `{"action":"result","taskId":"<returned UUID>"}`. Task IDs are not authorization: unrelated speakers/sibling operators cannot take ownership, and lower-authority continuations are denied. People already allowed to read the shared workspace can inspect its non-secret artifacts; separate agents remain the cross-trust-domain boundary.
+
+Timeout/cancellation preserves partial work. After runtime restart, previously running tasks are interrupted, not replayed. Resume explicitly with a fresh invocation. If no resumable session was emitted, inspect the partial changes instead of silently starting a replacement.
+
+Discard a stopped task only when its work is no longer needed:
+
+```json
+{ "action": "dispose", "taskId": "<returned UUID>", "discard": true }
+```
+
+## Authentication and limitations
+
+Missing/revoked credentials affect this task, not startup or other providers. Re-login on the **host** with `typeclaw provider add anthropic`; never paste tokens into chat or inspect protected profiles. Missing binary/sandbox errors require a host rebuild or namespace-policy repair. Ordinary `bash("claude ...")` does not receive broker authority.
+
+The broker permits only bounded inference requests for the task's primary and explicit helper model. Account management, connectors, remote control, and arbitrary authenticated cloud routes are not available. Capabilities expire at invocation end and grant inference use, not possession of provider credentials. They are not hard monetary budgets.
+
+Credentials already exposed through `.env`, prompts, or arbitrary source objects are outside this confidentiality guarantee. Selected revisions containing protected canonical paths are rejected for that task; this is not a general history secret scanner.
+
+`engine:"codex"` returns "not yet available." Installing Codex does not enable this brokered workflow.

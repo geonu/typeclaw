@@ -271,10 +271,6 @@ describe('startAgent', () => {
         order.push('export:codex')
         return { action: 'skipped', reason: 'codex-cli-disabled' }
       },
-      exportClaudeCredentialsFile: () => {
-        order.push('export:claude')
-        return { action: 'skipped', reason: 'claude-code-disabled' }
-      },
       exportGithubCliStore: () => {
         order.push('export:github-cli')
         return { action: 'skipped', reason: 'no-github-cli-credential' }
@@ -297,7 +293,6 @@ describe('startAgent', () => {
       'refresh:lock-acquired',
       'refresh:lock-released',
       'export:codex',
-      'export:claude',
       'export:github-cli',
       'channel:start',
       'auth:sync-read',

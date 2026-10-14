@@ -311,6 +311,9 @@ function fileTargets(
   toolProvenance: ToolProvenance | undefined,
 ): FileTarget[] {
   if (isOutputTool(tool)) return []
+  // This domain operation authorizes and snapshots the selected Git root inside
+  // its own credential-free sandbox. Generic file pinning cannot copy a repo.
+  if (tool === 'coding_agent' && toolProvenance === 'first-party') return []
   if (toolProvenance === 'first-party' && TOOLS_WITHOUT_LOCAL_FILE_OPERANDS.has(tool)) return []
   if (tool === 'read' && typeof args.path === 'string') return [propertyTarget(args, 'path')]
   if (isTreeInputTool(tool)) {
@@ -850,7 +853,7 @@ export async function writeToolOutputNoFollow(targetPath: string, content: strin
   }
 }
 
-async function createAndOpenAnchoredDirectory(absolute: string): Promise<FileHandle> {
+export async function createAndOpenAnchoredDirectory(absolute: string, createMissing = true): Promise<FileHandle> {
   if (!path.isAbsolute(absolute)) throw new Error(`anchored directory must be absolute: ${absolute}`)
   const components = absolute.split(path.sep).filter(Boolean)
   let current = await open(path.parse(absolute).root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
@@ -861,7 +864,7 @@ async function createAndOpenAnchoredDirectory(absolute: string): Promise<FileHan
       try {
         next = await open(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
       } catch (error) {
-        if (!isNotFoundError(error)) throw error
+        if (!isNotFoundError(error) || !createMissing) throw error
         await mkdir(anchored, { mode: 0o700 })
         next = await open(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
       }

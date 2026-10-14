@@ -1,281 +1,46 @@
 ---
 name: typeclaw-claude-code
-description: Use this skill whenever you decide to delegate substantial coding or code-analysis work to Claude Code (Anthropic's official coding-agent CLI). Triggers include "use Claude Code", "ask Claude Code", "delegate to claude", "claude cli", "have claude do it", any task where you want a more capable agent than yourself, and any time you're about to run `claude` from a shell. Read it before you spawn the CLI — Claude Code is a TTY-only TUI in interactive mode (you must drive it through tmux, not pipes), it operates inside a dedicated `git worktree` checkout under `/tmp/` so its commits never pollute the agent folder, and you detect "turn done" through a `Stop` hook that writes a sentinel file. Skipping this skill means you'll either fall back to `claude -p` (which strips plan mode and sub-agents), let claude mutate the live agent checkout (which loses you the rollback safety), or try to parse the TUI buffer with capture-pane heuristics (fragile, version-locked).
+description: Use for explicit Claude Code delegation, substantial coding or analysis suited to Claude Code, and before invoking claude. Uses TypeClaw's brokered headless runner with a persistent isolated worktree, not tmux or credential profiles.
 ---
 
-# typeclaw-claude-code
+# Delegate to Claude Code
 
-> **Current security boundary:** authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools. The bash sandbox never receives Anthropic keys, OAuth tokens, or Claude credential profiles, regardless of role. Do not start the tmux/worktree delegation flow for work that requires authentication. A direct operator may authenticate and run Claude Code themselves from the host side, outside the model tool boundary. The mechanics below are retained for unauthenticated diagnostics and for a future explicitly brokered runtime, not as a credential workaround.
-
-You can delegate work to Claude Code, Anthropic's official coding agent. The agent runs as an interactive TUI: it plans, uses sub-agents, edits files, runs tools — the full loop. You drive it through tmux because your own process has no TTY, you isolate it in a dedicated `git worktree` so its experiments never touch the live agent checkout, and you detect "turn done" through a `Stop` hook that writes a sentinel file (not by parsing the TUI buffer).
-
-This skill is for the case where Claude Code is the right tool: hard architecture work, multi-file refactors, deep code analysis, a second-opinion read on something you wrote. It is **not** for trivial edits — the round-trip cost (worktree setup + process spawn + auth check + TUI init + at least one full Claude turn) is 15–45 seconds and several thousand tokens of someone else's context window. Do trivial edits yourself.
-
-## Run the delegation inside `operator`, not inline
-
-Once you've decided Claude Code is the right tool, spawn the bundled `operator` subagent to do the actual driving — don't run the worktree setup, the tmux session, the polling loop, the multi-turn decision loop, and the cleanup inline in your own context. The whole loop typically takes several minutes and produces large amounts of intermediate output (TUI buffer captures, Stop sentinels per turn, JSONL transcript references); running it inline blocks the user from talking to you and burns through your context window before you ever get to the synthesis step. `operator` is write-capable and runs the same loop, then returns a clean final report (what claude produced, what `git diff main..cc-<id>` shows, what you should review). You ship the worktree, the prompt, and the safety constraints to operator; operator ships you back the diff and the summary.
-
-Exception: a quick unauthenticated sanity ping (`claude --version` to check the binary exists). Do it inline. Do not probe authentication state. The "spawn through operator" rule applies to anything that runs `claude` itself as an interactive TUI.
-
-## When to delegate to Claude Code
-
-Use Claude Code for:
-
-- **Multi-file refactors** that need a holistic plan before any edit lands.
-- **Code analysis** the user wants done thoroughly — "review this module", "find the bug in this 800-line file", "explain why X is slow".
-- **Implementations you're unsure about** where a more capable model would catch issues you'd miss.
-- **A second pair of eyes** on a design you've already drafted, especially when the user asks for one.
-
-Do **not** use Claude Code for:
-
-- One-line edits, typo fixes, single-function tweaks.
-- Anything where the user is watching your tool calls and wants to see each step — Claude's intermediate output is captured but not streamed back to the user.
-- Tasks that depend on context you haven't extracted yet. Claude won't have repo-wide context either; you have to brief it explicitly.
-
-## Authentication boundary
-
-Authentication is an **operator-owned host action**. Model-driven tools cannot read or write `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or the persistent credential directories, and must never ask a user to paste an API key or OAuth token into chat.
-
-Even when TypeClaw's trusted runtime has provider credentials, model-driven bash does not inherit them and cannot open the exported profile. There is no readiness check that turns authenticated delegation on.
-
-Stop and tell the operator that they must authenticate and invoke Claude Code directly from the **host side**. Do not promise that `typeclaw restart`, a role grant, a guard acknowledgement, or an existing provider login will make authenticated model-driven delegation available. Any direct Claude Code login or token setup must be completed entirely by the operator; do not request its output.
-
-If Claude Code presents an auth prompt or API-key confirmation that would require entering or inspecting a credential, abort and report that host-side authentication is required. Never transmit a credential through tmux, a prompt, a tool argument, or a file writable by the model. See `references/auth-flow.md`.
-
-### Cost-cap warning
-
-Interactive-mode Claude Code has **no built-in spend cap** — `--max-budget-usd` only works in `-p` mode, which is not what we use here. If the user is on the API-key path, recommend setting a workspace spend limit in the Anthropic Console; that's the only safety net. If they're on OAuth (subscription), usage is bounded by the subscription's monthly Agent SDK credit pool. Tell them once before the first delegation so it's not a surprise.
+Brief the task, repository, constraints, and acceptance checks. Use this for substantial implementations, investigations, refactors, or a second opinion; do trivial edits directly.
 
 ## Prerequisites
 
-Before you spawn `claude` for any real work:
+The host operator enables `docker.file.claudeCode:true`, configures the Anthropic provider, and starts the rebuilt image. Use the tool's safe diagnostic to check readiness; never inspect credential files or environment values. Missing binary: ask for a host rebuild/restart. Missing or revoked authentication: host `typeclaw provider add anthropic`, then retry. See [auth-flow.md](references/auth-flow.md).
 
-- **`docker.file.claudeCode: true`** in `typeclaw.json`. Verify with `which claude`; if missing, the toggle isn't on. Tell the user to enable it and `typeclaw start --build`.
-- **`docker.file.tmux: true`** (default `true`, but check). Verify with `which tmux`.
-- **No authenticated model-driven path.** If the task requires a Claude account, stop and hand execution to the direct host-side operator. Do not probe env vars or credential files.
-- **Onboarding pre-seeded.** The Dockerfile layer writes non-secret onboarding preferences. A workspace-trust dialog may still appear. Any API-key or sign-in dialog means the command requires authentication that model-driven tools cannot receive: abort rather than navigating it.
-- **Agent folder is a git repo.** Verify with `git -C /agent rev-parse --is-inside-work-tree`. The worktree model below requires it. If the user's agent folder somehow isn't a repo (rare — `typeclaw init` scaffolds one), tell them to `git init && git add -A && git commit -m "initial"` first.
-- **No uncommitted changes that you care about.** `git -C /agent status --porcelain` should be clean, or you should be willing to set the working tree aside before delegating. The worktree is a separate checkout, so claude can't see your uncommitted changes — meaning claude operates on the last committed state. If the user wants claude to work with in-progress edits, commit them first (even on a WIP branch).
+## Run through an operator
 
-If any prerequisite is missing, stop and surface the gap to the user. Do not try to install `claude` yourself in the running container — the install belongs in the Dockerfile layer, not at runtime.
+The main agent spawns a background `operator` with the repository, task, constraints, and expected checks. The operator invokes `coding_agent` in the foreground. The existing subagent completion delivers the report while the main conversation stays responsive.
 
-## Create the worktree
+First run, with a compatible configured model:
 
-Each delegation runs inside a dedicated `git worktree` checkout under `/tmp/`. This is the load-bearing isolation that makes the rest of the skill safe:
-
-- **Claude can edit, commit, reset, run tests** — none of it touches the agent folder's live working tree or its main branch pointer.
-- **You get perfect introspection.** `git diff` between claude's branch and your main checkout shows exactly what claude changed; `git log` shows how it got there.
-- **Cleanup is bounded.** When you're done, you remove the worktree and its branch; nothing persists on disk except deliberately cherry-picked commits.
-- **The agent folder's `git status` stays clean during delegation** — the user can keep working on their own checkout while claude operates in parallel.
-
-### Setup
-
-Pick a task id (short hex string or `verb-noun` like `refactor-auth`) and create the worktree:
-
-```sh
-git -C /agent worktree add -b cc-<task-id> /tmp/cc-<task-id> HEAD
-cd /tmp/cc-<task-id>
+```json
+{
+  "action": "run",
+  "engine": "claude",
+  "repo": "/agent",
+  "modelRef": "anthropic/claude-opus-5-5",
+  "mode": "code",
+  "prompt": "Implement the requested change and run its tests.",
+  "timeoutSeconds": 1800
+}
 ```
 
-This creates:
+Record the returned `taskId`, `baseSha`, and `worktreePath`. The baseline is committed HEAD. Dirty source changes are excluded and reported; do not auto-commit or stage them to satisfy a prerequisite.
 
-- A new branch `cc-<task-id>` rooted at the agent folder's current `HEAD`.
-- A new working tree at `/tmp/cc-<task-id>/` containing every file from that commit.
-- An entry in `/agent/.git/worktrees/cc-<task-id>/` that ties the two together.
+For planning use `mode:"plan"`; the worktree and its Git database are read-only. Continue with a new prompt and the same task ID, explicitly using `mode:"code"` for approved implementation. The runtime manages explicit CLI session resume and fresh invocation authority. Never select the latest session or pass your own CLI session identifier. See [headless-sessions.md](references/headless-sessions.md).
 
-The worktree shares the agent folder's `.git` directory but has its own `HEAD`, index, and working tree. Branch state lives in `/agent/.git/refs/heads/cc-<task-id>` regardless of where the worktree itself lives on disk.
+## Review, recover, dispose
 
-No per-task hook config is needed — the Stop and SessionStart hooks are wired globally at Dockerfile-build time (see "The Stop hook" below). Your worktree just becomes the cwd when you spawn `claude`; the global hooks write per-session files into `$PWD` (which `tmux new-session -c /tmp/cc-<id>` sets to the worktree).
+Inspect structured state, final message, changed-file inventory, and complete patch. A successful CLI turn is not proof that tests passed. If the answer asks a question, provide a follow-up prompt or ask the parent; do not classify completion by English keywords or poll for sentinels.
 
-```
-/tmp/cc-<task-id>/
-├── .session-id                  # written by SessionStart hook (fast path; may not appear before trust is accepted)
-├── sentinel-<uuid>.json         # written by Stop hook per turn
-├── .done-<uuid>                 # flag file written by Stop hook per turn
-└── ...                          # plus every file from the agent folder's HEAD
-```
+Read the full diff, including untracked/binary files, and run relevant checks before applying through ordinary tools. No automatic commit, merge, push, PR, or channel publication occurs.
 
-### Why `/tmp/`, not `workspace/`?
+After failure, timeout, cancellation, or restart, retain the partial work. `{"action":"result","taskId":"<returned UUID>"}` retrieves the authoritative receipt. Resume explicitly; do not silently start a replacement conversation. Discard only when no useful work will be lost: `{"action":"dispose","taskId":"<returned UUID>","discard":true}`. See [results-and-worktrees.md](references/results-and-worktrees.md).
 
-`workspace/` is the agent folder's gitignored scratch zone — fine for one-off scripts. But a `git worktree` is a _checkout_, not scratch: it carries an index, refs in `/agent/.git/worktrees/`, and (briefly) shares working-tree state with the main checkout. Putting it under `workspace/` would mean the agent folder contains a worktree of itself, which works mechanically but is recursive and confusing (nested worktrees? infinite recursion if claude does `git status`?). `/tmp/cc-<id>/` keeps the worktree clearly outside the agent folder. It's also genuinely ephemeral — `/tmp/` is tmpfs-ish, survives container life but never enters git history or backups.
+## Credential boundary
 
-## The Stop hook
-
-Claude Code fires a `Stop` hook every time it finishes responding — turn-end, not session-end. The hook runs an arbitrary shell command with the lifecycle event payload (JSON) on stdin. We use this as the done-signal: the hook writes the payload to `sentinel.json` and `touch`es `.done`, and your polling loop watches for `.done`.
-
-**The hook is pre-baked into the container image.** When `docker.file.claudeCode: true`, the Dockerfile install layer writes TWO hook scripts and a settings file:
-
-- `/usr/local/bin/typeclaw-cc-session-start-hook` — fires once at session start. Reads the SessionStart event JSON from stdin, extracts `session_id`, validates it as a UUID, and writes `$PWD/.session-id` (atomically, temp-then-rename) containing that UUID. This is how the operator learns the session UUID — the only reliable way, because `claude --session-id <uuid>` does NOT propagate to hook payloads in interactive mode (anthropics/claude-code#44607).
-- `/usr/local/bin/typeclaw-cc-stop-hook` — fires every turn. Reads the Stop event JSON from stdin, extracts the same `session_id`, and writes per-session files: `$PWD/sentinel-<session_id>.json` atomically and `$PWD/.done-<session_id>`. The script uses `$PWD` (the literal cwd Claude Code was invoked with — set by the operator's `tmux new-session -c /tmp/cc-<id>`) rather than Claude Code's `$CLAUDE_PROJECT_DIR`, which resolves to the _git root of cwd_ and inside a worktree returns the main repo's path, not the worktree path. See the `TYPECLAW_CC_STOP_HOOK_PATH` comment block in `src/init/dockerfile.ts` for the upstream-bug citations (anthropics/claude-code#27343, #44450) that drove that choice.
-- `~/.claude/settings.json` — user-level (global) Claude Code settings that register both hooks for every `claude` invocation in the container. Built at build time via `JSON.stringify` so the shape never drifts. Both hooks use exec form (`args: []` present) so Claude Code invokes them via `execvp` directly (kernel-handled shebang, no shell tokenization).
-
-You do **not** write any of these files. The previous version of this skill had you `mkdir -p .claude && cat > .claude/settings.json …` per worktree; that step is removed. The shape of the JSON used to be the single most failure-prone part of a delegation (Claude Code silently ignores unknown keys, so wrong-shape configs like `{"hooks": {"onStop": "./script.sh"}}` would let the polling loop run to its wall-clock budget without ever firing the hook), and the only reliable fix is to keep the JSON out of LLM hands entirely.
-
-### Per-session filenames — race safety
-
-The sentinel and `.done` filenames carry the session UUID — `sentinel-<uuid>.json` and `.done-<uuid>` — so two `claude` sessions sharing a cwd cannot collide on a fixed `sentinel.json`. You learn the UUID one of two ways:
-
-1. **Fast path: read `.session-id` after spawning claude.** The SessionStart hook writes it on session start. Works for sessions that don't hit the workspace-trust dialog (re-attached worktrees, etc.).
-2. **Discovery path: read it from the first Stop sentinel.** After sending the first prompt, glob `.done-*` for new files. The first one's UUID becomes `cc_session_id`. This path is required for fresh worktrees because per anthropics/claude-code#11519, **SessionStart is skipped entirely while workspace trust is pending** — and EVERY fresh worktree starts with the trust dialog pending. The fast path never wins on a first delegation.
-
-In both cases, **`cc_session_id` can ROTATE mid-delegation**. Per anthropics/claude-code#29094, `SessionStart` with `source: "compact"` is a NEW session linked via `parent_session_id`. So a long claude session that auto-compacts will start emitting Stop events with a DIFFERENT session_id. Your polling loop must handle this: if you see a new `.done-<different-uuid>` appear, update `cc_session_id` to the new value.
-
-**Do NOT use `claude --session-id <uuid>`.** Per anthropics/claude-code#44607, the flag works only in `-p` (print) mode; in interactive mode it sets a telemetry ID while the CLI generates its own UUID for the transcript and for hook payloads. The pre-generated UUID and the hook's UUID don't match, the polling loop watches a file that never appears, and the loop times out. If you find yourself reaching for `--session-id`, stop — let claude pick its own UUID and learn it via discovery.
-
-If you see `$PWD/.session-id` containing the literal string `malformed`, or `$PWD/sentinel-malformed.json` appearing instead of your expected file, a hook fired but couldn't extract a UUID-shape `session_id` from the event payload (malformed JSON, missing field, or a future upstream schema change). Read the file to diagnose; surface to the user.
-
-### Verifying the global hooks
-
-Verify both hooks are wired correctly in the container before the first delegation of a session:
-
-```sh
-test -x /usr/local/bin/typeclaw-cc-stop-hook && \
-  test -x /usr/local/bin/typeclaw-cc-session-start-hook && \
-  jq -e '
-    .hooks.Stop[0].hooks[0].command == "/usr/local/bin/typeclaw-cc-stop-hook"
-    and .hooks.Stop[0].hooks[0].args == []
-    and .hooks.SessionStart[0].hooks[0].command == "/usr/local/bin/typeclaw-cc-session-start-hook"
-    and .hooks.SessionStart[0].hooks[0].args == []
-  ' "$HOME/.claude/settings.json"
-```
-
-Three distinct failure modes if it fails:
-
-| Symptom                                              | Cause                                                               | Remediation                                                                                                                           |
-| ---------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `test -x …` fails                                    | Hook script missing                                                 | `docker.file.claudeCode` is off, or image built before this layer landed → `typeclaw start --build`                                   |
-| Scripts present, `jq` fails                          | `$HOME/.claude/settings.json` was overwritten or bind-mounted       | Check `cat ~/.claude/settings.json` for user-mounted config; if so, the operator's hooks won't fire and the delegation cannot proceed |
-| Scripts + settings correct, no sentinel ever appears | Hooks failing at runtime (trust skip, schema mismatch, permissions) | Inspect `ls -la /tmp/cc-<id>/.cc-*-in.*` to see if hooks fired at all, and read any `sentinel-malformed.json` for diagnostic          |
-
-Don't try to write the hook config yourself — the operator subagent doesn't have the right tools to do it reliably, which is exactly the failure mode this layout was built to eliminate.
-
-The full schema of the Stop event (every field Claude Code populates, including `last_assistant_message` and `transcript_path`) is in `references/stop-hook.md`.
-
-## Driving the session
-
-The minimum protocol — translate to your actual tool calls:
-
-1. Create the worktree.
-2. `tmux new-session -d -s cc-<id> -c /tmp/cc-<id> claude`. Do NOT pass `--session-id` — it doesn't propagate to hook payloads in interactive mode (see "Per-session filenames" above).
-3. Wait ~3 seconds for the TUI to initialize.
-4. **Clear startup dialogs (BEFORE sending the task prompt).** Even with `~/.claude.json` pre-seeded, claude can land on one or both pre-prompt modals. Run this as a **loop**, not a one-shot: clearing one dialog can immediately reveal the next, and you must keep polling until claude's actual input prompt is visible (it renders a bottom-of-pane input box with a `╭` / `╰` border). **Do NOT poll `.session-id` before this step** — per anthropics/claude-code#11519, SessionStart is suppressed while workspace trust is pending, so `.session-id` will not appear until you've accepted trust here.
-
-   The two known modals, with the exact keystrokes for each (Claude Code's select widget does NOT wrap — pressing `Up` from the first option is a no-op, so the direction must match the dialog's option order):
-   - **Custom API key or sign-in prompt** — abort the session and tell the direct operator to authenticate and run Claude Code host-side. Never accept the prompt or enter a credential.
-
-   - **Workspace trust** — "Do you trust the files in this folder?" Fires on first launch in any new cwd, so every fresh `/tmp/cc-<id>/` worktree triggers it. Options are `[Yes, proceed, No, exit]` with focus on the first option (**Yes**) by default. Resolution: bare `tmux send-keys -t cc-<id> Enter` — no arrow key needed. Always verify the pane text matches the trust dialog before pressing Enter; a misidentified modal would submit a different default.
-
-   Loop shape (translate to your tool calls):
-   1. Capture the last ~15 lines: `tmux capture-pane -t cc-<id> -p -S -15`.
-
-5. If the capture contains an API-key or sign-in dialog → send `/exit` (or terminate the unauthenticated session if no input box is available), then report that the direct host-side operator must authenticate and run Claude Code. Never select a credential option or enter a key. 3. If the capture contains the trust dialog text → `send-keys Enter`, sleep 500ms, goto 1. 4. If the capture shows the input box (`╭` border on a bottom line, no dialog text above it) → ready; exit the loop. 5. Otherwise sleep 500ms, goto 1. Apply a wall-clock budget of ~10 seconds; if the loop hasn't reached step 4 by then, abort with `/exit` and surface to the user — claude is in a state this skill doesn't model.
-
-   Do not use a fixed 2-second wait then send the prompt — cold-start and slow-disk cases can deliver a dialog at 2.5s+, and sending the task prompt into a modal corrupts the session.
-
-   **Safety note**: accepting workspace trust on a fresh `/tmp/cc-<id>/` worktree is the right call **only when its `HEAD` is the intended clean state** — typically the agent folder's last good commit on a branch the user controls. If the user just merged a third-party PR, pulled a remote branch, or checked out an untrusted ref, the worktree carries that content too and "trusting" it gives claude tool access on potentially hostile code. Before auto-accepting trust, sanity-check: if the user hasn't said something equivalent to "delegate this to Claude Code", or if you're not confident the current `HEAD` is one the user authored or reviewed, surface the trust dialog to them instead. Do NOT extend even a legitimate trust acceptance to in-session permission prompts (Bash, Edit, etc.) — those still need per-turn judgment per the multi-turn decision loop below.
-
-6. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
-7. **Discover the session UUID from the newest unprocessed Stop sentinel.** Poll `/tmp/cc-<id>/.done-*` in a loop: each iteration, enumerate the files sorted by mtime (`ls -t`), filter out any UUIDs you've already processed (initially empty), and pick the first one whose UUID is a real hex UUID (not `malformed`). That UUID becomes `cc_session_id`. On every poll, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed. (Fast-path optimization: if `/tmp/cc-<id>/.session-id` happened to appear before the first prompt, you can use it instead and skip the glob — see `references/tmux-driving.md` for the fast-path snippet.) If the only marker that appears is `.done-malformed`, the Stop hook fired but couldn't extract a UUID-shape `session_id` from the payload — bail and surface to the user.
-8. Read `/tmp/cc-<id>/sentinel-${cc_session_id}.json`, examine `last_assistant_message`, then `rm /tmp/cc-<id>/.done-${cc_session_id}` (the SPECIFIC file you just processed, NOT a glob — globbing wipes any in-flight new sentinel from a concurrent compact rotation).
-9. Decide using the multi-turn loop below. **Track which UUIDs you've already processed.** On the next poll, again pick the newest unprocessed `.done-<uuid>`. If the UUID differs from the previous `cc_session_id`, claude has compacted (anthropics/claude-code#29094) — update `cc_session_id` to the new value and continue. Polling is edge-triggered: don't wait on `.done-${cc_session_id}` specifically, because if compact rotated the UUID, that file will never appear.
-10. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
-
-The full polling implementation, the ANSI-handling rules for `capture-pane` fallbacks, and the "tmux session died unexpectedly" recovery path are in `references/tmux-driving.md`.
-
-## The multi-turn decision loop
-
-`Stop` fires every turn — including turns where claude paused to ask you a question, not just turns where claude finished the task. After every Stop sentinel, read `last_assistant_message` and decide:
-
-- **Ends with a question mark, or contains "Do you want me to", "Should I", "Could you clarify"** → claude is asking a clarifying question. Compose an answer from the original task brief and `send-keys` it back. Reset the loop: `rm /tmp/cc-<id>/.done-${cc_session_id}` (the SPECIFIC file you just processed), add that UUID to your processed set, then poll for the next newest unprocessed `.done-<uuid>`.
-- **Mentions a permission-style ask** ("May I run `<command>`?", "Allow me to edit `<file>`?") → answer per the task's safety constraints. If the constraint is unclear, abort with `/exit` and surface to the user — never invent a yes/no on the user's behalf for an unbounded operation.
-- **Looks like a final result** (code block + summary, or "Done.", "Here's the result.", "I've finished") → capture and `/exit`.
-- **Looks like a status update mid-tool-use** ("Let me check…", "Reading the file now…") → this is a spurious Stop (a Claude turn-boundary that isn't real task progress). `rm /tmp/cc-<id>/.done-${cc_session_id}`, add the UUID to your processed set, and keep polling.
-
-**Hard turn cap: 8 turns per delegation.** Beyond that, either the task is too complex to delegate cleanly or claude is stuck in a loop. Abort with `/exit`, capture what you have, surface to the user with: "Claude took 8 turns without finishing — here's what it produced, what do you want to do?"
-
-This loop is the most failure-prone part of the skill. If you find yourself uncertain whether a message is a question or a result, **default to surfacing to the user**, not to guessing. Wrong answers compound across turns.
-
-## Capturing the output
-
-Four sources, in order of preference:
-
-1. **`git diff /agent main..cc-<id>`** (run from `/agent`, or use the explicit worktree path). This is the killer feature of the worktree model — the exact set of changes claude made, branch-vs-branch. Use this for code-change tasks.
-2. **`git log cc-<id> --oneline main..cc-<id>`** for how claude got there (the sequence of commits). Useful when claude broke a refactor into steps you want to attribute or cherry-pick.
-3. **`sentinel-<cc_session_id>.json` from the final turn** (`last_assistant_message`). The narrative summary claude gave you. Use this for analysis tasks where the answer is prose, not code.
-4. **The JSONL transcript** at `transcript_path` in the sentinel. The complete conversation including intermediate tool calls. Use when the diff/log aren't enough and you need to see how claude reasoned. Schema in `references/stop-hook.md`.
-
-For code-change tasks, the canonical pattern is:
-
-1. Read `last_assistant_message` for the summary.
-2. Run `git diff main..cc-<id> -- <files>` to see the actual changes.
-3. Decide: are these changes good? If yes, either `git cherry-pick <commits>` onto the agent folder's branch OR copy the changes manually into the main checkout and commit there with proper attribution (per `typeclaw-git`).
-4. Throw away the `cc-<id>` branch.
-
-Never paste Claude's output verbatim into your reply or a commit message. Summarize, attribute ("Claude Code's analysis: ..."), and stay accountable for the work. You delegated up; you didn't outsource ownership.
-
-## Cleanup discipline
-
-Cleanup is git-aware: a worktree isn't just a directory. Three steps, in order:
-
-```sh
-tmux kill-session -t cc-<id> 2>/dev/null || true
-git -C /agent worktree remove --force /tmp/cc-<id>
-git -C /agent branch -D cc-<id>
-```
-
-- **`tmux kill-session`** first because claude might still be holding files open. `|| true` because a clean `/exit` already killed the session.
-- **`git worktree remove --force`** because the working tree may have dirty files (the sentinel, the hook script, claude's in-progress edits). `--force` skips the "uncommitted changes" check; this is correct here because we're explicitly discarding the worktree.
-- **`git branch -D cc-<id>`** to delete the branch ref. Without this, `cc-<id>` lingers in `git branch -a` indefinitely. `-D` (capital) because `cc-<id>` is unmerged into anything you care about.
-
-Always do all three, including on failure paths. Orphan worktrees:
-
-- Show up in `git worktree list` forever.
-- Cause `git status` in the agent folder to mention "another worktree exists at /tmp/cc-<id>" if you `cd` somewhere related.
-- Make the next delegation with the same task-id fail with "branch already exists".
-
-Before starting a new delegation, check for orphans:
-
-```sh
-git -C /agent worktree list | grep cc-
-tmux ls 2>/dev/null | grep '^cc-'
-```
-
-Kill anything you find first.
-
-## When not to delegate
-
-A re-statement, because this is where the skill is most often misused:
-
-- **Trivial edits**: the round-trip cost dominates. Do it yourself.
-- **Tasks needing live user visibility**: claude's tool calls don't stream back through TypeClaw. The user sees a long pause, not progress. Use your own tools.
-- **Tasks where you don't have the context to brief claude**: spend tokens narrowing the problem first. A vague delegation produces a vague result.
-- **Any secret, including Anthropic credentials**: never pass it through the prompt or worktree. It would land in Claude's transcript and sentinels.
-
-## Things you must not do
-
-- **Do not use `claude -p` for delegation work.** The headless print mode strips plan mode, sub-agents, and the agent loop. The whole reason to delegate up is the loop. If you find yourself reaching for `-p`, the right answer is probably "do it yourself".
-- **Do not run `claude` directly inside `/agent`.** Always inside `/tmp/cc-<id>/`. Running claude in the agent folder lets it mutate the live working tree and break the user's session in flight.
-- **Do not skip the worktree.** Even for short delegations, the worktree is what gives you the `git diff` introspection and the rollback safety. Skipping it because "this one's small" is the path to claude accidentally committing on the wrong branch.
-- **Do not share a tmux session across two delegated tasks.** Each task needs its own worktree and its own tmux session. The hook config is global (`~/.claude/settings.json`), so sharing a worktree means two sessions race on the same `$PWD/.session-id` file. Per-session filenames (`sentinel-<uuid>.json`, `.done-<uuid>`) make per-turn artifacts safe across sessions but `.session-id` is fixed-name; the operator's discovery flow handles this by globbing `.done-*` anyway.
-- **Do not leave a tmux session, worktree, or branch alive after capturing the result.** All three need explicit teardown. Reusing them defeats the per-task isolation that makes the Stop hook reliable.
-- **Do not push claude's branch to a remote.** `cc-<id>` is throwaway. If something useful happened, cherry-pick onto a real branch first; don't push the experimental branch directly.
-- **Do not merge claude's branch into main without reviewing the diff.** The `git diff main..cc-<id>` is your review surface. Skipping the diff and merging blindly means you don't actually know what shipped.
-- **Do not commit `/tmp/cc-<id>/` artifacts back to the agent folder.** The sentinel, the hook script, the captured pane content are scratch — they live in `/tmp/`, they die with `worktree remove`.
-- **Do not paste Claude's output verbatim into a commit message or a user reply.** Summarize and attribute. You're accountable for the work you ship.
-- **Do not put `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in `typeclaw.json`, a prompt, a worktree, or any model-accessible file.** Credential provisioning is direct-operator host work; the model does not edit `.env`.
-- **Do not poll the JSONL transcript directly as the done-signal.** The JSONL has documented race conditions (the file can be stale when `Stop` fires, or occasionally missing entirely). The sentinel is the reliable signal; the JSONL is for content, not lifecycle.
-- **Do not read, write, edit, parse, or verify `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or any credential value.** These are outside the model-driven tool boundary; guard acknowledgements do not make credential handling acceptable.
-- **Do not run `claude setup-token` inside the container, and do not ask the user to paste its output.** Authentication remains entirely on the operator's host side.
-- **Do not ask for, receive, echo, log, or transcribe credentials.** If a user offers one, tell them not to send it and direct them to host-side setup.
-- **Do not invent answers to Claude's clarifying questions.** If you can't derive the answer from the original task brief, surface the question to the user. Wrong answers compound across multi-turn delegations.
-- **Do not exceed 8 turns per delegation.** Abort, capture what you have, surface. Long delegations almost always mean the task wasn't shaped right.
-- **Do not assume `claude` exists.** If `which claude` returns empty, the `docker.file.claudeCode` toggle isn't on. Tell the user, don't try to install it yourself.
-
-## Cross-references
-
-- **`references/auth-flow.md`** — the authentication boundary: authenticated delegation is unavailable to model-driven tools, and direct host-side setup and execution belong to the operator.
-- **`references/tmux-driving.md`** — full polling implementation, ANSI handling, session-died recovery, the `capture-pane` fallback details, the worktree-is-not-scratch distinction.
-- **`references/stop-hook.md`** — complete `Stop` event JSON schema, `SubagentStop` differences, transcript JSONL schema (unofficial but reverse-engineered), documented race conditions to handle.
-- **`typeclaw-config`** — the `docker.file.claudeCode` toggle that gates the install.
-- **`typeclaw-git`** — commit discipline for any cherry-picks or hand-copies from claude's worktree back into the agent folder.
-- **`typeclaw-monorepo`** — the `workspace/` vs `packages/` distinction (this skill uses `/tmp/`, not `workspace/`, for reasons explained above).
+Only the trusted runtime handles provider credentials. The child receives an invocation-local capability, not a provider token. Never put credentials in chat, prompts, files, tool arguments, or child environment; never run login/setup-token, dump profiles, or use guard acknowledgements as an authentication workaround. Raw bash invocations of `claude` do not acquire broker authority. Codex delegation is not yet available.
