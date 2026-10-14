@@ -273,11 +273,17 @@ function isTypeclawToolName(name: string): name is TypeclawToolName {
   return name in TYPECLAW_TOOL_DEFINITION_MAP
 }
 
-export function resolveBuiltinToolRefs(refs: BuiltinToolRef[], cwd: string): ToolDefinition<any, any, any>[] {
+export function resolveBuiltinToolRefs(
+  refs: BuiltinToolRef[],
+  cwd: string,
+  contextTools: ReadonlyMap<string, ToolDefinition<any, any, any>> = new Map(),
+): ToolDefinition<any, any, any>[] {
   return refs.map((ref) => {
     const name = ref.__builtinTool
     if (isPiBuiltinToolName(name)) return createPiBuiltinToolDefinition(name, cwd)
     if (isTypeclawToolName(name)) return TYPECLAW_TOOL_DEFINITION_MAP[name]
+    const contextual = contextTools.get(name)
+    if (contextual) return contextual
     throw new Error(`unknown built-in tool ref: ${name}`)
   })
 }

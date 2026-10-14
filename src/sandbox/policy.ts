@@ -1,6 +1,7 @@
 export type SandboxMount =
   | { type: 'ro-bind'; source: string; dest: string }
   | { type: 'bind'; source: string; dest: string }
+  | { type: 'ro-bind-fd' | 'bind-fd'; fd: number; dest: string }
   | { type: 'tmpfs'; dest: string }
   | { type: 'dev'; dest: string }
 

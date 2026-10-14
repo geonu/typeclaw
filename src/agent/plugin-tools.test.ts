@@ -6640,7 +6640,34 @@ describe('setupSession integration: builtin pi tools route through customTools w
     expect(active.has('grep')).toBe(true)
     expect(active.has('find')).toBe(true)
     expect(active.has('ls')).toBe(true)
+    expect(active.has('coding_agent')).toBe(true)
 
+    session.dispose()
+  })
+
+  test('coding_agent remains absent from empty and read-only subagent allowlists', async () => {
+    const { createSession } = await import('./index')
+    for (const toolRefs of [[], [{ __builtinTool: 'read' }, { __builtinTool: 'coding_agent' }]]) {
+      const session = await createSession({
+        plugins: { registry: emptyRegistry(), hooks: createHookBus(), sessionId: 'coding-readonly', agentDir },
+        pluginSubagent: { pluginName: 'fixture', toolRefs, toolNamePrefix: 'read-only' },
+      })
+      expect(session.getActiveToolNames()).not.toContain('coding_agent')
+      session.dispose()
+    }
+  })
+
+  test('a declared write-capable operator receives the context-dependent coding tool', async () => {
+    const { createSession } = await import('./index')
+    const session = await createSession({
+      plugins: { registry: emptyRegistry(), hooks: createHookBus(), sessionId: 'coding-operator', agentDir },
+      pluginSubagent: {
+        pluginName: 'fixture',
+        toolNamePrefix: 'operator',
+        toolRefs: ['read', 'write', 'bash', 'coding_agent'].map((name) => ({ __builtinTool: name })),
+      },
+    })
+    expect(session.getActiveToolNames().toSorted()).toEqual(['bash', 'coding_agent', 'read', 'write'])
     session.dispose()
   })
 })

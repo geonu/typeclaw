@@ -19,6 +19,8 @@ Adding a fifth kind is a deliberate design choice. No generic `handler` extensio
 
 ## Subagents
 
+Brokered Claude coding runs use the existing background `operator` and completion path. Inside that operator, `coding_agent` owns one foreground headless invocation; task IDs and persistent worktrees support later explicit resumes. There is no additional stream target or background-job framework.
+
 `src/agent/subagents.ts` defines the `Subagent` type and the `SubagentConsumer`. Three paths converge on `invokeSubagent`:
 
 1. `ctx.spawnSubagent(name, payload, options)` — direct, no Stream. Plugin hooks, main-agent `spawn-subagent` tool, plugin commands.

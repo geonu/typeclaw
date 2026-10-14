@@ -312,9 +312,8 @@ export const KNOWN_PROVIDERS = {
   // subscriber's `claude setup-token` credential authorizes. The OAuth dance
   // itself is authorization-code + PKCE against `claude.ai/oauth/authorize`
   // with a localhost callback server (not device-code); the existing
-  // `typeclaw-claude-code` skill documents the user-side flow for getting
-  // a subscription credential onto the agent when the in-container browser
-  // callback can't reach the user's machine.
+  // host provider setup owns login. coding_agent delegates inference through
+  // a fixed-upstream broker; it never exports a provider token to the CLI.
   //
   // anthropic is the FIRST provider in the registry where both auth modes
   // coexist on one entry. The runtime in src/agent/auth.ts has a load-bearing

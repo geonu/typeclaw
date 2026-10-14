@@ -33,6 +33,17 @@ function maskFdsOf(argv: string[]): [string, string][] {
 }
 
 describe('buildSandboxedCommand base argv', () => {
+  test('uses consuming native FD bind operations instead of magic-link pathname binds', () => {
+    const argv = argvOf('true', {
+      mounts: [
+        { type: 'ro-bind-fd', fd: 5, dest: '/source' },
+        { type: 'bind-fd', fd: 6, dest: '/task' },
+      ],
+    })
+    expect(argv.join(' ')).toContain('--ro-bind-fd 5 /source --bind-fd 6 /task')
+    expect(argv.join(' ')).not.toContain('/proc/self/fd/')
+  })
+
   test('wraps the command in bwrap and ends with bash -c <command>', () => {
     const argv = argvOf('git status')
     expect(argv[0]).toBe('bwrap')

@@ -12,6 +12,7 @@ import type { AgentSession, ToolDefinition } from '@earendil-works/pi-coding-age
 
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
+import { createCodingAgentTool } from '@/coding-agent/tool'
 import {
   getConfig,
   resolveModel,
@@ -339,13 +340,28 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   let loopGuardTurnId = 0
   const getLoopGuardTurn = () => loopGuardTurnId
   const guards = buildInternalGuards(options.plugins?.agentDir ?? process.cwd())
+  const codingTool = createCodingAgentTool({
+    agentDir: options.plugins?.agentDir ?? process.cwd(),
+    sessionId: options.plugins?.sessionId ?? sessionManager.getSessionId(),
+    getOrigin,
+    permissions: options.permissions ?? noopPermissionService,
+  })
 
   // Subagent built-in tool refs resolve to `ToolDefinition`s (see
   // plugin-tools.ts). Their NAMES narrow the session via `tools:`; their wrapped
   // implementations arrive through `customTools` (either `builtinPiToolOverrides`
   // for pi coding builtins, or `customSystemTools` for typeclaw web tools).
-  const resolvedSubagentBuiltins = options.pluginSubagent?.toolRefs
-    ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs, options.plugins?.agentDir ?? process.cwd())
+  const declaredRefs = options.pluginSubagent?.toolRefs
+  const writeCapable =
+    declaredRefs?.some((ref) => ref.__builtinTool === 'bash') &&
+    declaredRefs.some((ref) => ref.__builtinTool === 'write' || ref.__builtinTool === 'edit') &&
+    options.bashPolicy === undefined
+  const resolvedSubagentBuiltins = declaredRefs
+    ? resolveBuiltinToolRefs(
+        declaredRefs.filter((ref) => ref.__builtinTool !== 'coding_agent' || writeCapable),
+        options.plugins?.agentDir ?? process.cwd(),
+        new Map([['coding_agent', codingTool]]),
+      )
     : []
   const subagentBuiltinNames = resolvedSubagentBuiltins.map((t) => t.name)
   const subagentTypeclawToolDefinitions = resolvedSubagentBuiltins.filter((t) => !isPiCodingBuiltinName(t.name))
@@ -432,7 +448,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             }),
           ]
         : [
-            ...buildCoreSystemTools(options.permissions),
+            ...buildCoreSystemTools(options.permissions, codingTool).filter(
+              (tool) =>
+                tool.name !== 'coding_agent' || options.tools === undefined || options.tools.includes('coding_agent'),
+            ),
             ...(options.mcpManager
               ? buildMcpDispatcherToolDefinitions(options.mcpManager, {
                   permissions: options.permissions,
@@ -1008,8 +1027,11 @@ export function buildTodoTools(
   return createTodoTools({ agentDir, getOrigin })
 }
 
-function buildCoreSystemTools(permissions: PermissionService | undefined): ToolDefinition[] {
-  const definitions = [webSearchTool, webFetchTool, createLookAtTool(permissions)]
+function buildCoreSystemTools(
+  permissions: PermissionService | undefined,
+  codingTool: ToolDefinition,
+): ToolDefinition[] {
+  const definitions = [webSearchTool, webFetchTool, createLookAtTool(permissions), codingTool]
   const byName = new Map(definitions.map((tool) => [tool.name, tool]))
   if (byName.size !== definitions.length || byName.size !== CORE_SYSTEM_TOOL_NAMES.length) {
     throw new Error('core system tool catalog does not match its registered definitions')

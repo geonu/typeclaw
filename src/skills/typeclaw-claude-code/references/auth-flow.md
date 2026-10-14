@@ -1,29 +1,13 @@
-# Auth flow — operator-owned (Claude Code)
+# Authentication through the runtime broker
 
-Claude Code authentication is outside the model-driven tool boundary. **Authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools.** The agent must not read, print, parse, copy, write, verify, or probe any credential value or credential file.
+The host operator configures `providers.anthropic` through `typeclaw provider add anthropic` and enables `docker.file.claudeCode`. Rebuild/restart on the host when the installed binary is missing. The runtime uses the canonical credential store and coordinates refresh with ordinary agent requests.
 
-## No readiness bypass
+The tool reports readiness failures safely. Missing credentials affect this task, not startup or other providers. A revoked subscription needs host re-login, not model-side token handling. API-key and subscription authentication remain distinct; the broker never silently falls back from a failed subscription to API billing.
 
-Do not check environment variables or profile-file existence as a way to enable delegation. TypeClaw masks canonical credential files and directories from model-driven bash, strips reusable credential environments, and unconditionally blocks non-bash tools from opening them. Provider authentication available to trusted runtime code is not delegated to a model-driven Claude child.
+The sandboxed child has only a random, short-lived loopback capability. The broker accepts the selected model and explicit helper model on Messages/count-token routes, injects provider authentication upstream, and revokes the capability when the invocation ends. There is no token, refresh, login, or arbitrary proxy endpoint.
 
-## When authentication is missing
+Never inspect `.env`, `secrets.json`, `auth.json`, runtime HOME, or Claude profiles. Do not request `claude login`/`setup-token` output, copy credentials into a task, or send them through chat or tool arguments. Guard acknowledgements do not alter this boundary.
 
-Stop the delegation and tell the operator:
+Ordinary operator-declared `.env` values can already be visible to model bash. The confidentiality guarantee covers private canonical credentials not also exposed there, in prompts, or source history. The delegated runner does not inherit ambient credential variables.
 
-> Authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools. Authenticate and run Claude Code directly as the host-side operator. Do not send an API key or OAuth token in chat.
-
-The operator may manage Claude Code authentication directly on the host. The model must not broker that path, request `claude setup-token` output, or transfer a credential into the container.
-
-If Claude Code presents an auth prompt that requires entering or inspecting a credential, exit the delegated session. Do not run `claude setup-token` in the container or paste a key/token through tmux.
-
-## Runtime separation
-
-Trusted runtime provisioning does not authorize a model-driven child. Any exported persistent profile remains masked, and the sandbox intentionally does not mount it or preserve Anthropic credential variables. Restarting cannot change this policy boundary.
-
-## Hard prohibitions
-
-- Never ask for or accept an API key, OAuth token, access token, or credential-file contents in chat.
-- Never use `read`, `write`, `edit`, `look_at`, channel attachment tools, or shell commands to access `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or their persistent backing directories.
-- Never put credentials in prompts, tmux keystrokes, command arguments, sentinels, transcripts, logs, commits, or scratch files.
-- Never treat a guard acknowledgement as authorization to handle credentials. Canonical credentials are blocked independently of plugin guard hooks.
-- If a credential is offered, tell the user not to send it and redirect them to host-side setup.
+If auth fails, return the safe diagnostic to the parent and retain the worktree. Do not change endpoints or broaden the broker's routes to fix unsupported account/cloud features.

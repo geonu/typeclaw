@@ -278,6 +278,10 @@ function appendMount(argv: string[], mount: SandboxMount): void {
     case 'bind':
       argv.push('--bind', mount.source, mount.dest)
       return
+    case 'ro-bind-fd':
+    case 'bind-fd':
+      argv.push(`--${mount.type}`, String(mount.fd), mount.dest)
+      return
     case 'tmpfs':
       argv.push('--tmpfs', mount.dest)
       return

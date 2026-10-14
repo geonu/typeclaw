@@ -4,6 +4,8 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { buildGitignore } from '@/init/gitignore'
+
 import {
   type BackupRunnerDeps,
   type GitSpawn,
@@ -52,6 +54,44 @@ const baseDeps = (spawn: GitSpawn, message = 'chore: test'): BackupRunnerDeps =>
 })
 
 describe('runBackup', () => {
+  test('retains session backups but excludes coding worktrees, transcripts and registry', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'autobackup-coding-'))
+    const gitSpawn = makeDefaultGitSpawn()
+    const git = async (...args: string[]) => {
+      const result = await gitSpawn(args, { cwd, timeoutMs: 30_000 })
+      expect(result.exitCode).toBe(0)
+      return result.stdout
+    }
+    try {
+      await git('init', '-q', '-b', 'main')
+      await git('config', 'user.name', 'Test')
+      await git('config', 'user.email', 'test@example.com')
+      await writeFile(join(cwd, '.gitignore'), buildGitignore())
+      await git('add', '.gitignore')
+      await mkdir(join(cwd, 'sessions'))
+      await writeFile(join(cwd, 'sessions', 'session.jsonl'), 'initial\n')
+      await git('add', '-f', 'sessions/session.jsonl')
+      await git('commit', '-qm', 'initial')
+      for (const name of [
+        'workspace/coding-agents/task/claude/session.jsonl',
+        'workspace/coding-agents/task/worktree/code.ts',
+        'workspace/coding-agents/task/output/result.json',
+        '.typeclaw/coding-agent-tasks.json',
+        'sessions/session.jsonl',
+      ]) {
+        const target = join(cwd, name)
+        await mkdir(target.slice(0, target.lastIndexOf('/')), { recursive: true })
+        await writeFile(target, '{}\n')
+      }
+      expect(
+        await runBackup({ cwd, pushToOrigin: false }, { gitSpawn, pickCommitMessage: async () => 'backup sessions' }),
+      ).toEqual({ ok: true, kind: 'committed' })
+      expect(await git('show', '--format=', '--name-only', 'HEAD')).toBe('sessions/session.jsonl\n')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('default runner commits without executing a planted hook', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'autobackup-hookless-'))
     try {

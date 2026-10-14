@@ -46,6 +46,7 @@ import { InboundJournal } from '@/channels/inbound-journal'
 import { RecoveryDispatcher } from '@/channels/recovery-dispatcher'
 import { RecoveryOutbox } from '@/channels/recovery-outbox'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
+import { retainCodingAgentService } from '@/coding-agent'
 import { createConfigReloadable, getConfig, loadConfigBundleSync, reloadConfig, withDefaultPlugins } from '@/config'
 import {
   type CountStore,
@@ -72,7 +73,6 @@ import { createContainerBroker, publishForwardResult, subscribeForwardRequest } 
 import { formatChannelReloadSummary, ReloadRegistry, type ReloadAllResult, type ReloadContext } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import {
-  exportClaudeCredentialsFileForAgent,
   exportCodexAuthFileForAgent,
   exportGithubCliStoreForAgent,
   hydrateChannelEnvFromSecrets,
@@ -137,7 +137,6 @@ export type StartAgentOptions = {
   // Boot credential exporters are injectable so ordering tests can prove they
   // observe secrets only after the awaited provider-OAuth refresh settles.
   exportCodexAuthFile?: typeof exportCodexAuthFileForAgent
-  exportClaudeCredentialsFile?: typeof exportClaudeCredentialsFileForAgent
   exportGithubCliStore?: typeof exportGithubCliStoreForAgent
   // Boot-time proactive provider-OAuth refresh. Injectable so a test can supply
   // a refresh that holds the real secrets lock on a gate, proving the boot
@@ -207,7 +206,6 @@ async function startAgentRuntime(
     createTunnelManager: createTunnelManagerFor = createTunnelManager,
     caps = createRuntimeCapabilities(process.env, join(cwd, 'secrets.json')),
     exportCodexAuthFile = exportCodexAuthFileForAgent,
-    exportClaudeCredentialsFile = exportClaudeCredentialsFileForAgent,
     exportGithubCliStore = exportGithubCliStoreForAgent,
     refreshProviderOAuth = refreshProviderOAuthForAgent,
     startResourceSampler: startResourceSamplerFor = startResourceSampler,
@@ -445,18 +443,9 @@ async function startAgentRuntime(
     log: (message) => console.warn(message),
   })
 
-  // Same shape as the codex exporter above, gated on `docker.file.claudeCode`
-  // and `secrets.json#providers.anthropic`. It likewise runs after the boot
-  // refresh, then writes ~/.claude/.credentials.json so the Claude Code CLI in
-  // the container can run without the user pasting a CLAUDE_CODE_OAUTH_TOKEN.
-  // See src/secrets/export-claude-credentials-file.ts for the newer-wins compare
-  // that prevents clobbering Claude Code's in-place token refreshes, and the
-  // read-merge-write that preserves any mcpOAuth state in the file.
-  exportClaudeCredentialsFile({
-    agentDir: cwd,
-    claudeCodeEnabled: cwdConfig.docker.file.claudeCode,
-    log: (message) => console.warn(message),
-  })
+  // Claude credentials stay in the runtime; no CLI profile is exported.
+  const stopCodingAgents = retainCodingAgentService(cwd)
+  registerBootCleanup(stopCodingAgents)
 
   const githubCliExport = exportGithubCliStore({
     agentDir: cwd,
@@ -1139,6 +1128,7 @@ async function startAgentRuntime(
       setReviewObserver(null)
       setReviewCoverageCapture(null)
       setReviewOutputObserver(null)
+      await stopCodingAgents()
       await tunnelManager.stop()
       await recoveryDispatcher?.stop()
       await channelManager.stop()

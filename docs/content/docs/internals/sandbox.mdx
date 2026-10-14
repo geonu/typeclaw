@@ -8,6 +8,18 @@ The outer typeclaw container is the runtime trust boundary, but model-driven too
 
 The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less namespace sandboxer that wraps a single subprocess in its own user/pid/mount/net namespace. Per bash call, the wrapper rebuilds an empty rootfs view containing only what the caller's policy declared it needs.
 
+## Brokered Claude delegation
+
+`coding_agent` is a dedicated first-party tool, not an exception in `resolvePrivilegedSandboxRuntime`. A background operator supervises one headless Claude invocation inside bwrap while a trusted loopback broker outside it authenticates only Messages and count-token requests against the fixed Anthropic upstream. The child gets a random invocation-local capability, never the provider API key, access token, or refresh token. Codex delegation is not yet available.
+
+`src/sandbox/coding-agent.ts` never binds the live source worktree or its credential write directory. Snapshot bootstrap exposes only the source's `.git` directory read-only at `/typeclaw-coding-source/.git`; later execution and artifact capture expose only the task-private files. Atomic credential rotation siblings and replacement inodes remain outside the child filesystem, rather than relying on masks of existing filenames. Selected revisions still reject canonical credential and runtime-private paths. Sibling tasks and runtime HOME are absent. Callers already require private-surface authority, so ordinary committed `memory/` and `sessions/` content does not disqualify an agent repository.
+
+Only this task's private Git database, worktree, non-secret Claude state, output, and scratch are writable. In plan mode the worktree and Git database are read-only. Native `--bind-fd`/`--ro-bind-fd` operations verify the opened directory identity and consume each descriptor before the child starts; plain `/proc/self/fd` pathname binds must not be substituted. Older bwrap builds lacking these operations fail this delegation with a rebuild diagnostic, without changing ordinary bash. Source inspection and Git snapshot/diff operations also run credential-free inside bwrap.
+
+User/PID isolation, `--new-session`, `--die-with-parent`, and verified safe proc handling remain required. No unsandboxed fallback exists. `network:inherit` permits the loopback broker and dependency downloads without publishing a host port or granting network capabilities. The runner constructs its environment explicitly; ambient `.env` and provider credentials are not inherited.
+
+Task authority lives in masked `.typeclaw/coding-agent-tasks.json`; writable CLI artifacts are never authorization. Live caller, original scope, principal, and private-workspace access are checked for continuation and results. Exit, failure, timeout, cancellation, and runtime shutdown close the broker and reap the process group. Worktrees persist after interruption for explicit review/resume/disposal. See [Delegate coding](/docs/guides/delegate-coding).
+
 The base layer — the apt package and the `docker run` flag that make bwrap available — is documented below. The reusable command builder that consumes them lives in `src/sandbox/`: an origin-agnostic primitive that takes a bash command plus a `SandboxPolicy` and returns the bwrap-wrapped argv. It knows nothing about subagents or the agent runtime; a consumer resolves a policy from whatever context it has and calls the builder.
 
 ## Role-based path hiding
