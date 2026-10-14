@@ -5,6 +5,8 @@ import { join, posix } from 'node:path'
 
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
 import { CODEX_CLI_VERSION, codexEnvironment } from '@/coding-agent/codex'
+import { OMO_CLI_VERSION, omoEnvironment } from '@/coding-agent/omo'
+import { prepareOmoDirectories } from '@/coding-agent/omo-state'
 import { runCodingProcess } from '@/coding-agent/worktree'
 
 import { buildSandboxedCommand } from './build'
@@ -86,6 +88,138 @@ test('refuses a task-root symlink instead of binding another directory', async (
     'symlink',
   )
 })
+
+test.each(['code', 'plan'] as const)(
+  'OmO %s masks only project config operands and retains task HOME and outer confinement',
+  async (mode) => {
+    for (const dir of [taskRoot, join(taskRoot, 'worktree')]) {
+      await mkdir(join(dir, '.omo'))
+      for (const name of ['omo.json', 'omo.jsonc'])
+        await writeFile(join(dir, '.omo', name), '{"categories":{"quick":{"models":["other/model"]}}}')
+    }
+    await writeFile(join(taskRoot, 'worktree', 'AGENTS.md'), 'Project instructions.')
+    const policy = await codingSandboxPolicy(
+      {
+        source,
+        taskRoot,
+        mode,
+        engine: 'omo',
+        cwd: join(taskRoot, 'worktree'),
+        env: omoEnvironment(join(taskRoot, 'omo'), 'local-capability'),
+      },
+      'proc-bind',
+    )
+    const files = [taskRoot, join(taskRoot, 'worktree')].flatMap((dir) =>
+      ['omo.json', 'omo.jsonc'].map((name) => join(dir, '.omo', name)),
+    )
+    expect(policy.masks?.files).toEqual(files)
+    expect(policy.masks?.dirs).toBeUndefined()
+    const built = buildSandboxedCommand('true', policy)
+    expect(built.argv).toEqual(
+      expect.arrayContaining(['--unshare-all', '--die-with-parent', '--new-session', '--share-net']),
+    )
+    expect(built.spawnEnv.HOME).toBe(join(taskRoot, 'omo', 'home'))
+    expect(built.spawnEnv.OMO_CODING_AGENT_DIR).toBe(join(taskRoot, 'omo', 'agent'))
+    expect(JSON.stringify(built.spawnEnv)).not.toContain('fixture-provider-canary')
+    expect(built.spawnEnv.OPENAI_API_KEY).toBeUndefined()
+    expect(built.argv).not.toContain(source)
+    for (const path of files) expect(built.argv.indexOf(path)).toBeGreaterThan(built.argv.indexOf(taskRoot))
+    expect(built.argv).not.toContain(join(taskRoot, 'worktree', 'AGENTS.md'))
+  },
+)
+
+test.skipIf(process.platform === 'win32')(
+  'rejects unsafe OmO config aliases without widening other engine denials',
+  async () => {
+    const dir = join(taskRoot, 'worktree', '.omo')
+    await mkdir(dir)
+    await symlink(join(source, 'secrets.json'), join(dir, 'omo.jsonc'))
+    await expect(
+      codingSandboxPolicy(
+        { source, taskRoot, mode: 'code', engine: 'omo', cwd: join(taskRoot, 'worktree') },
+        'proc-bind',
+      ),
+    ).rejects.toThrow('configuration')
+    expect(
+      (
+        await codingSandboxPolicy(
+          { source, taskRoot, mode: 'code', engine: 'codex', cwd: join(taskRoot, 'worktree') },
+          'proc-bind',
+        )
+      ).masks,
+    ).toBeUndefined()
+  },
+)
+
+test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
+  'OmO config masks do not collide with anchored bind descriptors or hide project instructions',
+  async () => {
+    for (const dir of [taskRoot, join(taskRoot, 'worktree')]) {
+      await mkdir(join(dir, '.omo'))
+      await writeFile(join(dir, '.omo', 'omo.jsonc'), '{"model_profile":"other/model"}')
+    }
+    await writeFile(join(taskRoot, 'worktree', 'AGENTS.md'), 'Project instructions.')
+    await prepareOmoDirectories(join(taskRoot, 'omo'))
+    const prepared = await prepareCodingCommand(
+      [
+        '/bin/sh',
+        '-c',
+        'test ! -s .omo/omo.jsonc && test ! -s ../.omo/omo.jsonc && test -s AGENTS.md && ! touch blocked && touch "$HOME/session-marker" && printf safe',
+      ],
+      {
+        source,
+        taskRoot,
+        mode: 'plan',
+        engine: 'omo',
+        cwd: join(taskRoot, 'worktree'),
+        env: omoEnvironment(join(taskRoot, 'omo'), 'local-capability'),
+      },
+    )
+    try {
+      expect(prepared.extraFiles.slice(0, 2)).toEqual(['ignore', 'ignore'])
+      expect(prepared.commandString).not.toContain('local-capability')
+      expect(
+        await runCodingProcess(
+          ['bash', '-c', `exec ${prepared.commandString}`],
+          taskRoot,
+          prepared.spawnEnv,
+          undefined,
+          prepared.extraFiles,
+        ),
+      ).toBe('safe')
+    } finally {
+      await prepared.cleanup()
+    }
+  },
+)
+
+test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap') || !Bun.which('omo'))(
+  'the pinned OmO binary provisions and re-execs within task-local HOME',
+  async () => {
+    await prepareOmoDirectories(join(taskRoot, 'omo'))
+    const prepared = await prepareCodingCommand(['omo', '--version'], {
+      source,
+      taskRoot,
+      mode: 'code',
+      engine: 'omo',
+      cwd: join(taskRoot, 'worktree'),
+      env: omoEnvironment(join(taskRoot, 'omo'), 'local-capability'),
+    })
+    try {
+      expect(
+        await runCodingProcess(
+          ['bash', '-c', `exec ${prepared.commandString}`],
+          taskRoot,
+          prepared.spawnEnv,
+          undefined,
+          prepared.extraFiles,
+        ),
+      ).toContain(OMO_CLI_VERSION)
+    } finally {
+      await prepared.cleanup()
+    }
+  },
+)
 
 test('refuses a Git-directory alias to the credential write directory', async () => {
   const git = join(source, '.git')

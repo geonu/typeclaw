@@ -232,6 +232,52 @@ describe('claudeCode broker installation', () => {
   )
 })
 
+describe('omoCli toggle', () => {
+  test('omits the native binary by default and from the shared base image', () => {
+    expect(buildDockerfile()).not.toContain('omo-linux')
+    expect(buildBaseDockerfile()).not.toContain('omo-linux')
+    expect(() => dockerfileSchema.parse({ omoCli: '5.1.19' })).toThrow()
+  })
+
+  test.each([null, '0.1.1'])('verifies pinned native assets under /usr in base %s', (baseImageVersion) => {
+    const out = buildDockerfile(dockerfileSchema.parse({ omoCli: true }), { baseImageVersion })
+    expect(out).toContain('releases/download/v5.1.19/')
+    expect(out).toContain(
+      'arm64|aarch64) asset=omo-linux-arm64; sha=87dc0f001e5821599bda889d55b10655136623ba5b74a804bae0edcdc4ce50b2',
+    )
+    expect(out).toContain(
+      'amd64|x86_64) asset=omo-linux-x64-baseline; sha=df4ca3223fe600d3b497f9fbbe759052a11ae9300a9cb965834a8942d5747fc7',
+    )
+    expect(out).toContain('sha256sum -c -')
+    expect(out).toContain('chmod 0755 /usr/local/lib/typeclaw-coding-agents/omo/5.1.19/omo')
+    expect(out).toContain('ln -sf /usr/local/lib/typeclaw-coding-agents/omo/5.1.19/omo /usr/local/bin/omo')
+    expect(out).toContain('omo --version')
+    expect(out).not.toContain('claude.ai/install.sh')
+    expect(out).not.toContain('@openai/codex')
+  })
+
+  test.skipIf(process.platform === 'win32')(
+    'selects verified assets with BuildKit and legacy-builder architecture names',
+    async () => {
+      const out = buildDockerfile(dockerfileSchema.parse({ omoCli: true }))
+      const selection = out.match(/RUN (case "\$\{TARGETARCH:-\$\(uname -m\)\}"[\s\S]*?esac)/)?.[1]
+      if (!selection) throw new Error('OmO architecture selection missing')
+      for (const arch of ['arm64', 'aarch64', 'amd64', 'x86_64', 'unsupported', '']) {
+        const proc = Bun.spawn(['/bin/sh', '-c', `${selection}\nprintf '%s' "$asset"`], {
+          env: { PATH: '/usr/bin:/bin', TARGETARCH: arch },
+          stdout: 'pipe',
+          stderr: 'ignore',
+        })
+        const output = await new Response(proc.stdout).text()
+        expect(await proc.exited).toBe(arch === 'unsupported' ? 1 : 0)
+        const selected = arch || process.arch
+        if (selected === 'arm64' || selected === 'aarch64') expect(output).toBe('omo-linux-arm64')
+        else if (selected !== 'unsupported') expect(output).toBe('omo-linux-x64-baseline')
+      }
+    },
+  )
+})
+
 describe('codexCli toggle', () => {
   test('defaults to false (the install layer is opt-in via the typeclaw-codex-cli skill)', () => {
     const out = buildDockerfile(dockerfileSchema.parse({}))
@@ -2006,8 +2052,9 @@ describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)',
     cloudflared: true,
     claudeCode: true,
     codexCli: true,
+    omoCli: true,
     append: [],
-  } as Parameters<typeof buildDockerfile>[0]
+  } satisfies Parameters<typeof buildDockerfile>[0]
 
   test('buildKit defaults to ON — keeps the # syntax pragma and cache mounts', () => {
     for (const baseImageVersion of ['0.36.8', null]) {

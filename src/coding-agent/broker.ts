@@ -5,11 +5,20 @@ import { request as httpsRequest } from 'node:https'
 
 import type { CodingAgentAuth, CodingAgentAuthResolver, CodingAgentProvider } from '@/secrets/coding-agent-auth'
 
-const MAX_BODY = 32 * 1024 * 1024
+import { readCodingBody } from './broker-body'
+
 const MAX_STREAMS = 4
 const ANTHROPIC_ROUTES = new Set(['/v1/messages', '/v1/messages/count_tokens'])
 const ANTHROPIC_HEADERS = ['anthropic-version', 'anthropic-beta', 'user-agent', 'x-app'] as const
 const CODEX_HEADERS = ['user-agent', 'originator', 'version', 'session_id', 'x-codex-turn-metadata'] as const
+const OMO_CODEX_HEADERS = [
+  ...CODEX_HEADERS,
+  'openai-beta',
+  'session-id',
+  'thread-id',
+  'x-client-request-id',
+  'x-codex-routing-hint',
+] as const
 const REJECTED_HEADERS = [
   'proxy-authorization',
   'forwarded',
@@ -58,6 +67,7 @@ export type CodingBroker = {
 export async function startCodingBroker(
   options: {
     provider?: CodingAgentProvider
+    engine?: 'claude' | 'codex' | 'omo'
     auth: CodingAgentAuthResolver
     allowedModels: readonly string[]
     deadline: number
@@ -67,7 +77,14 @@ export async function startCodingBroker(
   testDependencies?: { upstream: URL },
 ): Promise<CodingBroker> {
   const provider = options.provider ?? 'anthropic'
-  const capability = randomBytes(32).toString('hex')
+  const omo = options.engine === 'omo'
+  const oauthShape =
+    omo &&
+    provider === 'anthropic' &&
+    (await options.auth.resolve(options.signal, undefined, provider)).type === 'oauth'
+  // Senpi 2026.10.10 selects OAuth body/tool shaping by this prefix. It is
+  // still a fresh local capability, never an upstream OAuth credential.
+  const capability = `${oauthShape ? 'sk-ant-oat01-' : ''}${randomBytes(32).toString('hex')}`
   const controller = new AbortController()
   const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal
   const upstream =
@@ -127,7 +144,9 @@ export async function startCodingBroker(
     if (
       req.method !== 'POST' ||
       !route ||
-      !(provider === 'anthropic' ? ANTHROPIC_ROUTES.has(route) : route === '/v1/responses') ||
+      !(provider === 'anthropic'
+        ? ANTHROPIC_ROUTES.has(route)
+        : route === (omo ? '/v1/codex/responses' : '/v1/responses')) ||
       extra !== undefined ||
       (query !== undefined && (provider !== 'anthropic' || query !== 'beta=true')) ||
       req.rawHeaders.length > 128
@@ -136,7 +155,8 @@ export async function startCodingBroker(
     }
     if (
       req.headers.upgrade ||
-      req.headers['content-encoding'] ||
+      (req.headers['content-encoding'] !== undefined &&
+        !(omo && provider === 'openai-codex' && req.headers['content-encoding'] === 'zstd')) ||
       REJECTED_HEADERS.some((name) => req.headers[name] !== undefined) ||
       req.headers.host !== new URL(baseUrl).host ||
       !req.headers['content-type']?.startsWith('application/json')
@@ -148,15 +168,9 @@ export async function startCodingBroker(
     const requestSignal = AbortSignal.any([signal, disconnected.signal])
     res.on('close', () => disconnected.abort())
     try {
-      const chunks: Buffer[] = []
-      let size = 0
-      for await (const chunk of req) {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        size += bytes.length
-        if (size > MAX_BODY) return reject(res, 413, 'request_too_large')
-        chunks.push(bytes)
-      }
-      const body = Buffer.concat(chunks)
+      const read = await readCodingBody(req, requestSignal)
+      if ('code' in read) return reject(res, read.status, read.code)
+      const body = read.body
       let value: unknown
       try {
         value = JSON.parse(body.toString('utf8'))
@@ -228,7 +242,7 @@ export async function startCodingBroker(
           'content-type': 'application/json',
           ...(provider === 'anthropic' ? { 'anthropic-version': '2023-06-01' } : { accept: 'text/event-stream' }),
         }
-        for (const key of provider === 'anthropic' ? ANTHROPIC_HEADERS : CODEX_HEADERS) {
+        for (const key of provider === 'anthropic' ? ANTHROPIC_HEADERS : omo ? OMO_CODEX_HEADERS : CODEX_HEADERS) {
           const value = req.headers[key]
           if (typeof value === 'string') headers[key] = value
         }
@@ -254,7 +268,9 @@ export async function startCodingBroker(
             resolve,
           )
           request.on('error', () => rejectRequest(new Error('Inference transport failed.')))
-          request.end(body)
+          // Forward the inspected JSON, never compressed bytes or an encoding
+          // header from the untrusted client.
+          request.end(JSON.stringify(value))
         })
       }
     } finally {

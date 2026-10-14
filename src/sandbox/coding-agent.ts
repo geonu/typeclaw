@@ -43,6 +43,7 @@ export type CodingSandboxOptions = {
   readonly mode: 'code' | 'plan' | 'snapshot'
   readonly cwd: string
   readonly env?: Record<string, string>
+  readonly engine?: 'claude' | 'codex' | 'omo'
 }
 
 export async function assertCodingDirectory(path: string): Promise<void> {
@@ -80,11 +81,36 @@ export async function codingSandboxPolicy(
   if (options.mode === 'snapshot') {
     await assertCodingDirectory(sourceGit)
   }
+  const configMasks: string[] = []
+  if (options.engine === 'omo') {
+    // Only these ancestors are visible through the task bind. Other host
+    // ancestors (including the real HOME) are absent in the empty sandbox root.
+    for (const directory of [options.taskRoot, join(options.taskRoot, 'worktree')]) {
+      const omo = join(directory, '.omo')
+      const stat = await lstat(omo).catch((error: unknown) => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+        throw error
+      })
+      if (!stat) continue
+      await assertCodingDirectory(omo)
+      for (const name of ['omo.json', 'omo.jsonc']) {
+        const file = join(omo, name)
+        const target = await lstat(file).catch((error: unknown) => {
+          if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+          throw error
+        })
+        if (!target) continue
+        if (!target.isFile() || target.nlink !== 1) throw new Error('Unsafe OmO project configuration operand.')
+        configMasks.push(file)
+      }
+    }
+  }
   return {
     cwd: options.cwd,
     proc,
     network: 'inherit',
     env: { set: options.env ?? {} },
+    ...(configMasks.length ? { masks: { files: configMasks } } : {}),
     mounts: [
       // Never bind the live source worktree: credential rotation can create
       // arbitrary siblings and replace masked inodes there during an invocation.
@@ -141,7 +167,10 @@ export async function prepareCodingCommand(
   // Capabilities travel in the explicit environment, never visible process argv.
   policy.env = { set: settings, inherit: Object.keys(capabilities) }
   const opened: Awaited<ReturnType<typeof createAndOpenAnchoredDirectory>>[] = []
-  const extraFiles: Array<number | 'ignore'> = []
+  // buildSandboxedCommand reserves descriptors starting at 3 for file masks.
+  // Keep anchored bind descriptors above them: shell mask redirects must never
+  // replace the task/source directory handles before bwrap consumes them.
+  const extraFiles: Array<number | 'ignore'> = (policy.masks?.files ?? []).map(() => 'ignore')
   try {
     const mounts: SandboxMount[] = []
     // Native FD binds verify inode identity after mounting AND consume the FD.

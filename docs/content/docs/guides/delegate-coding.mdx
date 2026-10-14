@@ -1,6 +1,6 @@
 ---
 title: Delegate coding
-description: Run Claude Code or Codex through a credential broker in a persistent isolated worktree
+description: Run Claude Code, Codex or OmO through a credential broker in a persistent isolated worktree
 icon: Code
 ---
 
@@ -12,14 +12,15 @@ Enable the chosen engine in the host agent folder's `typeclaw.json` and configur
 | ----------- | ----------------------------- | ------------------------------------ | ------------------------------------------------- |
 | Claude Code | `docker.file.claudeCode:true` | `typeclaw provider add anthropic`    | Anthropic API key or subscription OAuth           |
 | Codex       | `docker.file.codexCli:true`   | `typeclaw provider add openai-codex` | ChatGPT subscription OAuth, not an OpenAI API key |
+| OmO Native  | `docker.file.omoCli:true`     | Either provider setup above          | One Anthropic or ChatGPT provider per task        |
 
 Run `typeclaw start` to rebuild the changed Dockerfile. Use a supported Linux container with working bwrap user namespaces and native FD-bind support. An older bwrap without `--bind-fd`/`--ro-bind-fd` requires a container-image rebuild. No new proxy URL, credential pass-through option, or sandbox toggle is needed.
 
-The installation pins Claude Code 2.1.299 and Codex CLI 0.162.1 under `/usr/local`. Provider credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate for each engine. The live ChatGPT subscription gate is outstanding; fake-upstream and fake-executable tests do not establish paid-provider acceptance.
+The installation pins Claude Code 2.1.299, Codex CLI 0.162.1, and OmO Native 5.1.19 under `/usr/local`. OmO uses digest-verified arm64 or amd64-baseline assets and provisions its embedded runtime under task-local HOME. Provider credentials stay in TypeClaw's trusted runtime. Live subscription first-turn, tool, resume, refresh, and compaction qualification on Linux amd64/arm64 is a release gate for each engine. OmO's live subscription and Linux/bwrap acceptance gates remain outstanding; fake-upstream and fake-executable tests do not establish them.
 
 ## Delegate and continue
 
-Ask the main agent to delegate a substantial task to Claude Code or Codex. It briefs a background operator; that operator calls:
+Ask the main agent to delegate a substantial task to Claude Code, Codex, or OmO. It briefs a background operator; that operator calls:
 
 ```json
 {
@@ -53,9 +54,19 @@ The receipt includes `taskId`, `engine`, `state`, `baseSha`, source/model identi
 
 Use `mode:"plan"` for a read-only worktree and Git database; explicitly choose `mode:"code"` for approved implementation. Codex receives a planning prompt under that profile, not an invented native plan flag. The runtime uses `codex exec --json`, records `thread.started`, and resumes that thread explicitly with `codex exec resume`. It reads completed agent-message items and terminal turn events plus process exit, not private rollout files or Stop hooks. A final-message question needs a follow-up, not a sentinel polling loop.
 
+## OmO Native
+
+Use `engine:"omo"` on the same tool with either an `anthropic/...` or `openai-codex/...` configured/curated model. The provider, model metadata, and CLI version are recorded with the task and preserved across resumes. Non-brokered providers and models are rejected before authentication.
+
+OmO runs `-p --mode json` with an exact session UUID. Its task-local HOME, engine settings, provider configuration, sessions, and XDG directories persist under `omo/`. A missing or unsafe recorded session returns an incomplete recovery result instead of silently starting fresh. Structured assistant errors are failures even when OmO exits zero; non-English final text is returned unchanged. Plan mode is the same outer read-only profile as the other engines.
+
+All configured internal model lanes use the task's brokered model: main agent, every built-in category and named agent, and compaction. Built-in fallback chains, memory side-model calls, update checks, telemetry, ambient OAuth extensions, and MCP startup are disabled. The task component stays enabled with in-process children. Existing project and visible ancestor `.omo/omo.json{,c}` operands are masked at launch without suppressing `AGENTS.md`. Mutable child config is not a credential boundary: the broker still checks exact routes and the allowed model on every request.
+
+OmO's Codex transport uses only `POST /v1/codex/responses`, bounded zstd decoding, and SSE to the same fixed ChatGPT backend. Its Anthropic OAuth lane uses a locally minted compatibility-prefixed capability to select OAuth request shaping; no provider token reaches the child. Native approval prompts and optional nested worktree isolation are disabled only inside authoritative outer bwrap. Offline startup does not disable legitimate shell networking or dependency installation.
+
 ## Review and preserve results
 
-Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/` or `codex/` state, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
+Container files live under `/agent/workspace/coding-agents/<task-id>/`: private `git/`, detached `worktree/`, non-secret `claude/`, `codex/`, or `omo/` state, and `output/`. Their host bind mount survives container recreation. They are excluded from agent backups.
 
 `output/changes.patch` captures staged/unstaged edits, untracked files, deletions, modes, symlinks, and binary changes without changing the CLI's index. Capture clears assume-unchanged and skip-worktree flags only in a temporary index, so flagged tracked edits are included too. Oversized artifacts are marked incomplete rather than truncated. Review the patch and run acceptance checks before applying it through normal tools. The tool does not commit, merge, push, create PRs, or publish to channels.
 
@@ -79,4 +90,4 @@ Account management, connectors, remote control, and arbitrary authenticated clou
 
 Credentials already exposed through `.env`, prompts, or arbitrary source objects are outside this confidentiality guarantee. Selected revisions containing protected canonical paths are rejected for that task; this is not a general history secret scanner.
 
-TypeClaw owns token refresh for both engines. It no longer exports Claude/Codex credential profiles or installs TypeClaw Stop/SessionStart hooks. The Codex runner's externally sandboxed flags apply only inside outer bwrap; they are not a host invocation recipe.
+TypeClaw owns token refresh for all three engines. It no longer exports Claude/Codex credential profiles or installs TypeClaw Stop/SessionStart hooks. The runners' externally sandboxed approval settings apply only inside outer bwrap; they are not host invocation recipes.

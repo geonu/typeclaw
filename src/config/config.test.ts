@@ -1132,6 +1132,7 @@ describe('docker.file schema', () => {
     xvfb: true,
     claudeCode: false,
     codexCli: false,
+    omoCli: false,
     append: [],
   }
 
@@ -1175,8 +1176,16 @@ describe('docker.file schema', () => {
       xvfb: true,
       claudeCode: false,
       codexCli: false,
+      omoCli: false,
       append: [],
     })
+  })
+
+  test('omoCli is opt-in, boolean-only and restart-required with the Dockerfile', () => {
+    expect(configSchema.parse({}).docker.file.omoCli).toBe(false)
+    expect(configSchema.parse({ docker: { file: { omoCli: true } } }).docker.file.omoCli).toBe(true)
+    expect(() => configSchema.parse({ docker: { file: { omoCli: '5.1.19' } } })).toThrow()
+    expect(FIELD_EFFECTS['docker.file']).toBe('restart-required')
   })
 
   test("cjkFonts defaults to 'auto' (resolved from host locale at start; non-CJK hosts skip the ~89MB layer)", () => {
