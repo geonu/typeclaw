@@ -308,13 +308,13 @@ export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
 // post-tool follow-up turn — can run the model's full output capability
 // (~116s of garbage) before `stopReason: 'length'`. The terminal-reply hook
 // below removes the turn that triggers this; the cap bounds any other path that
-// still reaches a channel LLM call. 4096 fits a thinking block plus a nontrivial
-// reply (healthy channel turns observed at ~317 output tokens including
-// reasoning). Deliberately NOT lowered in `providers.ts`, where `maxTokens` is
+// still reaches a channel LLM call. 16384 leaves reasoning models room to think
+// and reply: 4096 (sized from kimi's ~317-token healthy turns) truncated ordinary
+// glm-5.3 channel turns that need 4-9K tokens. Deliberately NOT lowered in `providers.ts`, where `maxTokens` is
 // the model's true capability that compaction math reads.
-export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
+export const CHANNEL_MAX_OUTPUT_TOKENS = 16384
 // Raised output-token budget threaded into the ONE re-prompt that follows a
-// `stopReason:'length'` empty turn. The default 4096 backstop bounds kimi's
+// `stopReason:'length'` empty turn. The default backstop bounds kimi's
 // degenerate repetition loop, but it is the same ceiling a *legitimate*
 // reasoning-heavy turn hits when it spends the whole pool thinking and emits no
 // prose — re-prompting under the identical cap reproduces the truncation. A
@@ -323,7 +323,7 @@ export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
 // turn that IS looping still can't burn the model's full output capability. Consumed
 // one-shot via `LiveSession.nextPromptMaxTokens`, then reset at the next real
 // user turn so the raised budget never leaks past the turn that needed it.
-export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 16384
+export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 32768
 // Ceiling on automatic re-prompts for a turn that ended with NO user-facing
 // reply AND no attempted send — the pure "the model burned its budget thinking
 // and produced nothing" failure. The canonical trigger is Fireworks'
