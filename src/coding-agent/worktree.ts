@@ -266,7 +266,8 @@ export async function createTaskDirectory(agentDir: string, taskId: string): Pro
       await mkdir(anchored, { mode: 0o700 })
       const task = await open(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
       try {
-        for (const part of ['claude', 'output']) await mkdir(`/proc/self/fd/${task.fd}/${part}`, { mode: 0o700 })
+        for (const part of ['claude', 'codex', 'output'])
+          await mkdir(`/proc/self/fd/${task.fd}/${part}`, { mode: 0o700 })
       } finally {
         await task.close()
       }
@@ -282,7 +283,7 @@ export async function createTaskDirectory(agentDir: string, taskId: string): Pro
     await assertCodingDirectory(path)
   }
   await mkdir(taskRoot, { mode: 0o700 })
-  for (const part of ['claude', 'output']) await mkdir(join(taskRoot, part), { mode: 0o700 })
+  for (const part of ['claude', 'codex', 'output']) await mkdir(join(taskRoot, part), { mode: 0o700 })
   return taskRoot
 }
 

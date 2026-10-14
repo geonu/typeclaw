@@ -82,7 +82,12 @@ describe('headless runner', () => {
       sourcePath: (path) => path,
       writeArtifact: (path, text) => writeFile(path, text),
       auth: async () => ({
-        resolve: async () => ({ type: 'api_key', token: 'provider-canary', secrets: ['provider-canary'] }),
+        resolve: async () => ({
+          provider: 'anthropic',
+          type: 'api_key',
+          token: 'provider-canary',
+          secrets: ['provider-canary'],
+        }),
       }),
       run: (options) =>
         runCodingAgent(options, {
@@ -137,6 +142,7 @@ describe('headless runner', () => {
     const file = join(root, 'fake-claude.js')
     await writeFile(file, script)
     const options: CodingRunOptions = {
+      engine: 'claude',
       workspace: {
         source: root,
         taskRoot: root,
@@ -145,6 +151,7 @@ describe('headless runner', () => {
       },
       auth: {
         resolve: async () => ({
+          provider: 'anthropic',
           type: 'api_key',
           token: 'fixture-provider-canary',
           secrets: ['fixture-provider-canary'],
@@ -212,13 +219,16 @@ describe('headless runner', () => {
     try {
       const running = runCodingAgent(
         {
+          engine: 'claude',
           workspace: {
             source: root,
             taskRoot: root,
             baseSha: 'a'.repeat(40),
             sourceIdentity: 'fixture',
           },
-          auth: { resolve: async () => ({ type: 'api_key', token: 'canary', secrets: ['canary'] }) },
+          auth: {
+            resolve: async () => ({ provider: 'anthropic', type: 'api_key', token: 'canary', secrets: ['canary'] }),
+          },
           model: 'primary',
           allowedModels: ['primary'],
           mode: 'code',

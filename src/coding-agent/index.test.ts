@@ -56,7 +56,9 @@ function makeService(run: () => Promise<CodingRunResult> = async () => result) {
     executor: () => local,
     run,
     sourcePath: (source) => source,
-    auth: async () => ({ resolve: async () => ({ type: 'api_key', token: 'fixture', secrets: ['fixture'] }) }),
+    auth: async () => ({
+      resolve: async () => ({ provider: 'anthropic', type: 'api_key', token: 'fixture', secrets: ['fixture'] }),
+    }),
     writeArtifact: (path, text) => writeFile(path, text),
   })
 }
@@ -166,15 +168,16 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
     ).toBe('completed')
   })
 
-  test('rejects Codex without touching authentication and preserves other tool work', async () => {
+  test('rejects an incompatible Codex model before touching authentication', async () => {
     service = new CodingAgentService(root, {
       auth: async () => {
         throw new Error('must not resolve')
       },
+      run: async () => result,
     })
-    expect(
-      await service.execute(codingRequestSchema.parse({ action: 'run', engine: 'codex', prompt: 'test' }), caller),
-    ).toMatchObject({ ok: false })
+    await expect(
+      service.execute(codingRequestSchema.parse({ ...runRequest(), engine: 'codex' }), caller),
+    ).rejects.toThrow('openai-codex modelRef')
     expect(await local(['/bin/sh', '-c', 'printf ordinary-command'], root)).toBe('ordinary-command')
   })
 
@@ -188,7 +191,7 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
       auth: async () => ({
         resolve: async () => {
           if (missing) throw new Error('Missing fixture auth')
-          return { type: 'api_key', token: 'fixture', secrets: ['fixture'] }
+          return { provider: 'anthropic', type: 'api_key', token: 'fixture', secrets: ['fixture'] }
         },
       }),
     })
@@ -228,27 +231,65 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
     await expect(service.execute(request, channelCaller)).rejects.toThrow()
   })
 
-  test('plan resumes stay read-only until an explicit authorized code transition', async () => {
-    const modes: string[] = []
+  test.each(['claude', 'codex'] as const)(
+    '%s plan resumes stay read-only until an explicit code transition',
+    async (engine) => {
+      const modes: string[] = []
+      service = new CodingAgentService(root, {
+        executor: () => local,
+        sourcePath: (source) => source,
+        writeArtifact: (path, text) => writeFile(path, text),
+        auth: async () => ({
+          resolve: async (_signal, _rejected, provider = 'anthropic') =>
+            provider === 'anthropic'
+              ? { provider, type: 'api_key', token: 'fixture', secrets: ['fixture'] }
+              : { provider, type: 'oauth', token: 'fixture', accountId: 'fixture-account', secrets: ['fixture'] },
+        }),
+        run: async (options) => {
+          modes.push(options.mode)
+          return result
+        },
+      })
+      const taskId = idOf(
+        await service.execute(
+          codingRequestSchema.parse({
+            ...runRequest(),
+            engine,
+            modelRef: engine === 'claude' ? 'anthropic/claude-opus-5-5' : 'openai-codex/gpt-6-sol',
+            mode: 'plan',
+          }),
+          caller,
+        ),
+      )
+      await service.execute(codingRequestSchema.parse({ action: 'run', engine, taskId, prompt: 'continue' }), caller)
+      await service.execute(
+        codingRequestSchema.parse({ action: 'run', engine, taskId, prompt: 'implement', mode: 'code' }),
+        caller,
+      )
+      expect(modes).toEqual(['plan', 'plan', 'code'])
+    },
+  )
+
+  test('missing Codex auth leaves Claude delegation and ordinary commands working', async () => {
+    let missing = true
     service = new CodingAgentService(root, {
       executor: () => local,
       sourcePath: (source) => source,
       writeArtifact: (path, text) => writeFile(path, text),
-      auth: async () => ({ resolve: async () => ({ type: 'api_key', token: 'fixture', secrets: ['fixture'] }) }),
-      run: async (options) => {
-        modes.push(options.mode)
-        return result
-      },
+      run: async () => result,
+      auth: async () => ({
+        resolve: async (_signal, _rejected, provider = 'anthropic') => {
+          if (provider === 'anthropic') return { provider, type: 'api_key', token: 'fixture', secrets: ['fixture'] }
+          if (missing) throw new Error('Missing Codex fixture auth')
+          return { provider, type: 'oauth', token: 'fixture', accountId: 'fixture-account', secrets: ['fixture'] }
+        },
+      }),
     })
-    const taskId = idOf(await service.execute(codingRequestSchema.parse({ ...runRequest(), mode: 'plan' }), caller))
-    await service.execute(
-      codingRequestSchema.parse({ action: 'run', engine: 'claude', taskId, prompt: 'continue' }),
-      caller,
-    )
-    await service.execute(
-      codingRequestSchema.parse({ action: 'run', engine: 'claude', taskId, prompt: 'implement', mode: 'code' }),
-      caller,
-    )
-    expect(modes).toEqual(['plan', 'plan', 'code'])
+    const codex = codingRequestSchema.parse({ ...runRequest(), engine: 'codex', modelRef: 'openai-codex/gpt-6-sol' })
+    await expect(service.execute(codex, caller)).rejects.toThrow('Missing Codex fixture auth')
+    expect(await local(['/bin/sh', '-c', 'printf ordinary-command'], root)).toBe('ordinary-command')
+    expect((await service.execute(runRequest(), caller)).state).toBe('completed')
+    missing = false
+    expect((await service.execute(codex, caller)).state).toBe('completed')
   })
 })

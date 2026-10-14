@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, posix } from 'node:path'
 
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
+import { CODEX_CLI_VERSION, codexEnvironment } from '@/coding-agent/codex'
 import { runCodingProcess } from '@/coding-agent/worktree'
 
 import { buildSandboxedCommand } from './build'
@@ -23,6 +24,7 @@ beforeEach(async () => {
     join(taskRoot, 'git'),
     join(taskRoot, 'worktree'),
     join(taskRoot, 'claude'),
+    join(taskRoot, 'codex'),
     join(taskRoot, 'output'),
   ]) {
     await mkdir(path, { recursive: true })
@@ -43,7 +45,7 @@ test.each(['code', 'plan', 'snapshot'] as const)('excludes credential write loca
       taskRoot,
       mode,
       cwd: join(taskRoot, 'worktree'),
-      env: { ANTHROPIC_AUTH_TOKEN: 'local-capability' },
+      env: codexEnvironment(join(taskRoot, 'codex'), 'local-capability'),
     },
     'proc-bind',
   )
@@ -69,7 +71,10 @@ test.each(['code', 'plan', 'snapshot'] as const)('excludes credential write loca
   // or replacement inodes is mounted at either the real or synthetic source path.
   expect(built.argv).not.toContain(source)
   expect(built.argv).not.toContain(CODING_SOURCE)
-  expect(built.spawnEnv.ANTHROPIC_AUTH_TOKEN).toBe('local-capability')
+  expect(built.spawnEnv.TYPECLAW_CODING_AGENT_CAPABILITY).toBe('local-capability')
+  expect(built.spawnEnv.CODEX_HOME).toBe(join(taskRoot, 'codex'))
+  expect(built.spawnEnv.OPENAI_API_KEY).toBeUndefined()
+  expect(built.spawnEnv.CODEX_API_KEY).toBeUndefined()
   expect(built.spawnEnv.ANTHROPIC_API_KEY).toBeUndefined()
   expect(built.spawnEnv.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
 })
@@ -105,7 +110,7 @@ test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
       [
         '/bin/sh',
         '-c',
-        'for fd in /proc/self/fd/*; do test ! -d "$fd" || exit 90; done; test ! -s /typeclaw-coding-source/secrets.json && test ! -e /home/agent && ! touch blocked && printf safe',
+        'for fd in /proc/self/fd/*; do test ! -d "$fd" || exit 90; done; test ! -s /typeclaw-coding-source/secrets.json && test ! -e /home/agent && ! touch blocked && ! touch ../git/blocked && touch ../codex/session-state && printf safe',
       ],
       { source, taskRoot, mode: 'plan', cwd: join(taskRoot, 'worktree') },
     )
@@ -119,6 +124,31 @@ test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
           prepared.extraFiles,
         ),
       ).toBe('safe')
+    } finally {
+      await prepared.cleanup()
+    }
+  },
+)
+
+test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap') || !Bun.which('codex'))(
+  'the pinned Codex executable is reachable through the real delegated profile',
+  async () => {
+    const prepared = await prepareCodingCommand(['codex', '--version'], {
+      source,
+      taskRoot,
+      mode: 'code',
+      cwd: join(taskRoot, 'worktree'),
+    })
+    try {
+      expect(
+        await runCodingProcess(
+          ['bash', '-c', `exec ${prepared.commandString}`],
+          taskRoot,
+          prepared.spawnEnv,
+          undefined,
+          prepared.extraFiles,
+        ),
+      ).toContain(CODEX_CLI_VERSION)
     } finally {
       await prepared.cleanup()
     }
@@ -171,7 +201,7 @@ test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
         taskRoot,
         mode: 'code',
         cwd: join(taskRoot, 'worktree'),
-        env: { ANTHROPIC_AUTH_TOKEN: 'local-capability' },
+        env: { TYPECLAW_CODING_AGENT_CAPABILITY: 'local-capability' },
       })
       try {
         expect(prepared.commandString).not.toContain('local-capability')
@@ -184,7 +214,9 @@ test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(
         )
         expect(text).not.toContain('coding-proc-canary')
         expect(text).not.toContain('ANTHROPIC_API_KEY=')
-        expect(text).toContain('ANTHROPIC_AUTH_TOKEN=local-capability')
+        expect(text).not.toContain('OPENAI_API_KEY=')
+        expect(text).not.toContain('CODEX_API_KEY=')
+        expect(text).toContain('TYPECLAW_CODING_AGENT_CAPABILITY=local-capability')
       } finally {
         await prepared.cleanup()
       }

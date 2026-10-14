@@ -1,6 +1,7 @@
 import { CONTAINER_AGENT_MESSENGER_CONFIG_DIR } from '@/agent-messenger/config-dir'
 import { ASKPASS_SCRIPT, TYPECLAW_GIT_ASKPASS_PATH } from '@/bundled-plugins/github-cli-auth/git-askpass'
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
+import { CODEX_CLI_VERSION } from '@/coding-agent/codex'
 import { validateDockerfileAppendLine } from '@/config/config'
 import type { DockerfileConfig, DockerfileFeatureToggle } from '@/config/config'
 import { TESTED_BUN_VERSION } from '@/hostd/version'
@@ -421,19 +422,6 @@ link_configured_symlinks() {
   ' || true
 }
 
-# Retain the Codex hook seed until its separate broker migration ships.
-seed_runtime_home() {
-  _src="\${1:-/root}"
-  _dst="$2"
-  [ "$_src" = "$_dst" ] && return 0
-  mkdir -p "$_dst"
-  if [ -f "$_src/.codex/hooks.json" ]; then
-    mkdir -p "$_dst/.codex"
-    cp -n "$_src/.codex/hooks.json" "$_dst/.codex/hooks.json" 2>/dev/null || true
-  fi
-  unset _src _dst
-}
-
 start_xvfb() {
   if ! command -v Xvfb >/dev/null 2>&1; then
     return 0
@@ -503,7 +491,6 @@ fi
 
 runtime_home="\${TYPECLAW_RUNTIME_HOME:-/home/agent}"
 mkdir -p "$runtime_home"
-seed_runtime_home "$HOME" "$runtime_home"
 if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
   chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$runtime_home"
 fi
@@ -697,138 +684,15 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION} 
  && claude --version > /dev/null`
 }
 
-// Codex CLI's official distribution channel is the npm package
-// \`@openai/codex\` (https://www.npmjs.com/package/@openai/codex). Unlike
-// Claude Code's \`curl | bash\` install, Codex installs cleanly via the same
-// cache mount agent-browser uses. BUN_INSTALL moves the global package tree
-// (including native optional dependencies) out of /root. The /usr/local/bin
-// launcher invokes Bun explicitly: the image's `node` fallback is outside
-// the sandbox PATH. Both the JS launcher and native binary remain under /usr.
-//
-// Hook architecture: Codex CLI ships a hook system with the SAME event names
-// as Claude Code (SessionStart, Stop, PreToolUse, PostToolUse, etc.) and the
-// SAME JSON shape (\`{ session_id, transcript_path, cwd, hook_event_name }\` on
-// stdin). The two CLIs are NOT interoperable — Codex's config file is
-// \`~/.codex/hooks.json\` (or inline \`[hooks]\` in \`config.toml\`), and the trust
-// model differs (Codex prompts for hook trust on first run, gated by
-// \`--dangerously-bypass-hook-trust\`). But the hook script body, the
-// per-session filenames (\`.done-<sid>\`, \`sentinel-<sid>.json\`), the
-// \`.session-id\` fast path, and the \`malformed\` fallback are byte-for-byte
-// reusable. We deliberately use distinct paths (\`typeclaw-cx-*\` instead of
-// \`typeclaw-cc-*\`) and a distinct settings file (\`~/.codex/hooks.json\` vs
-// \`~/.claude/settings.json\`) so an agent with BOTH toggles on doesn't have
-// the two CLIs racing on the same sentinel files. The skill side
-// (\`typeclaw-codex-cli\`) documents which UUID-bearing artifacts belong to
-// which CLI.
-//
-// Onboarding: Codex has NO theme picker, NO telemetry consent dialog, NO
-// terms-of-service prompt — verified against
-// codex-rs/tui/src/onboarding/onboarding_screen.rs in the upstream repo.
-// The TUI's onboarding state machine has exactly three steps: Welcome,
-// Auth, TrustDirectory. We CAN'T pre-seed past Welcome (it's an animation,
-// not a prompt), and we DELIBERATELY don't pre-seed past Auth (the user
-// must paste their OPENAI_API_KEY or run \`codex login\` themselves) or past
-// TrustDirectory (trusting an arbitrary worktree silently widens the trust
-// surface in ways the operator hasn't consented to — exact same reasoning
-// as Claude Code's "don't preseed hasTrustDialogAccepted"). The
-// \`typeclaw-codex-cli\` skill handles all three at runtime via dialog
-// polling, the same shape Claude Code's skill uses for its post-seed
-// modals.
-//
-// Smoke test: \`codex --version\` is supported per codex-rs/cli/src/main.rs
-// (clap \`version\` attribute), so we use it as the build-time install check.
-const TYPECLAW_CX_STOP_HOOK_PATH = '/usr/local/bin/typeclaw-cx-stop-hook'
-const TYPECLAW_CX_SESSION_START_HOOK_PATH = '/usr/local/bin/typeclaw-cx-session-start-hook'
-
-const TYPECLAW_CX_SESSION_START_HOOK_SCRIPT = `#!/bin/sh
-# typeclaw SessionStart-hook for Codex CLI. Stdin carries the SessionStart
-# event JSON. Writes \$PWD/.session-id with the session UUID as a fast-path
-# optimization (the operator falls back to discovering session_id from the
-# first Stop sentinel if .session-id never appears). Rationale lives in
-# src/init/dockerfile.ts.
-set -eu
-tmp_out="\${PWD}/.session-id.\$\$.tmp"
-trap 'rm -f "\$tmp_out"' EXIT
-sid=\$(bun -e 'try { const j = await new Response(Bun.stdin.stream()).json(); process.stdout.write(String(j.session_id ?? "")) } catch { process.stdout.write("") }')
-case "\$sid" in
-  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-  *) sid=malformed ;;
-esac
-printf '%s\\n' "\$sid" > "\$tmp_out"
-mv "\$tmp_out" "\${PWD}/.session-id"
-trap - EXIT
-`
-
-const TYPECLAW_CX_STOP_HOOK_SCRIPT = `#!/bin/sh
-# typeclaw Stop-hook for Codex CLI. Stdin carries the Stop event JSON.
-# Writes per-session sentinel/.done files into \$PWD. Rationale (the
-# security model, \$PWD semantics, and why bun-not-sed for JSON
-# extraction) lives in src/init/dockerfile.ts.
-set -eu
-tmp_in="\${PWD}/.cx-stop-hook-in.\$\$"
-trap 'rm -f "\$tmp_in"' EXIT
-cat > "\$tmp_in"
-sid=\$(bun -e 'try { const j = await Bun.file(process.argv[1]).json(); process.stdout.write(String(j.session_id ?? "")) } catch { process.stdout.write("") }' "\$tmp_in")
-case "\$sid" in
-  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-  *) sid=malformed ;;
-esac
-mv "\$tmp_in" "\${PWD}/sentinel-\${sid}.json"
-trap - EXIT
-touch "\${PWD}/.done-\${sid}"
-`
-
-// Codex CLI's hook config file lives at ~/.codex/hooks.json. The JSON shape
-// mirrors Claude Code's settings.json hooks block exactly — same nesting,
-// same matcher syntax, same exec-form via \`args: []\`. Built via
-// JSON.stringify so a shape edit fails the JSON.parse regression test, not
-// the docker build (or the first failed delegation).
-//
-// SessionStart matcher \`startup|resume\`: Codex documents \`startup\` and
-// \`resume\` as the two SessionStart sources (vs Claude Code's
-// \`startup|resume|clear|compact\` — Codex has no \`/clear\` command and no
-// auto-compaction in the same shape). Claude's broader matcher would not
-// be wrong but would match against events Codex never fires.
-const TYPECLAW_CX_GLOBAL_HOOKS = JSON.stringify({
-  hooks: {
-    SessionStart: [
-      {
-        matcher: 'startup|resume',
-        hooks: [{ type: 'command', command: TYPECLAW_CX_SESSION_START_HOOK_PATH, args: [] }],
-      },
-    ],
-    Stop: [
-      {
-        matcher: '*',
-        hooks: [{ type: 'command', command: TYPECLAW_CX_STOP_HOOK_PATH, args: [] }],
-      },
-    ],
-  },
-})
-
-const CODEX_CLI_VERSION = '0.162.1'
+// Keep the JS launcher and native optional dependencies under the sandbox-visible /usr.
 
 function renderCodexCliInstallLayer(enabled: boolean, buildKit: boolean): string {
   if (!enabled) return ''
-  return `# Layer 5.7 (toggle): install OpenAI's Codex CLI. Opt-in via
-# typeclaw.json#docker.file.codexCli. The skill \`typeclaw-codex-cli\`
-# documents the auth + usage flow. Codex ships as the npm package
-# \`@openai/codex\`, so we install via \`bun install -g\` reusing the same
-# cache mount agent-browser uses. Hook scripts and ~/.codex/hooks.json
-# are pre-written at build time so the operator subagent never has to
-# construct that JSON itself — same load-bearing reason as the Claude
-# Code layer above.
+  return `# Layer 5.7 (toggle): brokered headless Codex CLI.
 RUN ${bunCacheMount(buildKit)}BUN_INSTALL=/usr/local/lib/typeclaw-coding-agents/codex BUN_INSTALL_BIN=/usr/local/lib/typeclaw-coding-agents/codex/bin bun install -g @openai/codex@${CODEX_CLI_VERSION} \\
  && printf '%s\\n' '#!/bin/sh' 'exec /usr/local/bin/bun /usr/local/lib/typeclaw-coding-agents/codex/bin/codex "$@"' > /usr/local/bin/codex \\
  && chmod 0755 /usr/local/bin/codex \\
- && codex --version > /dev/null \\
- && cat > ${TYPECLAW_CX_SESSION_START_HOOK_PATH} <<'TYPECLAW_CX_SESSION_START_HOOK_EOF'
-${TYPECLAW_CX_SESSION_START_HOOK_SCRIPT}TYPECLAW_CX_SESSION_START_HOOK_EOF
-RUN cat > ${TYPECLAW_CX_STOP_HOOK_PATH} <<'TYPECLAW_CX_STOP_HOOK_EOF'
-${TYPECLAW_CX_STOP_HOOK_SCRIPT}TYPECLAW_CX_STOP_HOOK_EOF
-RUN chmod +x ${TYPECLAW_CX_SESSION_START_HOOK_PATH} ${TYPECLAW_CX_STOP_HOOK_PATH} \\
- && mkdir -p "$HOME/.codex" \\
- && printf '%s\\n' '${TYPECLAW_CX_GLOBAL_HOOKS}' > "$HOME/.codex/hooks.json"`
+ && codex --version > /dev/null`
 }
 
 // Shared-library runtime deps Chrome for Testing needs to launch on amd64

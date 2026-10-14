@@ -72,12 +72,7 @@ import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult, subscribeForwardRequest } from '@/portbroker'
 import { formatChannelReloadSummary, ReloadRegistry, type ReloadAllResult, type ReloadContext } from '@/reload'
 import { createClaimController } from '@/role-claim'
-import {
-  exportCodexAuthFileForAgent,
-  exportGithubCliStoreForAgent,
-  hydrateChannelEnvFromSecrets,
-  refreshProviderOAuthForAgent,
-} from '@/secrets'
+import { exportGithubCliStoreForAgent, hydrateChannelEnvFromSecrets, refreshProviderOAuthForAgent } from '@/secrets'
 import { createServer, type Server } from '@/server'
 import {
   createCommandRunner,
@@ -134,9 +129,7 @@ export type StartAgentOptions = {
   // over the real env + <cwd>/secrets.json. Injectable so tests can supply a
   // fake secrets provider without touching process.env.
   caps?: RuntimeCapabilities
-  // Boot credential exporters are injectable so ordering tests can prove they
-  // observe secrets only after the awaited provider-OAuth refresh settles.
-  exportCodexAuthFile?: typeof exportCodexAuthFileForAgent
+  // The GitHub CLI exporter observes secrets only after the boot refresh settles.
   exportGithubCliStore?: typeof exportGithubCliStoreForAgent
   // Boot-time proactive provider-OAuth refresh. Injectable so a test can supply
   // a refresh that holds the real secrets lock on a gate, proving the boot
@@ -205,7 +198,6 @@ async function startAgentRuntime(
     createChannelManager: createChannelManagerFor = createChannelManager,
     createTunnelManager: createTunnelManagerFor = createTunnelManager,
     caps = createRuntimeCapabilities(process.env, join(cwd, 'secrets.json')),
-    exportCodexAuthFile = exportCodexAuthFileForAgent,
     exportGithubCliStore = exportGithubCliStoreForAgent,
     refreshProviderOAuth = refreshProviderOAuthForAgent,
     startResourceSampler: startResourceSamplerFor = startResourceSampler,
@@ -412,11 +404,11 @@ async function startAgentRuntime(
   // log. Channel-adapter OAuth already has host-side renewal crons; this is the
   // provider-OAuth equivalent.
   //
-  // MUST be awaited, and MUST run before the credential-file exporters below
+  // MUST be awaited, and MUST run before the GitHub CLI store exporter below
   // and the first session-producing consumer (subagentConsumer.start /
   // cronConsumer.start / channelManager.start / the websocket server). The
   // refresh holds SecretsBackend's file lock across its network request
-  // (`CredentialStore.modify`), while the synchronous readers the exporters and
+  // (`CredentialStore.modify`), while the synchronous readers the exporter and
   // channel hydration use give up after ~200ms and throw ELOCKED.
   // Fire-and-forget here would let a slow refresh still own the lock when an
   // exporter or consumer reads secrets — worse than the lazy path. Awaiting
@@ -428,22 +420,7 @@ async function startAgentRuntime(
     log: (message) => console.warn(message),
   })
 
-  // When the user has `docker.file.codexCli: true` AND a typeclaw-managed
-  // openai-codex OAuth credential in secrets.json, write ~/.codex/auth.json
-  // so the Codex CLI in the container can run without a second login. This runs
-  // after the awaited boot refresh so the fresh ephemeral HOME receives the
-  // refreshed token, never the stale pre-refresh value. The exporter is
-  // failure-tolerant by design: any error (gate miss, fs error, corrupt file)
-  // returns a non-fatal result and the agent boot continues. See
-  // src/secrets/export-codex-auth-file.ts for the newer-wins compare that
-  // prevents clobbering Codex CLI's in-place token refreshes.
-  exportCodexAuthFile({
-    agentDir: cwd,
-    codexCliEnabled: cwdConfig.docker.file.codexCli,
-    log: (message) => console.warn(message),
-  })
-
-  // Claude credentials stay in the runtime; no CLI profile is exported.
+  // Coding credentials stay in the runtime; neither CLI receives an exported profile.
   const stopCodingAgents = retainCodingAgentService(cwd)
   registerBootCleanup(stopCodingAgents)
 

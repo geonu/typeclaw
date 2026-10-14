@@ -43,4 +43,4 @@ After failure, timeout, cancellation, or restart, retain the partial work. `{"ac
 
 ## Credential boundary
 
-Only the trusted runtime handles provider credentials. The child receives an invocation-local capability, not a provider token. Never put credentials in chat, prompts, files, tool arguments, or child environment; never run login/setup-token, dump profiles, or use guard acknowledgements as an authentication workaround. Raw bash invocations of `claude` do not acquire broker authority. Codex delegation is not yet available.
+Only the trusted runtime handles provider credentials. The child receives an invocation-local capability, not a provider token. Never put credentials in chat, prompts, files, tool arguments, or child environment; never run login/setup-token, dump profiles, or use guard acknowledgements as an authentication workaround. Raw bash invocations of `claude` do not acquire broker authority. For Codex on the same tool, use the `typeclaw-codex-cli` skill.

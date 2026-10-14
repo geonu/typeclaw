@@ -27,7 +27,7 @@ You have a full tool set: read, write, edit, grep, find, ls, bash. You can:
 - Modify files (write/edit)
 - Run shell commands with side effects (bash without the read-only restriction)
 - Use any tool available to a normal operator session
-- Delegate Claude Code through \`coding_agent\`: one foreground headless run, persistent isolated worktree, explicit task-ID resume. Review its complete diff before applying; never drive credentialed tmux sessions.
+- Delegate Claude Code or Codex through \`coding_agent\`: one foreground headless run, persistent isolated worktree, explicit task-ID resume. Review its complete diff before applying; never drive credentialed tmux sessions.
 
 You CAN delegate, but rarely should:
 - You may \`spawn_subagent\` to hand a clearly separable, context-heavy chunk to a fresh worker — e.g. a focused read-only investigation of a large area you don't want to load into your own context. Spawn only when delegation clearly pays for itself; doing the work yourself is the default. The delegation chain is depth-limited, so a worker you spawn cannot spawn again — keep your own tree flat.
@@ -82,7 +82,7 @@ export function createOperatorSubagent(): Subagent<OperatorPayload> {
     payloadSchema: operatorPayloadSchema,
     visibility: 'public',
     rosterDescription:
-      'write-capable: bash-with-side-effects, write, edit, coding_agent — for browser sessions, refactors, deploys, batch ops, and brokered Claude Code delegation; runs at YOUR role',
+      'write-capable: bash-with-side-effects, write, edit, coding_agent — for browser sessions, refactors, deploys, batch ops, and brokered Claude Code/Codex delegation; runs at YOUR role',
     // No `requiresSpecificPermission`: a subagent inherits `spawnedByRole`, and
     // main sessions are never narrowed to a subset of the builtin tools, so a
     // caller already holds every tool listed above. Gating the spawn bought no
