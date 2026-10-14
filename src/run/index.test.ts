@@ -267,10 +267,6 @@ describe('startAgent', () => {
       loadCron: noCron,
       createChannelManager: createChannelManagerFor,
       refreshProviderOAuth,
-      exportCodexAuthFile: () => {
-        order.push('export:codex')
-        return { action: 'skipped', reason: 'codex-cli-disabled' }
-      },
       exportGithubCliStore: () => {
         order.push('export:github-cli')
         return { action: 'skipped', reason: 'no-github-cli-credential' }
@@ -292,7 +288,6 @@ describe('startAgent', () => {
     expect(order).toEqual([
       'refresh:lock-acquired',
       'refresh:lock-released',
-      'export:codex',
       'export:github-cli',
       'channel:start',
       'auth:sync-read',

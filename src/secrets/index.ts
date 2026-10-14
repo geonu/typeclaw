@@ -25,12 +25,6 @@ export {
 } from './export-github-cli-store'
 
 export {
-  type ExportCodexAuthFileResult,
-  exportCodexAuthFileForAgent,
-  exportCodexAuthFileIfApplicable,
-} from './export-codex-auth-file'
-
-export {
   type ProviderRefreshEntry,
   type ProviderRefreshOutcome,
   type RefreshProviderOAuthResult,
