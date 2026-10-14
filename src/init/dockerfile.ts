@@ -771,12 +771,9 @@ WORKDIR /agent`
 // sbin:/usr/bin:/sbin:/bin:/usr/local/bun-node-fallback-bin`, no
 // `~/.local/bin`). Without intervention, every `which claude` from the
 // agent (and from the typeclaw-claude-code skill's verification step)
-// returns empty. Symlink into `/usr/local/bin/` — already on PATH, matches
-// what `cloudflared` does, survives `/root/.local/bin` getting rewritten
-// by the installer's "update" path. The symlink resolves to the
-// `~/.local/bin/claude` shim, which itself dereferences to the versioned
-// binary under `~/.local/share/claude/versions/<ver>/`, so upgrades via
-// `claude update` keep working without re-running this layer.
+// returns empty. Copy the resolved, pinned binary under `/usr/local/lib/`
+// and link `/usr/local/bin/claude` there: bwrap sees /usr but not /root.
+// CLI upgrades are owned by the TypeClaw release, not `claude update`.
 // `~/.claude.json` is Claude Code's internal state file (NOT
 // `~/.claude/settings.json`, which is user-facing). On first run with an
 // empty or missing file, `claude` enters a TTY-only theme picker:
@@ -1108,6 +1105,10 @@ const TYPECLAW_CC_GLOBAL_SETTINGS = JSON.stringify({
   },
 })
 
+// https://claude.ai/install.sh accepts [stable|latest|VERSION] and passes it
+// to `claude install`. Copy the resolved binary: bwrap binds /usr, not /root.
+const CLAUDE_CODE_VERSION = '2.1.299'
+
 function renderClaudeCodeInstallLayer(enabled: boolean): string {
   if (!enabled) return ''
   return `# Layer 5.6 (toggle): install Anthropic's Claude Code CLI. Opt-in via
@@ -1125,8 +1126,9 @@ function renderClaudeCodeInstallLayer(enabled: boolean): string {
 # independent of whether any earlier command (or a future Claude
 # version's \`--version\` smoke test) writes a default \`~/.claude.json\`
 # partway through the layer.
-RUN curl -fsSL https://claude.ai/install.sh | bash \\
- && ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude \\
+RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION} \\
+ && install -D -m 0755 "$(readlink -f "$HOME/.local/bin/claude")" /usr/local/lib/typeclaw-coding-agents/claude/${CLAUDE_CODE_VERSION}/claude \\
+ && ln -sf /usr/local/lib/typeclaw-coding-agents/claude/${CLAUDE_CODE_VERSION}/claude /usr/local/bin/claude \\
  && claude --version > /dev/null \\
  && cat > ${TYPECLAW_CC_SESSION_START_HOOK_PATH} <<'TYPECLAW_CC_SESSION_START_HOOK_EOF'
 ${TYPECLAW_CC_SESSION_START_HOOK_SCRIPT}TYPECLAW_CC_SESSION_START_HOOK_EOF
@@ -1141,9 +1143,10 @@ RUN chmod +x ${TYPECLAW_CC_SESSION_START_HOOK_PATH} ${TYPECLAW_CC_STOP_HOOK_PATH
 // Codex CLI's official distribution channel is the npm package
 // \`@openai/codex\` (https://www.npmjs.com/package/@openai/codex). Unlike
 // Claude Code's \`curl | bash\` install, Codex installs cleanly via the same
-// bun-global path agent-browser uses, so we layer it under the existing
-// \`bun install -g\` invariant: cache-mount keyed install, no \$HOME/.local/bin
-// symlink dance, no installer scratch.
+// cache mount agent-browser uses. BUN_INSTALL moves the global package tree
+// (including native optional dependencies) out of /root. The /usr/local/bin
+// launcher invokes Bun explicitly: the image's `node` fallback is outside
+// the sandbox PATH. Both the JS launcher and native binary remain under /usr.
 //
 // Hook architecture: Codex CLI ships a hook system with the SAME event names
 // as Claude Code (SessionStart, Stop, PreToolUse, PostToolUse, etc.) and the
@@ -1246,6 +1249,8 @@ const TYPECLAW_CX_GLOBAL_HOOKS = JSON.stringify({
   },
 })
 
+const CODEX_CLI_VERSION = '0.162.1'
+
 function renderCodexCliInstallLayer(enabled: boolean, buildKit: boolean): string {
   if (!enabled) return ''
   return `# Layer 5.7 (toggle): install OpenAI's Codex CLI. Opt-in via
@@ -1256,7 +1261,9 @@ function renderCodexCliInstallLayer(enabled: boolean, buildKit: boolean): string
 # are pre-written at build time so the operator subagent never has to
 # construct that JSON itself — same load-bearing reason as the Claude
 # Code layer above.
-RUN ${bunCacheMount(buildKit)}bun install -g @openai/codex \\
+RUN ${bunCacheMount(buildKit)}BUN_INSTALL=/usr/local/lib/typeclaw-coding-agents/codex BUN_INSTALL_BIN=/usr/local/lib/typeclaw-coding-agents/codex/bin bun install -g @openai/codex@${CODEX_CLI_VERSION} \\
+ && printf '%s\\n' '#!/bin/sh' 'exec /usr/local/bin/bun /usr/local/lib/typeclaw-coding-agents/codex/bin/codex "$@"' > /usr/local/bin/codex \\
+ && chmod 0755 /usr/local/bin/codex \\
  && codex --version > /dev/null \\
  && cat > ${TYPECLAW_CX_SESSION_START_HOOK_PATH} <<'TYPECLAW_CX_SESSION_START_HOOK_EOF'
 ${TYPECLAW_CX_SESSION_START_HOOK_SCRIPT}TYPECLAW_CX_SESSION_START_HOOK_EOF

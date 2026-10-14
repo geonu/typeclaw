@@ -162,20 +162,20 @@ For canonical host paths worth mounting per use case — voice memos, screenshot
 
 ## `docker.file`
 
-| Toggle        | Default  | Effect                                                                                                                 |
-| ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `gh`          | `true`   | install GitHub CLI                                                                                                     |
-| `python`      | `true`   | install Python 3 + uv                                                                                                  |
-| `tmux`        | `true`   | install tmux                                                                                                           |
-| `ffmpeg`      | `false`  | install ffmpeg                                                                                                         |
-| `cjkFonts`    | `'auto'` | install `fonts-noto-cjk` so Chromium renders CJK glyphs; `'auto'` installs only when the host locale is CJK (ja/ko/zh) |
-| `cloudflared` | `false`  | install cloudflared for `cloudflare-quick` tunnels (`tunnel add` / `channel add github` flip this on automatically)    |
-| `xvfb`        | `true`   | install Xvfb for headed Chrome                                                                                         |
-| `claudeCode`  | `false`  | install Anthropic's Claude Code CLI                                                                                    |
-| `codexCli`    | `false`  | install OpenAI's Codex CLI (`@openai/codex` via npm)                                                                   |
-| `append`      | `[]`     | extra Dockerfile lines appended verbatim                                                                               |
+| Toggle        | Default  | Effect                                                                                                                                                   |
+| ------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gh`          | `true`   | install GitHub CLI                                                                                                                                       |
+| `python`      | `true`   | install Python 3 + uv                                                                                                                                    |
+| `tmux`        | `true`   | install tmux                                                                                                                                             |
+| `ffmpeg`      | `false`  | install ffmpeg                                                                                                                                           |
+| `cjkFonts`    | `'auto'` | install `fonts-noto-cjk` so Chromium renders CJK glyphs; `'auto'` installs only when the host locale is CJK (ja/ko/zh)                                   |
+| `cloudflared` | `false`  | install cloudflared for `cloudflare-quick` tunnels (`tunnel add` / `channel add github` flip this on automatically)                                      |
+| `xvfb`        | `true`   | install Xvfb for headed Chrome                                                                                                                           |
+| `claudeCode`  | `false`  | install Claude Code 2.1.299 under `/usr/local/lib/typeclaw-coding-agents/claude/2.1.299/`, linked from `/usr/local/bin/claude`                           |
+| `codexCli`    | `false`  | install `@openai/codex@0.162.1` (launcher and native binary) under `/usr/local/lib/typeclaw-coding-agents/codex/`, with the launcher in `/usr/local/bin` |
+| `append`      | `[]`     | extra Dockerfile lines appended verbatim                                                                                                                 |
 
-Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` and `codexCli` are boolean-only. `cjkFonts` accepts `true`/`false`/`'auto'`: `'auto'` (the default) resolves at `typeclaw start` from the host locale, while an explicit boolean forces the decision.
+Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` and `codexCli` are boolean-only; their version pins are owned by the TypeClaw release. Their root-owned executable paths under `/usr/local` are visible inside model bash's bwrap sandbox; enabling them does not expose protected authentication profiles. `cjkFonts` accepts `true`/`false`/`'auto'`: `'auto'` (the default) resolves at `typeclaw start` from the host locale, while an explicit boolean forces the decision.
 
 ## Hot reload
 
