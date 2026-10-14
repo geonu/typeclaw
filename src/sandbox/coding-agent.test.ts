@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
 import { runCodingProcess } from '@/coding-agent/worktree'
 
 import { buildSandboxedCommand } from './build'
-import { codingSandboxPolicy, prepareCodingCommand } from './coding-agent'
+import { CODING_SOURCE, codingSandboxPolicy, prepareCodingCommand } from './coding-agent'
 
 let root: string
 let source: string
@@ -15,9 +15,17 @@ let taskRoot: string
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'coding-sandbox-')))
   source = join(root, 'source')
-  taskRoot = join(root, 'task')
-  for (const path of [source, taskRoot, join(taskRoot, 'git'), join(taskRoot, 'worktree'), join(taskRoot, 'claude')]) {
-    await mkdir(path)
+  taskRoot = join(source, 'workspace', 'coding-agents', crypto.randomUUID())
+  for (const path of [
+    source,
+    join(source, '.git'),
+    taskRoot,
+    join(taskRoot, 'git'),
+    join(taskRoot, 'worktree'),
+    join(taskRoot, 'claude'),
+    join(taskRoot, 'output'),
+  ]) {
+    await mkdir(path, { recursive: true })
   }
   await writeFile(join(source, 'secrets.json'), 'fixture-provider-canary')
   await mkdir(join(source, '.typeclaw'))
@@ -28,7 +36,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-test.each(['code', 'plan'] as const)('narrows mounts and environment in %s mode', async (mode) => {
+test.each(['code', 'plan', 'snapshot'] as const)('excludes credential write locations in %s mode', async (mode) => {
   const policy = await codingSandboxPolicy(
     {
       source,
@@ -44,16 +52,26 @@ test.each(['code', 'plan'] as const)('narrows mounts and environment in %s mode'
   expect(built.argv).toContain('--die-with-parent')
   expect(built.argv).toContain('--new-session')
   expect(built.argv).toContain('--share-net')
-  expect(policy.mounts?.filter((mount) => mount.type === 'bind')).toEqual([
+  expect(policy.mounts).toEqual([
+    ...(mode === 'snapshot'
+      ? [{ type: 'ro-bind' as const, source: join(source, '.git'), dest: posix.join(CODING_SOURCE, '.git') }]
+      : []),
     { type: 'bind', source: taskRoot, dest: taskRoot },
+    ...(mode === 'plan'
+      ? ['git', 'worktree'].map((name) => ({
+          type: 'ro-bind' as const,
+          source: join(taskRoot, name),
+          dest: join(taskRoot, name),
+        }))
+      : []),
   ])
-  expect(policy.mounts?.filter((mount) => mount.type === 'ro-bind')).toHaveLength(mode === 'plan' ? 3 : 1)
+  // No live directory containing canonical credentials, present or future siblings,
+  // or replacement inodes is mounted at either the real or synthetic source path.
+  expect(built.argv).not.toContain(source)
+  expect(built.argv).not.toContain(CODING_SOURCE)
   expect(built.spawnEnv.ANTHROPIC_AUTH_TOKEN).toBe('local-capability')
   expect(built.spawnEnv.ANTHROPIC_API_KEY).toBeUndefined()
   expect(built.spawnEnv.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
-  expect(built.argv).toContain('/typeclaw-coding-source/secrets.json')
-  expect(built.argv).toContain('/typeclaw-coding-source/.typeclaw')
-  expect(built.argv).toContain('/typeclaw-coding-source/.claude/.credentials.json')
 })
 
 test('refuses a task-root symlink instead of binding another directory', async () => {
@@ -62,6 +80,22 @@ test('refuses a task-root symlink instead of binding another directory', async (
   await expect(codingSandboxPolicy({ source, taskRoot: alias, mode: 'code', cwd: alias }, 'proc-bind')).rejects.toThrow(
     'symlink',
   )
+})
+
+test('refuses a Git-directory alias to the credential write directory', async () => {
+  const git = join(source, '.git')
+  await rm(git, { recursive: true })
+  await symlink(source, git)
+  await expect(codingSandboxPolicy({ source, taskRoot, mode: 'snapshot', cwd: taskRoot }, 'proc-bind')).rejects.toThrow(
+    'symlink',
+  )
+})
+
+test('refuses canonical credential hardlinks into otherwise allowed Git metadata', async () => {
+  await link(join(source, 'secrets.json'), join(source, '.git', 'provider-copy'))
+  await expect(
+    codingSandboxPolicy({ source, taskRoot, mode: 'snapshot', cwd: taskRoot }, 'proc-bind'),
+  ).rejects.toThrow()
 })
 
 test.skipIf(process.platform !== 'linux' || !Bun.which('bwrap'))(

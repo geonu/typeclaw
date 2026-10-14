@@ -34,7 +34,7 @@ export function codingGitExecutor(
   source: string,
   taskRoot: string,
   signal?: AbortSignal,
-  mode: 'code' | 'plan' = 'code',
+  mode: 'code' | 'plan' | 'snapshot' = 'code',
 ): CodingExecutor {
   return async (argv, cwd, env) => {
     const prepared = await prepareCodingCommand(argv, {

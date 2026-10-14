@@ -264,7 +264,8 @@ export class CodingAgentService {
       const workspace = await createCodingWorkspace(
         source,
         taskRoot,
-        (this.dependencies.executor ?? codingGitExecutor)(source, taskRoot, signal),
+        this.dependencies.executor?.(source, taskRoot, signal) ??
+          codingGitExecutor(source, taskRoot, signal, 'snapshot'),
         this.dependencies.sourcePath?.(source),
       )
       task.baseSha = workspace.baseSha

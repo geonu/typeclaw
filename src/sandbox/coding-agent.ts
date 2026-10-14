@@ -40,7 +40,7 @@ export function codingSourceMaskDirs(source: string, taskRoot: string): readonly
 export type CodingSandboxOptions = {
   readonly source: string
   readonly taskRoot: string
-  readonly mode: 'code' | 'plan'
+  readonly mode: 'code' | 'plan' | 'snapshot'
   readonly cwd: string
   readonly env?: Record<string, string>
 }
@@ -58,32 +58,40 @@ export async function codingSandboxPolicy(
 ): Promise<SandboxPolicy> {
   await assertCodingDirectory(options.source)
   await assertCodingDirectory(options.taskRoot)
+  // Keep the canonical alias checks: unmounting the write directory must not
+  // admit a pre-existing credential hardlink into otherwise visible Git/task data.
   const dirs: string[] = []
   const files: string[] = []
   for (const name of new Set([...codingSourceMaskDirs(options.source, options.taskRoot), ...CODING_MASK_FILES])) {
-    const stat = await lstat(join(options.source, name)).catch((error: unknown) => {
+    const path = join(options.source, name)
+    const stat = await lstat(path).catch((error: unknown) => {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
       throw error
     })
     if (!stat) continue
-    // Never follow a masked alias during mount setup.
     if (stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
       throw new Error('Source has an unsafe canonical mask target.')
     }
-    if (stat.isDirectory()) dirs.push(posix.join(CODING_SOURCE, name))
-    else files.push(posix.join(CODING_SOURCE, name))
+    if (stat.isDirectory()) dirs.push(path)
+    else files.push(path)
   }
-  await verifyHiddenMaskTargets({
-    dirs: dirs.map((path) => join(options.source, path.slice(CODING_SOURCE.length))),
-    files: files.map((path) => join(options.source, path.slice(CODING_SOURCE.length))),
-  })
+  await verifyHiddenMaskTargets({ dirs, files })
+  const sourceGit = join(options.source, '.git')
+  if (options.mode === 'snapshot') {
+    await assertCodingDirectory(sourceGit)
+  }
   return {
     cwd: options.cwd,
     proc,
     network: 'inherit',
     env: { set: options.env ?? {} },
     mounts: [
-      { type: 'ro-bind', source: options.source, dest: CODING_SOURCE },
+      // Never bind the live source worktree: credential rotation can create
+      // arbitrary siblings and replace masked inodes there during an invocation.
+      // Only snapshot bootstrap needs source Git metadata, not its parent.
+      ...(options.mode === 'snapshot'
+        ? [{ type: 'ro-bind' as const, source: sourceGit, dest: posix.join(CODING_SOURCE, '.git') }]
+        : []),
       { type: 'bind', source: options.taskRoot, dest: options.taskRoot },
       ...(options.mode === 'plan'
         ? [
@@ -96,7 +104,6 @@ export async function codingSandboxPolicy(
           ]
         : []),
     ],
-    masks: { dirs, files },
   }
 }
 
@@ -128,7 +135,7 @@ export async function prepareCodingCommand(
     policy.env = { set: settings, inherit: ['ANTHROPIC_AUTH_TOKEN'] }
   }
   const opened: Awaited<ReturnType<typeof createAndOpenAnchoredDirectory>>[] = []
-  const extraFiles: Array<number | 'ignore'> = (policy.masks?.files ?? []).map(() => 'ignore')
+  const extraFiles: Array<number | 'ignore'> = []
   try {
     const mounts: SandboxMount[] = []
     // Native FD binds verify inode identity after mounting AND consume the FD.
