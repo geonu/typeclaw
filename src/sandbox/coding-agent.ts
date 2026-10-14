@@ -1,5 +1,5 @@
 import { lstat, realpath } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve } from 'node:path'
 
 import { createAndOpenAnchoredDirectory } from '@/agent/tool-file-safety'
 import { config } from '@/config/config'
@@ -70,8 +70,8 @@ export async function codingSandboxPolicy(
     if (stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
       throw new Error('Source has an unsafe canonical mask target.')
     }
-    if (stat.isDirectory()) dirs.push(join(CODING_SOURCE, name))
-    else files.push(join(CODING_SOURCE, name))
+    if (stat.isDirectory()) dirs.push(posix.join(CODING_SOURCE, name))
+    else files.push(posix.join(CODING_SOURCE, name))
   }
   await verifyHiddenMaskTargets({
     dirs: dirs.map((path) => join(options.source, path.slice(CODING_SOURCE.length))),

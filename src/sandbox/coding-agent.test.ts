@@ -20,6 +20,9 @@ beforeEach(async () => {
     await mkdir(path)
   }
   await writeFile(join(source, 'secrets.json'), 'fixture-provider-canary')
+  await mkdir(join(source, '.typeclaw'))
+  await mkdir(join(source, '.claude'))
+  await writeFile(join(source, '.claude', '.credentials.json'), 'fixture-provider-canary')
 })
 afterEach(async () => {
   await rm(root, { recursive: true, force: true })
@@ -49,6 +52,8 @@ test.each(['code', 'plan'] as const)('narrows mounts and environment in %s mode'
   expect(built.spawnEnv.ANTHROPIC_API_KEY).toBeUndefined()
   expect(built.spawnEnv.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
   expect(built.argv).toContain('/typeclaw-coding-source/secrets.json')
+  expect(built.argv).toContain('/typeclaw-coding-source/.typeclaw')
+  expect(built.argv).toContain('/typeclaw-coding-source/.claude/.credentials.json')
 })
 
 test('refuses a task-root symlink instead of binding another directory', async () => {

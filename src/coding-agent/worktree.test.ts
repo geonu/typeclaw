@@ -33,7 +33,8 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-describe('task-private worktree', () => {
+// Snapshot integration requires POSIX Git paths, shell scripts and Unix file modes.
+describe.skipIf(process.platform === 'win32')('task-private worktree', () => {
   test('reconstructs staged, unstaged, untracked, deletion, binary, symlink and mode changes without touching the source', async () => {
     const sourceIndex = await readFile(join(source, '.git', 'index'))
     const workspace = await createCodingWorkspace(source, task, execute, source)

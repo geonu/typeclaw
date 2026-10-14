@@ -73,7 +73,8 @@ function idOf(receipt: Record<string, unknown>): string {
   return receipt.taskId
 }
 
-describe('coding task authority', () => {
+// These scenarios exercise the real POSIX Git/shell snapshot and artifact pipeline.
+describe.skipIf(process.platform === 'win32')('coding task authority', () => {
   test('parent reads operator results while siblings and changed channel principals cannot', async () => {
     service = makeService()
     const receipt = await service.execute(runRequest(), caller)

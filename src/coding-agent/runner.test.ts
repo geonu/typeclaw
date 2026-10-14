@@ -42,7 +42,9 @@ console.log(JSON.stringify({type:'result',subtype:'success',session_id:sessionId
 `
 
 describe('headless runner', () => {
-  test('public service composes real Git, fake CLI, broker, resume and full result artifacts', async () => {
+  // Completed fake-CLI turns execute /bin/sh; cancellation/protocol tests stay portable.
+  const testPosix = test.skipIf(process.platform === 'win32')
+  testPosix('public service composes real Git, fake CLI, broker, resume and full result artifacts', async () => {
     const source = join(root, 'source')
     await mkdir(source)
     const execute = (argv: readonly string[], cwd: string, env?: Record<string, string>) =>
@@ -129,7 +131,7 @@ describe('headless runner', () => {
     }
   })
 
-  test('executes tools, saves context, explicitly resumes, and revokes each capability', async () => {
+  testPosix('executes tools, saves context, explicitly resumes, and revokes each capability', async () => {
     const upstream = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ ok: true }) })
     const brokers: CodingBroker[] = []
     const file = join(root, 'fake-claude.js')
