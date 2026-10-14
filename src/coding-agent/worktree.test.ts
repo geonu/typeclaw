@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -91,11 +103,14 @@ describe.skipIf(process.platform === 'win32')('task-private worktree', () => {
     await expect(lstat(join(task, 'git', 'objects', 'info', 'alternates'))).rejects.toThrow()
   })
 
-  test('reports dirty input while using only the committed baseline', async () => {
+  test('imports committed HEAD from Git metadata without exposing the dirty source worktree', async () => {
     await writeFile(join(source, 'unstaged'), 'excluded\n')
     await writeFile(join(source, 'untracked'), 'excluded\n')
-    const workspace = await createCodingWorkspace(source, task, execute, source)
-    expect(workspace.dirtySource).toBe(true)
+    const gitOnly = join(root, 'git-only')
+    await mkdir(gitOnly)
+    await cp(join(source, '.git'), join(gitOnly, '.git'), { recursive: true })
+    const workspace = await createCodingWorkspace(source, task, execute, gitOnly)
+    expect(workspace.baseSha).toBe((await execute(['git', 'rev-parse', 'HEAD'], source)).trim())
     expect(await readFile(join(task, 'worktree', 'unstaged'), 'utf8')).toBe('base\n')
     await expect(lstat(join(task, 'worktree', 'untracked'))).rejects.toThrow()
   })

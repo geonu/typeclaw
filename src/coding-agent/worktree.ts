@@ -20,7 +20,6 @@ export type CodingWorkspace = {
   readonly taskRoot: string
   readonly baseSha: string
   readonly sourceIdentity: string
-  readonly dirtySource: boolean
 }
 export type ChangeArtifacts = {
   readonly changedFiles: readonly string[]
@@ -141,7 +140,6 @@ export async function createCodingWorkspace(
     throw new Error(
       'Selected source revision contains a protected canonical/private path. Select a clean committed revision.',
     )
-  const dirtySource = (await git('-C', sourcePath, 'status', '--porcelain', '-z')).length > 0
   await git('init', '--bare', join(taskRoot, 'git'))
   // file transport copies objects and --depth=1 excludes unrelated history.
   await git(
@@ -158,7 +156,7 @@ export async function createCodingWorkspace(
   await git('--git-dir', join(taskRoot, 'git'), 'worktree', 'add', '--detach', join(taskRoot, 'worktree'), baseSha)
   const after = await lstat(source)
   if (identity.dev !== after.dev || identity.ino !== after.ino) throw new Error('Source repository identity changed.')
-  return { source, taskRoot, baseSha, sourceIdentity: `${identity.dev}:${identity.ino}`, dirtySource }
+  return { source, taskRoot, baseSha, sourceIdentity: `${identity.dev}:${identity.ino}` }
 }
 
 export async function captureCodingChanges(

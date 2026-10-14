@@ -57,7 +57,6 @@ const taskSchema = z.object({
   source: z.string(),
   sourceIdentity: z.string(),
   baseSha: z.string(),
-  dirtySource: z.boolean(),
   sessionId: z.string().uuid().optional(),
   state: z.enum(['running', 'completed', 'incomplete', 'failed', 'cancelled', 'interrupted']),
   finalMessage: z.string().default(''),
@@ -251,7 +250,6 @@ export class CodingAgentService {
       source,
       sourceIdentity: `${identity.dev}:${identity.ino}`,
       baseSha: '',
-      dirtySource: false,
       state: 'running',
       finalMessage: '',
       diagnostic: '',
@@ -270,7 +268,6 @@ export class CodingAgentService {
         this.dependencies.sourcePath?.(source),
       )
       task.baseSha = workspace.baseSha
-      task.dirtySource = workspace.dirtySource
       task.sourceIdentity = workspace.sourceIdentity
     } catch (error) {
       task.state = signal?.aborted ? 'incomplete' : 'failed'
@@ -353,7 +350,6 @@ export class CodingAgentService {
       source: task.source,
       sourceIdentity: task.sourceIdentity,
       baseSha: task.baseSha,
-      dirtySource: task.dirtySource,
       taskRoot: join(this.agentDir, 'workspace', 'coding-agents', task.taskId),
     }
   }
@@ -379,11 +375,7 @@ export class CodingAgentService {
       patchPath: task.oversized ? null : join(root, 'output', 'changes.patch'),
       exitCode: task.exitCode,
       diagnostic: task.diagnostic,
-      ...(task.dirtySource
-        ? {
-            warning: 'Source has uncommitted changes. This task uses committed HEAD only; those changes were excluded.',
-          }
-        : {}),
+      warning: 'This task uses committed HEAD only; uncommitted source changes are excluded.',
       oversized: task.oversized,
     }
   }

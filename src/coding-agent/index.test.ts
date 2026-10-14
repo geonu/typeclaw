@@ -78,6 +78,7 @@ describe.skipIf(process.platform === 'win32')('coding task authority', () => {
   test('parent reads operator results while siblings and changed channel principals cannot', async () => {
     service = makeService()
     const receipt = await service.execute(runRequest(), caller)
+    expect(receipt).toHaveProperty('warning')
     const taskId = idOf(receipt)
     const get = codingRequestSchema.parse({ action: 'result', taskId })
     expect(

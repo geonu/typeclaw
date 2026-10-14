@@ -142,7 +142,6 @@ describe('headless runner', () => {
         taskRoot: root,
         baseSha: 'a'.repeat(40),
         sourceIdentity: 'fixture',
-        dirtySource: false,
       },
       auth: {
         resolve: async () => ({
@@ -218,7 +217,6 @@ describe('headless runner', () => {
             taskRoot: root,
             baseSha: 'a'.repeat(40),
             sourceIdentity: 'fixture',
-            dirtySource: false,
           },
           auth: { resolve: async () => ({ type: 'api_key', token: 'canary', secrets: ['canary'] }) },
           model: 'primary',
