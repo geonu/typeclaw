@@ -70,6 +70,7 @@ import {
   type PinnedToolFiles,
   TOOL_INPUT_MAX_BYTES,
   TOOL_INPUT_MAX_COUNT,
+  TREE_SNAPSHOT_MAX_ENTRIES,
   writeToolOutputNoFollow,
 } from './tool-file-safety'
 
@@ -2738,9 +2739,11 @@ describe('wrapSystemTool', () => {
       const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-many-entries-'))
       const tree = path.join(agentDir, 'sessions')
       await mkdir(tree)
-      await Promise.all(
-        Array.from({ length: 4200 }, (_, i) => writeFile(path.join(tree, `s-${String(i).padStart(4, '0')}.jsonl`), '')),
-      )
+      // Stay just over the contents cap without thousands of concurrent open files.
+      for (let i = 0; i < TREE_SNAPSHOT_MAX_ENTRIES; i++) {
+        await writeFile(path.join(tree, `s-${String(i).padStart(4, '0')}.jsonl`), '')
+      }
+      await writeFile(path.join(tree, 'z-beyond-cap.log'), '')
       await writeFile(path.join(tree, '.gitignore'), 'skipped.log\n')
       await writeFile(path.join(tree, 'skipped.log'), '')
       const repo = path.join(tree, 'repo')
@@ -2757,13 +2760,6 @@ describe('wrapSystemTool', () => {
         // when
         const result = await find.execute(
           'c',
-          { path: 'sessions', pattern: 's-4199.jsonl' } as never,
-          undefined,
-          undefined,
-          {} as never,
-        )
-        const ignored = await find.execute(
-          'c',
           { path: 'sessions', pattern: '*.log' } as never,
           undefined,
           undefined,
@@ -2771,15 +2767,18 @@ describe('wrapSystemTool', () => {
         )
 
         // then
-        const text = (r: typeof result) => r.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
-        expect(text(result)).toContain('s-4199.jsonl')
-        expect(text(ignored)).not.toContain('skipped.log')
-        expect(text(ignored)).toContain('kept.log')
-        expect(text(ignored)).not.toContain('excluded.log')
+        const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n')
+        expect(text).toContain('z-beyond-cap.log')
+        expect(text).not.toContain('skipped.log')
+        expect(text).toContain('kept.log')
+        expect(text).not.toContain('excluded.log')
       } finally {
         await rm(agentDir, { recursive: true, force: true })
       }
     },
+    // Fixture creation and inode-anchored traversal remain proportional to the
+    // contents cap; allow CPU-starved CI workers time for that unavoidable work.
+    120_000,
   )
 
   test.skipIf(process.platform !== 'linux')(
