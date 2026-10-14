@@ -12,6 +12,7 @@ import { resolveHiddenPaths } from '@/sandbox/hidden-paths'
 import { createCodingAgentAuthResolver, type CodingAgentAuthResolver } from '@/secrets/coding-agent-auth'
 
 import { CLAUDE_AUXILIARY_MODELS, CLAUDE_CODE_VERSION } from './claude'
+import { CODEX_CLI_VERSION } from './codex'
 import { runCodingAgent, type CodingRunOptions, type CodingRunResult } from './runner'
 import {
   captureCodingChanges,
@@ -43,6 +44,8 @@ export const codingRequestSchema = z.discriminatedUnion('action', [
 ])
 export type CodingRequest = z.infer<typeof codingRequestSchema>
 const taskSchema = z.object({
+  // PR2 registries predate the engine field and contain only Claude tasks.
+  engine: z.enum(['claude', 'codex']).default('claude'),
   taskId: z.string().uuid(),
   ownerSessionId: z.string(),
   parentSessionId: z.string().optional(),
@@ -105,9 +108,6 @@ export class CodingAgentService {
     if (this.registryUnavailable)
       throw new Error('Coding task registry is unreadable. The host operator must repair it before delegation resumes.')
     authorize(caller, this.agentDir)
-    if (request.action === 'run' && request.engine === 'codex') {
-      return { ok: false, diagnostic: 'Codex delegation is not yet available. Use the Claude engine.' }
-    }
     if (request.action === 'result') {
       const task = this.tasks.get(request.taskId)
       if (!task) throw new Error('Unknown coding task.')
@@ -183,15 +183,16 @@ export class CodingAgentService {
           getConfig().mounts.map((mount) => mount.name),
         )
         if (
+          request.engine !== task.engine ||
           (request.modelRef && request.modelRef !== task.modelRef) ||
           (request.repo && request.repo !== task.source)
         ) {
-          throw new Error('A resumed task keeps its recorded repository and model.')
+          throw new Error('A resumed task keeps its recorded engine, repository and model.')
         }
-        if (task.engineVersion !== CLAUDE_CODE_VERSION)
+        if (task.engineVersion !== (task.engine === 'claude' ? CLAUDE_CODE_VERSION : CODEX_CLI_VERSION))
           throw new Error('Task CLI version changed; preserve and review its diff before migrating.')
         if (!task.sessionId)
-          throw new Error('This task has no resumable Claude session. Its partial work remains available.')
+          throw new Error('This task has no resumable CLI session. Its partial work remains available.')
         task.mode = request.mode ?? task.mode
         return this.invoke(task, request, signal)
     }
@@ -212,19 +213,21 @@ export class CodingAgentService {
     signal?: AbortSignal,
   ) {
     if (!request.repo || !request.modelRef)
-      throw new Error('A new task requires repo and a concrete anthropic modelRef.')
+      throw new Error('A new task requires repo and a concrete engine-compatible modelRef.')
     const config = getConfig()
-    if (!config.docker.file.claudeCode && !this.dependencies.run) {
-      throw new Error('Enable docker.file.claudeCode on the host and run `typeclaw start` to rebuild the image.')
+    const toggle = request.engine === 'claude' ? 'claudeCode' : 'codexCli'
+    const provider = request.engine === 'claude' ? 'anthropic' : 'openai-codex'
+    if (!config.docker.file[toggle] && !this.dependencies.run) {
+      throw new Error(`Enable docker.file.${toggle} on the host and run \`typeclaw start\` to rebuild the image.`)
     }
     if (
-      !request.modelRef.startsWith('anthropic/') ||
+      !request.modelRef.startsWith(`${provider}/`) ||
       !(
-        request.modelRef.slice('anthropic/'.length) in KNOWN_PROVIDERS.anthropic.models ||
+        request.modelRef.slice(provider.length + 1) in KNOWN_PROVIDERS[provider].models ||
         request.modelRef in config.customModels
       )
     )
-      throw new Error('Select a configured or curated anthropic modelRef.')
+      throw new Error(`Select a configured or curated ${provider} modelRef.`)
     const model = resolveModel(request.modelRef).id
     const source = await resolveCodingSource(
       this.agentDir,
@@ -232,10 +235,11 @@ export class CodingAgentService {
       config.mounts.map((mount) => mount.name),
     )
     // Missing auth never creates a task, exits the runtime, or disables another provider.
-    await (await this.resolver()).resolve(signal)
+    await (await this.resolver()).resolve(signal, undefined, provider)
     const taskRoot = await createTaskDirectory(this.agentDir, taskId)
     const identity = await lstat(source)
     const task: CodingTask = {
+      engine: request.engine,
       taskId,
       ownerSessionId: caller.sessionId,
       ...(caller.origin?.kind === 'subagent' ? { parentSessionId: caller.origin.parentSessionId } : {}),
@@ -245,8 +249,8 @@ export class CodingAgentService {
       modelRef: request.modelRef,
       model,
       mode: request.mode ?? 'code',
-      allowedModels: [...new Set([model, ...CLAUDE_AUXILIARY_MODELS])],
-      engineVersion: CLAUDE_CODE_VERSION,
+      allowedModels: [...new Set([model, ...(request.engine === 'claude' ? CLAUDE_AUXILIARY_MODELS : [])])],
+      engineVersion: request.engine === 'claude' ? CLAUDE_CODE_VERSION : CODEX_CLI_VERSION,
       source,
       sourceIdentity: `${identity.dev}:${identity.ino}`,
       baseSha: '',
@@ -291,10 +295,11 @@ export class CodingAgentService {
       const source = await lstat(task.source)
       if (`${source.dev}:${source.ino}` !== task.sourceIdentity) throw new Error('Source repository identity changed.')
       const auth = await this.resolver()
-      await auth.resolve(combined)
+      await auth.resolve(combined, undefined, task.engine === 'claude' ? 'anthropic' : 'openai-codex')
       task.state = 'running'
       await this.save()
       const result = await (this.dependencies.run ?? runCodingAgent)({
+        engine: task.engine,
         workspace,
         auth,
         model: task.model,
@@ -367,6 +372,7 @@ export class CodingAgentService {
       state: task.state,
       baseSha: task.baseSha,
       source: task.source,
+      engine: task.engine,
       modelRef: task.modelRef,
       engineVersion: task.engineVersion,
       worktreePath: join(root, 'worktree'),
