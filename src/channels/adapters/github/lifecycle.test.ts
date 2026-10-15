@@ -1353,6 +1353,7 @@ describe('createGithubAdapter lifecycle', () => {
     }
 
     test("reviewOn 'opened' scans open PRs and checks reviews for an un-reviewed one", async () => {
+      const reviewsRequested = Promise.withResolvers<void>()
       const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
         if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
         const hooks = url.match(/\/repos\/[^/]+\/[^/]+\/hooks\b/)
@@ -1360,7 +1361,10 @@ describe('createGithubAdapter lifecycle', () => {
           if (method === 'GET') return Response.json([])
           if (method === 'POST') return Response.json({ id: 1 }, { status: 201 })
         }
-        if (url.match(/\/pulls\/7\/reviews/)) return Response.json([])
+        if (url.match(/\/pulls\/7\/reviews/)) {
+          reviewsRequested.resolve()
+          return Response.json([])
+        }
         if (url.includes('/pulls?'))
           return Response.json([
             {
@@ -1390,6 +1394,7 @@ describe('createGithubAdapter lifecycle', () => {
       })
 
       await adapter.start()
+      await reviewsRequested.promise
       await adapter.stop()
 
       expect(calls.some((c) => c.url.includes('/repos/acme/widgets/pulls?state=open'))).toBe(true)

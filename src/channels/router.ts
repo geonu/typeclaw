@@ -1482,7 +1482,7 @@ export const SKIP_RESPONSE_LOCK_ERROR =
   'something to say, send it on the next turn.'
 
 export type ChannelRouter = {
-  route: (event: InboundMessage) => Promise<RouteReceipt>
+  route: (event: InboundMessage, onAdmitted?: () => Promise<void>) => Promise<RouteReceipt>
   send: (msg: OutboundMessage, opts?: SendOptions) => Promise<SendResult>
   acceptBackgroundResponse: (args: {
     parentSessionId: string
@@ -6021,7 +6021,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
-  const route = async (event: InboundMessage): Promise<RouteReceipt> => {
+  const route = async (event: InboundMessage, onAdmitted?: () => Promise<void>): Promise<RouteReceipt> => {
     const adapterConfig = options.configForAdapter(event.adapter)
     if (!adapterConfig) return { kind: 'denied' }
 
@@ -6165,12 +6165,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       accountIdentity && inboundJournal.health().available
         ? await backgroundObligations.withTargetLane(key, async () => inboundJournal.lookupAdmission(identity))
         : undefined
-    if (existingAdmission)
+    if (existingAdmission) {
+      if (existingAdmission.phase !== 'closed') await onAdmitted?.()
       return {
         kind: 'duplicate',
         inputId: existingAdmission.inputId,
         outcome: existingAdmission.phase === 'closed' ? existingAdmission.outcome.kind : undefined,
       }
+    }
 
     // If a boot restart-resume reservation is pending for this key, mark that a
     // real inbound arrived: ensureLive below will coalesce onto the reservation
@@ -6250,8 +6252,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
       if (isChannelRespondDenied(event)) return { kind: 'denied' }
       const admission = await inboundJournal.admit({ ...identity, ownerSessionId: live.sessionId })
-      if (admission.kind === 'duplicate')
+      if (admission.kind === 'duplicate') {
+        if (admission.outcome === undefined) await onAdmitted?.()
         return { kind: 'duplicate', inputId: admission.inputId, outcome: admission.outcome?.kind }
+      }
+      // Adapter-owned durable obligations must exist before this input can run.
+      await onAdmitted?.()
       publishInbound(event, 'engage', live.sessionId)
 
       // Arm cold-start bare-empty recovery only for the exact incident shape: the

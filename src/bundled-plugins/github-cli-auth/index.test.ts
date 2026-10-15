@@ -27,6 +27,7 @@ import {
 } from '@/agent/plugin-tools'
 import {
   __resetReviewObserverForTest,
+  observeVerifiedDismissals,
   setReviewCoverageCapture,
   setReviewObserver,
 } from '@/channels/github-review-turn-ledger'
@@ -2835,6 +2836,10 @@ describe('github-cli-auth plugin — review verdict lease is released on a tool.
     stubDismissedReviewFetch()
     const { before, after } = await hooksFor(tokenResolver('ghs_minted'))
     const seen: unknown[] = []
+    const dismissed: unknown[] = []
+    const stopObserving = observeVerifiedDismissals(async (dismissal) => {
+      dismissed.push(dismissal)
+    })
     setReviewObserver((review) => seen.push(review))
 
     const event = roundReviewBashEvent(DISMISS_REVIEW, 'dismiss-success', '101')
@@ -2850,6 +2855,17 @@ describe('github-cli-auth plugin — review verdict lease is released on a tool.
     )
 
     expect(seen).toEqual([{ sessionId: 's', workspace: 'acme/widgets', prNumber: 5, verdict: 'DISMISSED' }])
+    const round = event.origin?.kind === 'channel' ? event.origin.githubReviewRound : undefined
+    expect(dismissed).toEqual([
+      {
+        sessionId: 's',
+        workspace: 'acme/widgets',
+        prNumber: 5,
+        commitSha: round?.headSha,
+        startedAt: expect.any(Number),
+      },
+    ])
+    stopObserving()
   })
 
   test('leaves the round pending when dismissal mutation fails', async () => {

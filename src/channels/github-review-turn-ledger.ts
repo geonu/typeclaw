@@ -75,6 +75,21 @@ const resolvedThreads = new Set<ThreadKey>()
 // plugin/channels boundary, which is why it owns this hook.
 let reviewObserver: ReviewObserver | null = null
 let reviewOutputObserver: ReviewOutputObserver | null = null
+export type VerifiedDismissal = {
+  sessionId: string
+  workspace: string
+  prNumber: number
+  commitSha?: string
+  startedAt?: number
+}
+const dismissalObservers = new Set<(dismissal: VerifiedDismissal) => Promise<void>>()
+
+export function observeVerifiedDismissals(observer: (dismissal: VerifiedDismissal) => Promise<void>): () => void {
+  dismissalObservers.add(observer)
+  return () => {
+    dismissalObservers.delete(observer)
+  }
+}
 
 export function setReviewObserver(observer: ReviewObserver | null): void {
   reviewObserver = observer
@@ -88,6 +103,7 @@ export function __resetReviewObserverForTest(): void {
   reviewObserver = null
   reviewOutputObserver = null
   reviewCoverageCapture = null
+  dismissalObservers.clear()
 }
 
 function prKey(sessionId: string, workspace: string, prNumber: number): PrKey {
@@ -147,12 +163,26 @@ export async function recordReview(
   })
 }
 
-export function recordVerifiedDismissal(args: { sessionId: string; workspace: string; prNumber: number }): void {
-  if (reviewObserver === null) return
-  try {
-    reviewObserver({ ...args, verdict: 'DISMISSED' })
-  } catch {
-    // A broken round wakeup must not turn a verified GitHub mutation into a tool failure.
+export async function recordVerifiedDismissal(args: VerifiedDismissal): Promise<void> {
+  if (reviewObserver !== null) {
+    try {
+      reviewObserver({
+        sessionId: args.sessionId,
+        workspace: args.workspace,
+        prNumber: args.prNumber,
+        verdict: 'DISMISSED',
+      })
+    } catch {
+      // A broken round wakeup must not turn a verified GitHub mutation into a tool failure.
+    }
+  }
+  for (const observer of dismissalObservers) {
+    try {
+      await observer(args)
+    } catch (error) {
+      // Publication already succeeded; retain pending work for boot verification.
+      console.warn('[github] verified dismissal pending-review cleanup failed:', error)
+    }
   }
 }
 

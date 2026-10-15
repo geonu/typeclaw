@@ -307,7 +307,9 @@ describe('github review submitter', () => {
     const submit = githubReviewSubmitter.createGithubReviewSubmitter({
       token: async () => 'example-token',
       allowApprove: () => true,
-      onReviewPosted: (review) => posted.push(review),
+      onReviewPosted: (review) => {
+        posted.push(review)
+      },
       fetchImpl: fakeGithub({ headShas: ['head-sha'] }),
     })
 
@@ -331,7 +333,9 @@ describe('github review submitter', () => {
     const submit = githubReviewSubmitter.createGithubReviewSubmitter({
       token: async () => 'example-token',
       allowApprove: () => true,
-      onReviewPosted: (review) => posted.push(review),
+      onReviewPosted: (review) => {
+        posted.push(review)
+      },
       fetchImpl: fakeGithub({ verifyState: 'PENDING' }),
     })
 

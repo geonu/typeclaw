@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto'
+
 import { githubReviewChecks } from '@/channels/github-review-check'
+import { observeVerifiedDismissals } from '@/channels/github-review-turn-ledger'
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
@@ -25,6 +28,7 @@ import { readGithubLastAlive, writeGithubLastAlive } from './last-alive'
 import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
+import { loadPendingReviewStore, type PendingReviewStore } from './pending-review-store'
 import {
   buildAppPermissionPreflightGuidance,
   buildPermissionGuidance,
@@ -33,7 +37,7 @@ import {
 import { createGithubReactionCallback, createGithubRemoveReactionCallback } from './reactions'
 import { createGithubOwnReactionCallbacks } from './reactions'
 import { loadReconcileCooldownStore, type ReconcileCooldownStore } from './reconcile-cooldown-store'
-import { reconcileOpenPrs } from './reconcile-open-prs'
+import { completePendingReview, reconcileOpenPrs, replayPendingReviews } from './reconcile-open-prs'
 import { createRecoveredGuidLog, recoverFailedGithubDeliveries } from './recover-failed-deliveries'
 import { createGithubRecoveryCallbacks } from './recovery'
 import {
@@ -148,6 +152,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let deliveryRecoveryTimer: { clear: () => void } | null = null
   let reconcileTimer: { clear: () => void } | null = null
   let reconcileCooldownStore: ReconcileCooldownStore | null = null
+  let pendingReviewStore: PendingReviewStore | null = null
+  let stopObservingDismissals: (() => void) | null = null
   let lifecycleGeneration = 0
   let unregisterTokenBridge: (() => void) | null = null
   const workspaceByChat = new Map<string, string>()
@@ -177,6 +183,9 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     ...createGithubRecoveryCallbacks(auth, fetchImpl, () => (selfId !== null ? `github:${selfId}` : undefined)),
     redelivery: (record, eventKinds) => {
       if (!eventKinds.every((kind) => REVIEW_TRIGGER_EVENT_KINDS.has(kind))) return 'not-redelivered'
+      const prNumber = /^pr:(\d+)$/.exec(record.target.chat)?.[1]
+      if (prNumber !== undefined && pendingReviewStore?.has(record.target.workspace, Number(prNumber)))
+        return 'redelivered'
       // A fresh-review reconcile replay is runtime-synthesized: nobody asked, so a restart notice
       // would only announce system state. The next periodic pass after the cooldown retries it.
       // Held re-reviews (`pull_request:reconcile:rereview`) replay only on boot, so they keep the
@@ -241,7 +250,14 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     token: authToken,
     allowApprove: () => options.configRef().review.approve,
     accountIdentity: recoveryCallbacks.accountIdentity,
-    onReviewPosted: (posted) => {
+    onReviewPosted: async (posted) => {
+      if (pendingReviewStore !== null) {
+        try {
+          await completePendingReview(pendingReviewStore, { ...posted, submittedAt: Date.now() }, authToken, fetchImpl)
+        } catch (error) {
+          logger.warn(`[github] pending review completion persist failed: ${describeError(error)}`)
+        }
+      }
       void githubReviewChecks.reviewPosted(
         { repo: posted.repo, pullRequest: posted.prNumber, headSha: posted.headSha },
         posted.state,
@@ -265,13 +281,30 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   // same path a real delivery would.
   const routeInbound = async (message: InboundMessage): Promise<RouteReceipt> => {
     rememberWorkspace(message.workspace, message.chat)
+    const store = pendingReviewStore
+    const pending = message.githubPendingReview
+    const prNumber = /^pr:(\d+)$/.exec(message.chat)?.[1]
     // The webhook handler schedules this outside its acknowledgment path.
-    return options.router.route({
-      ...message,
-      accountIdentity: message.accountIdentity ?? (selfId === null ? undefined : `github:${selfId}`),
-      eventKind: message.eventKind ?? 'review-followup',
-      revision: message.revision ?? 'original',
-    })
+    return options.router.route(
+      {
+        ...message,
+        accountIdentity: message.accountIdentity ?? (selfId === null ? undefined : `github:${selfId}`),
+        eventKind: message.eventKind ?? 'review-followup',
+        revision: message.revision ?? 'original',
+      },
+      store !== null && pending !== undefined && prNumber !== undefined
+        ? () =>
+            store.record({
+              repo: message.workspace,
+              prNumber: Number(prNumber),
+              ...pending,
+              admittedAt: Date.now(),
+              authorId: message.authorId,
+              authorName: message.authorName,
+              authorIsBot: message.authorIsBot,
+            })
+        : undefined,
+    )
   }
   const handlerOptions: GithubWebhookHandlerOptions = {
     webhookSecret,
@@ -288,6 +321,12 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     logger,
     route: routeInbound,
     abortGithubPrTurn: options.router.abortGithubPrTurn,
+    clearPendingReview: async (workspace, prNumber) => {
+      await pendingReviewStore?.clear(workspace, prNumber)
+    },
+    reviewSubmitted: async (review) => {
+      if (pendingReviewStore !== null) await completePendingReview(pendingReviewStore, review, authToken, fetchImpl)
+    },
     clearReconcileCooldown: async (workspace, prId) => {
       if (reconcileCooldownStore === null) return 'not-initialized'
       await reconcileCooldownStore.clear(workspace, prId)
@@ -304,6 +343,28 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       const self = await auth.getSelf()
       selfId = String(self.id)
       selfLogin = self.login
+      // Ready before binding HTTP: the first live webhook can create pending work.
+      const loadedPendingReviewStore = await loadPendingReviewStore(options.agentDir, logger)
+      pendingReviewStore = loadedPendingReviewStore
+      // Keep suppression through the boot even when API verification clears an
+      // entry as already completed or closed: there is no lost work to announce.
+      for (const pending of await loadedPendingReviewStore.list())
+        reconcileReplayedPrs.add(prReplayKey(pending.repo, `pr:${pending.prNumber}`))
+      stopObservingDismissals = observeVerifiedDismissals(async (dismissal) => {
+        if (dismissal.commitSha === undefined || dismissal.startedAt === undefined) return
+        const pending = (await loadedPendingReviewStore.list()).find(
+          (entry) =>
+            canonicalGithubRepo(entry.repo) === canonicalGithubRepo(dismissal.workspace) &&
+            entry.prNumber === dismissal.prNumber,
+        )
+        if (
+          pending?.kind !== 'rereview' ||
+          pending.headSha !== dismissal.commitSha ||
+          pending.admittedAt > dismissal.startedAt
+        )
+          return
+        await loadedPendingReviewStore.clear(pending.repo, pending.prNumber, pending)
+      })
       // Register all callbacks before binding the HTTP listener so the router
       // is fully wired before any webhook can arrive.
       options.router.registerOutbound('github', outbound)
@@ -324,6 +385,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       try {
         server = (options.httpListenImpl ?? listenWithBun)(options.configRef().webhookPort, handler)
       } catch (err) {
+        stopObservingDismissals?.()
+        stopObservingDismissals = null
         // Listener failed — roll back all registrations so stop() is a no-op
         // and the manager can report the failure cleanly.
         options.router.unregisterOutbound('github', outbound)
@@ -479,6 +542,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // is live-reloadable, so a periodic tick must honor a change to `off`
       // (reconcileOpenPrs short-circuits on `off`) instead of scanning forever.
       const reconcileGeneration = lifecycleGeneration
+      const replayId = randomUUID()
       const routeReconcileReplay = async (message: InboundMessage): Promise<RouteReceipt> => {
         const receipt = await routeInbound(message)
         if (receipt.kind === 'accepted' && reconcileGeneration === lifecycleGeneration)
@@ -498,6 +562,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           isBotInTeam,
           fetchImpl,
           cooldownStore: store,
+          pendingStore: loadedPendingReviewStore,
           createdSince,
           isCancelled: () => reconcileGeneration !== lifecycleGeneration,
         }).catch((err: unknown) => {
@@ -512,9 +577,26 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         // Only the boot pass re-checks held CHANGES_REQUESTED reviews: a restart
         // is what kills an in-flight push follow-up, and a periodic tick could
         // race a live one.
-        void runReconcile(loadedReconcileCooldownStore, true).finally(() => {
-          if (reconcileGeneration === lifecycleGeneration) firstReconcilePending = false
+        void replayPendingReviews({
+          repos,
+          reviewOn: options.configRef().review.on,
+          selfLogin,
+          authType: options.secrets.auth.type,
+          token: authToken,
+          route: routeReconcileReplay,
+          logger,
+          fetchImpl,
+          pendingStore: loadedPendingReviewStore,
+          replayId,
+          isCancelled: () => reconcileGeneration !== lifecycleGeneration,
         })
+          .catch((error: unknown) => {
+            logger.warn(`[github] pending review replay failed: ${describeError(error)}`)
+          })
+          .then(() => runReconcile(loadedReconcileCooldownStore, true))
+          .finally(() => {
+            if (reconcileGeneration === lifecycleGeneration) firstReconcilePending = false
+          })
         const reconcileIntervalMs = options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS
         if (reconcileIntervalMs > 0) {
           reconcileTimer = setIntervalFn(() => {
@@ -556,6 +638,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (!started) return
       started = false
       lifecycleGeneration += 1
+      stopObservingDismissals?.()
+      stopObservingDismissals = null
       // Stop the recovery sweep first: its async work outlives the synchronous
       // unregister calls below, and a tick landing mid-teardown would query a
       // hook we're about to deregister and could route during shutdown.
@@ -615,6 +699,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       selfId = null
       selfLogin = null
       reconcileCooldownStore = null
+      pendingReviewStore = null
     },
     isConnected(): boolean {
       return started && selfLogin !== null

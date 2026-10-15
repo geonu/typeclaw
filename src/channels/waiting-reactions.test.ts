@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import * as filesystem from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -538,6 +539,7 @@ test('settled tuples retire and missing-file stale capabilities cannot affect la
 })
 
 test('unchanged protected and deferred unresolved recovery performs no writes and yields during scanning', async () => {
+  spyOn(Date, 'now').mockReturnValue(1_000)
   const agentDir = directory()
   const old = createWaitingReactionCoordinator({
     agentDir,
@@ -546,26 +548,41 @@ test('unchanged protected and deferred unresolved recovery performs no writes an
     add: async () => ({ ok: true }),
     remove: async () => ({ ok: false, code: 'rate-limit', error: 'later', retryAfter: 60_000 }),
   })
-  const count = 256
-  for (let i = 0; i < count; i++) {
+  // Exercise the writer for both shapes, then seed the scan workload directly.
+  // Hundreds of durable acquire/release fsyncs test setup speed, not recovery.
+  for (let i = 0; i < 2; i++) {
     const handle = old.acquire({ ...req, reactionRef: { ...req.reactionRef, value: String(i) } }, i % 2 === 0)
     await handle.ready
     if (i % 2 !== 0) await old.release(handle)
   }
   const journalDir = join(agentDir, 'channels', 'waiting-reactions')
+  const templates = readdirSync(journalDir).map((file) => JSON.parse(readFileSync(join(journalDir, file), 'utf8')))
+  const count = 256
+  for (let i = 2; i < count; i++) {
+    const record = structuredClone(templates.find((entry) => entry.owners.length > 0 === (i % 2 === 0)))
+    record.req.reactionRef.value = String(i)
+    record.prepared.target.value = String(i)
+    record.key = createHash('sha256')
+      .update(
+        JSON.stringify([req.adapter, record.prepared.accountIdentity, req.adapter, String(i), record.prepared.emoji]),
+      )
+      .digest('hex')
+    writeFileSync(join(journalDir, `${record.key}.json`), JSON.stringify(record))
+  }
   const before = readdirSync(journalDir).map((file) => [file, readFileSync(join(journalDir, file), 'utf8')])
   const read = filesystem.readFileSync
   let scanned = 0
   let scannedAtTimer = -1
-  let timer!: NodeJS.Timeout
-  // This integration probes real event-loop starvation; fake time cannot exercise fs scan scheduling.
+  const yielded = Promise.withResolvers<void>()
+  // Observe a real event-loop turn, not a timer racing filesystem speed.
   spyOn(filesystem, 'readFileSync').mockImplementation(((...args: Parameters<typeof filesystem.readFileSync>) => {
     if (String(args[0]).endsWith('.json')) {
       scanned++
       if (scanned === 1)
-        timer = setTimeout(() => {
+        setImmediate(() => {
           scannedAtTimer = scanned
-        }, 0)
+          yielded.resolve()
+        })
     }
     return read(...args)
   }) as typeof filesystem.readFileSync)
@@ -584,7 +601,7 @@ test('unchanged protected and deferred unresolved recovery performs no writes an
     },
   })
   await reboot.recover()
-  clearTimeout(timer)
+  await yielded.promise
   expect(scanned).toBe(count)
   expect(scannedAtTimer).toBeGreaterThan(0)
   expect(scannedAtTimer).toBeLessThan(count)
