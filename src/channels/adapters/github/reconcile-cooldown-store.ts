@@ -97,6 +97,9 @@ export type ReconcileCooldownStore = {
   // can be stale across store instances, so it must not decide a launch; only
   // markReplayed's serialized check against the latest file does.
   isCoolingDown: (repo: string, prId: number, now: number, cooldownMs: number) => boolean
+  // Whether reconcile has replayed this PR within marker retention, i.e. it owes
+  // the PR an unfinished review regardless of the last-alive creation bound.
+  hasMarker: (repo: string, prId: number) => boolean
   // Persists a launch reservation BEFORE the synthetic inbound is routed: a
   // crash between reserving and session creation must not re-trigger a replay
   // on the next restart. Resolves null without launching when the latest
@@ -173,6 +176,9 @@ export async function loadReconcileCooldownStore(
       const marker = markers.get(markerKey(repo, prId))
       if (marker === undefined) return false
       return now - marker.lastReplayAt < cooldownMs
+    },
+    hasMarker(repo, prId): boolean {
+      return markers.has(markerKey(repo, prId))
     },
     markReplayed(repo, prId, { now, cooldownMs, isCancelled }): Promise<ReconcileReplayReservation | null> {
       return onFileLane(path, async () => {

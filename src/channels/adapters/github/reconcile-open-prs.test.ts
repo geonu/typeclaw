@@ -539,6 +539,31 @@ describe('reconcileOpenPrs cooldown', () => {
     expect(routed[0]?.externalMessageId).not.toBe(routed[1]?.externalMessageId)
   })
 
+  test('retries an interrupted replay after the cooldown even once the last-alive bound has passed its creation', async () => {
+    // given a downtime PR replayed at t=1000, then a restart advanced the last-alive bound past it
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    const prs = [
+      { number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' },
+      { number: 8, id: 800, createdAt: '2026-10-15T00:00:00Z' },
+    ]
+    await seedMarker(700, 1_000)
+    const routed: InboundMessage[] = []
+
+    // when the periodic pass runs after the cooldown with the newer bound
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => 1_000 + WINDOW + 1,
+        fetchImpl: fakeGithub(prs),
+      }),
+    )
+
+    // then only the owed PR is retried; the never-replayed one stays excluded
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
   test('retries a still-unreviewed PR after the cooldown expires', async () => {
     await seedMarker(700, 1_000)
     const routed: InboundMessage[] = []

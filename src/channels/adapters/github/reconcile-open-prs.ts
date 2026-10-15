@@ -252,7 +252,11 @@ async function prReplayKind(input: {
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
-  if (pr.draft || createdBeforeReplayWindow(pr, options.createdSince)) return null
+  if (pr.draft) return null
+  // A PR reconcile already replayed stays eligible past the advancing bound: an
+  // interrupted replay gets no restart notice, so this pass is its retry path.
+  const owedReplay = options.cooldownStore?.hasMarker(`${target.owner}/${target.repo}`, pr.id) === true
+  if (!owedReplay && createdBeforeReplayWindow(pr, options.createdSince)) return null
   return (await selfReviews()).reviewed ? null : 'review'
 }
 
