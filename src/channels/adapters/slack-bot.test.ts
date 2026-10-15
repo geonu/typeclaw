@@ -88,6 +88,11 @@ function lifecycleRouter(): ChannelRouter {
     registerMembership: noop,
     unregisterMembership: noop,
     registerHistory: noop,
+    registerMissedInbound: noop,
+    unregisterMissedInbound: noop,
+    catchUp: async () => {},
+    disconnectCatchUp: noop,
+    catchUpTargets: async () => [],
     unregisterHistory: noop,
     registerMessageGet: noop,
     unregisterMessageGet: noop,
@@ -103,8 +108,17 @@ function lifecycleRouter(): ChannelRouter {
 describe('createSlackBotAdapter', () => {
   test('reports Socket Mode disconnects and reconnects independently of authenticated identity', async () => {
     const listener = new FakeSlackBotListener()
+    let catchUps = 0
+    let disconnects = 0
+    const router = lifecycleRouter()
+    router.catchUp = async () => {
+      catchUps++
+    }
+    router.disconnectCatchUp = () => {
+      disconnects++
+    }
     const adapter = createSlackBotAdapter({
-      router: lifecycleRouter(),
+      router,
       configRef: () => channelsSchema.parse({ 'slack-bot': {} })['slack-bot']!,
       token: 'xoxb-test',
       appToken: 'xapp-test',
@@ -122,15 +136,18 @@ describe('createSlackBotAdapter', () => {
 
     listener.emit('connected', { app_id: 'A0123456789' })
     expect(adapter.isConnected()).toBe(true)
+    expect(catchUps).toBe(1)
 
     listener.emit('error', { code: 'socket_error' })
     expect(adapter.isConnected()).toBe(true)
 
     listener.emit('disconnected', undefined)
     expect(adapter.isConnected()).toBe(false)
+    expect(disconnects).toBe(1)
 
     listener.emit('connected', { app_id: 'A0123456789' })
     expect(adapter.isConnected()).toBe(true)
+    expect(catchUps).toBe(2)
 
     listener.emit('error', { code: 'disconnect_terminal' })
     expect(adapter.isConnected()).toBe(false)
@@ -2760,6 +2777,7 @@ describe('createSlashCommandHandler', () => {
 
   test('ack fires BEFORE the slow formatChannelTag completes (3s budget protection)', async () => {
     const events: Array<'router-call' | 'ack-sent' | 'channel-tag-resolved'> = []
+    const ackSent = Promise.withResolvers<void>()
     let releaseTag: (() => void) | undefined
     const tagPromise = new Promise<string>((resolve) => {
       releaseTag = () => {
@@ -2780,6 +2798,7 @@ describe('createSlashCommandHandler', () => {
     })
     const ack = (): void => {
       events.push('ack-sent')
+      ackSent.resolve()
     }
     const args = {
       ack,
@@ -2794,7 +2813,7 @@ describe('createSlashCommandHandler', () => {
     } as Parameters<ReturnType<typeof createSlashCommandHandler>>[0]
 
     const done = handler(args)
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    await ackSent.promise
     expect(events).toEqual(['router-call', 'ack-sent'])
 
     releaseTag!()

@@ -5,6 +5,7 @@ import {
   type SlackSocketModeSlashCommandArgs,
 } from 'agent-messenger/slackbot'
 
+import { CATCH_UP_CONVERSATION_LIMIT, type ListMissedInbound, type MissedInbound } from '@/channels/catch-up'
 import { DEFAULT_ATTACHMENT_MAX_BYTES, enforceAttachmentMetadataSize } from '@/channels/fetch-attachment'
 import {
   MEMBERSHIP_CACHE_TRANSIENT_TTL_MS,
@@ -19,6 +20,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelKey,
   ChannelListEntry,
   ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
@@ -430,6 +432,9 @@ type SlackRawHistoryMessage = {
   thread_ts?: string
   parent_user_id?: string
   files?: SlackFile[]
+  edited?: { user: string; ts: string }
+  reply_count?: number
+  latest_reply?: string
 }
 
 type SlackHistoryResponse = {
@@ -714,24 +719,9 @@ export function createSlackHistoryCallback(deps: {
   const fetchFn = deps.fetchImpl ?? fetch
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     const limit = clampLimit(args.limit, SLACK_HISTORY_LIMIT_MAX)
-    const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
-    const body = new URLSearchParams()
-    body.set('channel', args.chat)
-    body.set('limit', String(limit))
-    if (args.thread !== null) body.set('ts', args.thread)
-    if (args.cursor !== undefined && args.cursor !== '') body.set('cursor', args.cursor)
-
     let raw: SlackHistoryResponse
     try {
-      const response = await fetchFn(`${SLACK_API_BASE}/${endpoint}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
-        },
-        body: body.toString(),
-      })
-      raw = (await response.json()) as SlackHistoryResponse
+      raw = await fetchSlackHistoryPage(token, fetchFn, { ...args, limit })
     } catch (err) {
       const message = describeError(err)
       logger.warn(`[slack-bot] history fetch failed: ${message}`)
@@ -772,6 +762,121 @@ export function createSlackHistoryCallback(deps: {
       return { ok: true, messages: mapped, nextCursor }
     }
     return { ok: true, messages: mapped }
+  }
+}
+
+async function fetchSlackHistoryPage(
+  token: string,
+  fetchFn: typeof fetch,
+  args: FetchHistoryArgs & { since?: number },
+): Promise<SlackHistoryResponse> {
+  const body = new URLSearchParams({ channel: args.chat, limit: String(args.limit) })
+  if (args.thread !== null) body.set('ts', args.thread)
+  if (args.cursor) body.set('cursor', args.cursor)
+  if (args.since !== undefined) body.set('oldest', String(args.since / 1000))
+  const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
+  const response = await fetchFn(`${SLACK_API_BASE}/${endpoint}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },
+    body: body.toString(),
+  })
+  return (await response.json()) as SlackHistoryResponse
+}
+
+export function createSlackMissedInboundCallback(deps: {
+  token: string
+  logger: SlackBotAdapterLogger
+  configRef: () => ChannelAdapterConfig
+  identity: () => { teamId: string; botUserId: string } | null
+  targets: () => Promise<readonly ChannelKey[]>
+  selfAliases: () => readonly string[]
+  fetchImpl?: typeof fetch
+}): ListMissedInbound {
+  const fetchFn = deps.fetchImpl ?? fetch
+  const list = createSlackListCallback(deps)
+  const getRoot = createSlackMessageGetCallback({
+    token: deps.token,
+    logger: deps.logger,
+    fetchImpl: fetchFn,
+    botUserIdRef: () => deps.identity()?.botUserId ?? null,
+  })
+  return async (since) => {
+    const identity = deps.identity()
+    if (!identity) return []
+    const scopes = new Map<string, ChannelKey>()
+    const add = (key: ChannelKey) => scopes.set(`${key.chat}:${key.thread ?? ''}`, key)
+    // Persisted sessions include watched thread roots older than the history
+    // window. Query them directly; channel history does not include replies.
+    for (const key of await deps.targets()) add(key)
+    const channels = await list({ workspace: identity.teamId, limit: 200 })
+    if (!channels.ok) throw new Error(channels.error)
+    for (const channel of channels.entries) {
+      if (channel.isMember !== true && channel.kind !== 'dm' && channel.kind !== 'group') continue
+      add({
+        adapter: 'slack-bot',
+        workspace: channel.kind === 'dm' ? '@dm' : identity.teamId,
+        chat: channel.chat,
+        thread: null,
+      })
+    }
+    const result: MissedInbound[] = []
+    let calls = 0
+    // New roots discovered in history can append thread scopes to this map.
+    for (const key of scopes.values()) {
+      if (calls++ >= CATCH_UP_CONVERSATION_LIMIT) break
+      const page = await fetchSlackHistoryPage(deps.token, fetchFn, {
+        chat: key.chat,
+        thread: key.thread,
+        limit: 100,
+        since,
+      })
+      if (!page.ok) {
+        deps.logger.warn(`[slack-bot] catch-up history ${key.chat} failed: ${page.error ?? 'unknown slack error'}`)
+        if (page.error === 'not_in_channel' || page.error === 'channel_not_found') continue
+        throw new Error(page.error ?? 'Slack catch-up history unavailable')
+      }
+      const rows = page.messages ?? []
+      const latestTs = Math.max(0, ...rows.map((row) => slackTsToMillis(row.ts)))
+      let rootAuthor = key.thread === null ? undefined : rows.find((row) => row.ts === key.thread)?.user
+      // Replies are oldest-first: an incomplete page cannot prove the thread
+      // has not moved on, so skip rather than answer an obsolete message.
+      if (key.thread !== null && page.response_metadata?.next_cursor) {
+        deps.logger.info(`[slack-bot] catch-up skipped incomplete thread ${key.chat}/${key.thread}`)
+        continue
+      }
+      if (key.thread !== null && rows.length > 0 && rootAuthor === undefined) {
+        if (calls++ >= CATCH_UP_CONVERSATION_LIMIT) break
+        const root = await getRoot({ chat: key.chat, thread: null, messageId: key.thread })
+        if (!root.ok) continue
+        rootAuthor = root.message.authorId
+      }
+      for (const row of rows) {
+        if (key.thread === null && (row.reply_count ?? 0) > 0) {
+          add({ ...key, thread: row.ts })
+        }
+        if (slackTsToMillis(row.ts) < since) continue
+        const verdict = classifyInbound(
+          {
+            ...row,
+            type: 'message',
+            channel: key.chat,
+            channel_type: key.workspace === '@dm' ? 'im' : 'channel',
+            ...(key.thread !== null ? { thread_ts: key.thread, parent_user_id: row.parent_user_id ?? rootAuthor } : {}),
+          },
+          deps.configRef(),
+          { ...identity, selfAliases: deps.selfAliases() },
+        )
+        if (verdict.kind !== 'route') continue
+        result.push({
+          message: verdict.payload,
+          latestTs:
+            key.thread === null
+              ? Math.max(latestTs, row.latest_reply === undefined ? 0 : slackTsToMillis(row.latest_reply))
+              : latestTs,
+        })
+      }
+    }
+    return result.sort((a, b) => a.message.ts - b.message.ts)
   }
 }
 
@@ -1224,6 +1329,15 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   })
 
   const listCallback = createSlackListCallback({ token: options.token, logger })
+  const missedInbound = createSlackMissedInboundCallback({
+    token: options.token,
+    logger,
+    configRef: options.configRef,
+    fetchImpl,
+    identity: () => (botUserId !== null && teamId !== null ? { botUserId, teamId } : null),
+    targets: () => options.router.catchUpTargets('slack-bot'),
+    selfAliases: () => options.selfAliasesRef?.() ?? [],
+  })
 
   const membershipResolver = createSlackMembershipResolver({
     token: options.token,
@@ -1440,14 +1554,19 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         new SlackBotListener(client, { appToken: options.appToken })
       listener.on('connected', (info) => {
         socketConnected = started
+        if (started) void options.router.catchUp('slack-bot')
         logger.info(`[slack-bot] connected (app_id=${info.app_id ?? 'unknown'})`)
       })
       listener.on('disconnected', () => {
         socketConnected = false
+        options.router.disconnectCatchUp('slack-bot')
         logger.warn('[slack-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        if (recordValue(err)?.code === 'disconnect_terminal') socketConnected = false
+        if (recordValue(err)?.code === 'disconnect_terminal') {
+          socketConnected = false
+          options.router.disconnectCatchUp('slack-bot')
+        }
         logger.error(`[slack-bot] socket-mode error: ${describeError(err)}`)
       })
       listener.on('message', ({ ack, event }) => {
@@ -1499,6 +1618,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
       options.router.registerSelfIdentity('slack-bot', selfIdentityResolver)
       options.router.registerHistory('slack-bot', historyCallback)
+      options.router.registerMissedInbound('slack-bot', missedInbound)
       options.router.registerMessageGet('slack-bot', messageGetCallback)
       options.router.registerList('slack-bot', listCallback)
       options.router.registerEditMessage('slack-bot', editMessageCallback)
@@ -1523,6 +1643,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
         options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)
         options.router.unregisterHistory('slack-bot', historyCallback)
+        options.router.unregisterMissedInbound('slack-bot', missedInbound)
         options.router.unregisterMessageGet('slack-bot', messageGetCallback)
         options.router.unregisterList('slack-bot', listCallback)
         options.router.unregisterEditMessage('slack-bot', editMessageCallback)
@@ -1542,6 +1663,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       if (!started) return
       started = false
       socketConnected = false
+      options.router.unregisterMissedInbound('slack-bot', missedInbound)
       options.router.unregisterOutbound('slack-bot', outboundCallback)
       options.router.unregisterReaction('slack-bot', reactionCallback)
       options.router.unregisterRemoveReaction('slack-bot', removeReactionCallback)

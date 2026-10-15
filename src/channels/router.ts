@@ -45,6 +45,7 @@ import {
   type BackgroundObligation,
   type BackgroundObligationRef,
 } from './background-obligations'
+import { createInboundCatchUp, type ListMissedInbound } from './catch-up'
 import { formatChannelCommandHelp } from './commands'
 import { isQualifyingWorkResult } from './completion-claim'
 import { detectContinuationWillingness } from './continuation-willingness'
@@ -1482,6 +1483,11 @@ export const SKIP_RESPONSE_LOCK_ERROR =
   'something to say, send it on the next turn.'
 
 export type ChannelRouter = {
+  registerMissedInbound: (adapter: AdapterId, callback: ListMissedInbound) => void
+  unregisterMissedInbound: (adapter: AdapterId, callback: ListMissedInbound) => void
+  catchUp: (adapter: AdapterId) => Promise<void>
+  disconnectCatchUp: (adapter: AdapterId) => void
+  catchUpTargets: (adapter: AdapterId) => Promise<readonly ChannelKey[]>
   route: (event: InboundMessage, onAdmitted?: () => Promise<void>) => Promise<RouteReceipt>
   send: (msg: OutboundMessage, opts?: SendOptions) => Promise<SendResult>
   acceptBackgroundResponse: (args: {
@@ -6021,7 +6027,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
-  const route = async (event: InboundMessage, onAdmitted?: () => Promise<void>): Promise<RouteReceipt> => {
+  const routeInbound = async (event: InboundMessage, onAdmitted?: () => Promise<void>): Promise<RouteReceipt> => {
     const adapterConfig = options.configForAdapter(event.adapter)
     if (!adapterConfig) return { kind: 'denied' }
 
@@ -6297,6 +6303,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       scheduleDebouncedDrain(live)
       return admission
     })
+  }
+
+  const route = async (event: InboundMessage, onAdmitted?: () => Promise<void>): Promise<RouteReceipt> => {
+    const receipt = await routeInbound(event, onAdmitted)
+    if (receipt.kind === 'observed' || receipt.kind === 'control') catchUp.noteObserved(event)
+    return receipt
+  }
+  const catchUp = createInboundCatchUp({ agentDir: options.agentDir, route, logger, now })
+  const catchUpTargets = async (adapter: AdapterId): Promise<readonly ChannelKey[]> => {
+    await ensureLoaded()
+    return (mappings ?? []).filter((record) => record.adapter === adapter)
   }
 
   const inboundAuthorOrigin = (event: InboundMessage): SessionOrigin => ({
@@ -8339,6 +8356,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const stop = async (): Promise<void> => {
     closing = true
+    await catchUp.stop()
     if (!options.inboundJournal) inboundJournal.cancelInitialization()
     unsubscribeJournalFailure()
     if (gcTimer) clearInterval(gcTimer)
@@ -9451,6 +9469,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerMembership,
     unregisterMembership,
     registerHistory,
+    registerMissedInbound: catchUp.register,
+    unregisterMissedInbound: catchUp.unregister,
+    catchUp: catchUp.run,
+    disconnectCatchUp: catchUp.disconnect,
+    catchUpTargets,
     unregisterHistory,
     fetchHistory,
     registerMessageGet,

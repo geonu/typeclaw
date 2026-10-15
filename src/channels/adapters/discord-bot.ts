@@ -15,6 +15,7 @@ import {
   enrichHistoricalProvenance,
   type HistoricalProvenanceResolver,
 } from '@/bundled-plugins/memory/provenance-index'
+import { CATCH_UP_CONVERSATION_LIMIT, type ListMissedInbound, type MissedInbound } from '@/channels/catch-up'
 import {
   DEFAULT_ATTACHMENT_MAX_BYTES,
   readAttachmentErrorSnippet,
@@ -31,6 +32,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelKey,
   ChannelListEntry,
   ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
@@ -548,6 +550,8 @@ type DiscordRawHistoryMessage = {
   content: string
   timestamp: string
   mentions?: DiscordMentionUser[]
+  mention_everyone?: boolean
+  mention_roles?: string[]
   message_reference?: { message_id?: string; channel_id?: string }
   attachments?: DiscordFile[]
   embeds?: DiscordGatewayEmbed[]
@@ -582,10 +586,7 @@ export function createDiscordHistoryCallback(deps: {
     let raw: DiscordRawHistoryMessage[]
     let response: Response
     try {
-      response = await fetchFn(`${DISCORD_API_BASE}/channels/${channelId}/messages?${params.toString()}`, {
-        method: 'GET',
-        headers: { Authorization: `Bot ${token}` },
-      })
+      response = await fetchDiscordHistoryPage(token, fetchFn, channelId, params)
     } catch (err) {
       const message = describeError(err)
       logger.warn(`[discord-bot] history fetch failed: ${message}`)
@@ -614,6 +615,79 @@ export function createDiscordHistoryCallback(deps: {
       return { ok: true, messages: mapped, nextCursor }
     }
     return { ok: true, messages: mapped }
+  }
+}
+
+function fetchDiscordHistoryPage(token: string, fetchFn: typeof fetch, channelId: string, params: URLSearchParams) {
+  return fetchFn(`${DISCORD_API_BASE}/channels/${channelId}/messages?${params.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bot ${token}` },
+  })
+}
+
+export function createDiscordMissedInboundCallback(deps: {
+  token: string
+  logger: DiscordBotAdapterLogger
+  configRef: () => ChannelAdapterConfig
+  botUserIdRef: () => string | null
+  targets: () => Promise<readonly ChannelKey[]>
+  room: (chat: string) => Promise<import('@/channels/types').InboundMessage['room']>
+  fetchImpl?: typeof fetch
+}): ListMissedInbound {
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (since) => {
+    const botUserId = deps.botUserIdRef()
+    if (botUserId === null) return []
+    const result: MissedInbound[] = []
+    const targets = new Map((await deps.targets()).map((key) => [key.chat, key]))
+    // Only previously watched conversations: never enumerate every guild
+    // channel the token happens to be able to read. Threads are channels too.
+    for (const key of [...targets.values()].slice(0, CATCH_UP_CONVERSATION_LIMIT)) {
+      const response = await fetchDiscordHistoryPage(
+        deps.token,
+        fetchFn,
+        key.chat,
+        new URLSearchParams({ limit: '100' }),
+      )
+      if (!response.ok) {
+        deps.logger.warn(`[discord-bot] catch-up history ${key.chat} failed: http ${response.status}`)
+        if (response.status === 403 || response.status === 404) continue
+        throw new Error(`Discord catch-up history http ${response.status}`)
+      }
+      const rows = (await response.json()) as DiscordRawHistoryMessage[]
+      const latestTs = Math.max(0, ...rows.map((row) => Date.parse(row.timestamp)).filter(Number.isFinite))
+      const room = key.workspace === '@dm' ? undefined : await deps.room(key.chat)
+      for (const row of rows) {
+        if (Date.parse(row.timestamp) < since) continue
+        const verdict = classifyInbound(
+          {
+            ...row,
+            type: 'MESSAGE_CREATE',
+            ...(key.workspace === '@dm' ? {} : { guild_id: key.workspace }),
+            author: { ...row.author, username: row.author.username ?? row.author.id },
+            mentions: row.mentions?.map((user) => ({
+              id: user.id,
+              username: user.username ?? user.id,
+              global_name: user.global_name ?? undefined,
+            })),
+          },
+          deps.configRef(),
+          botUserId,
+        )
+        if (verdict.kind !== 'route') continue
+        result.push({
+          message: {
+            ...verdict.payload,
+            room,
+            accountIdentity: `discord-bot:${botUserId}`,
+            eventKind: 'message',
+            revision: 'original',
+          },
+          latestTs,
+        })
+      }
+    }
+    return result.sort((a, b) => a.message.ts - b.message.ts)
   }
 }
 
@@ -1123,6 +1197,15 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   })
 
   const listCallback = createDiscordListCallback({ token: options.token, logger })
+  const missedInbound = createDiscordMissedInboundCallback({
+    token: options.token,
+    logger,
+    configRef: options.configRef,
+    fetchImpl,
+    botUserIdRef: () => botUserId,
+    targets: () => options.router.catchUpTargets('discord-bot'),
+    room: threadRoomResolver,
+  })
 
   const membershipResolver = createDiscordMembershipResolver({
     token: options.token,
@@ -1264,6 +1347,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       listener.on('connected', (info) => {
         connected = true
         botUserId = info.user.id
+        if (started) void options.router.catchUp('discord-bot')
         logger.info(`[discord-bot] connected as ${info.user.username} (${info.user.id})`)
         // For bots, the gateway's user.id IS the application id — the same
         // value is required for both /me lookups and /applications/{id}/
@@ -1295,6 +1379,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       })
       listener.on('disconnected', () => {
         connected = false
+        options.router.disconnectCatchUp('discord-bot')
         logger.warn('[discord-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
@@ -1302,7 +1387,10 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         // when a terminal Gateway close stops the listener. Match that
         // distinct SDK error contract without treating transient transport
         // errors as disconnects.
-        if (isTerminalGatewayClose(err)) connected = false
+        if (isTerminalGatewayClose(err)) {
+          connected = false
+          options.router.disconnectCatchUp('discord-bot')
+        }
         logger.error(`[discord-bot] gateway error: ${describeError(err)}`)
       })
       listener.on('message_create', (event) => {
@@ -1323,6 +1411,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
       options.router.registerSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.registerHistory('discord-bot', historyCallback)
+      options.router.registerMissedInbound('discord-bot', missedInbound)
       options.router.registerMessageGet('discord-bot', messageGetCallback)
       options.router.registerList('discord-bot', listCallback)
       options.router.registerEditMessage('discord-bot', editMessageCallback)
@@ -1347,6 +1436,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
         options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
         options.router.unregisterHistory('discord-bot', historyCallback)
+        options.router.unregisterMissedInbound('discord-bot', missedInbound)
         options.router.unregisterMessageGet('discord-bot', messageGetCallback)
         options.router.unregisterList('discord-bot', listCallback)
         options.router.unregisterEditMessage('discord-bot', editMessageCallback)
@@ -1405,6 +1495,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     async stop(): Promise<void> {
       if (!started) return
       started = false
+      options.router.disconnectCatchUp('discord-bot')
       options.router.unregisterOutbound('discord-bot', outboundCallback)
       options.router.unregisterReaction('discord-bot', reactionCallback)
       options.router.unregisterRemoveReaction('discord-bot', removeReactionCallback)
@@ -1415,6 +1506,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.unregisterHistory('discord-bot', historyCallback)
+      options.router.unregisterMissedInbound('discord-bot', missedInbound)
       options.router.unregisterRecoveryAdapter('discord-bot', recoveryCallbacks)
       options.router.unregisterMessageGet('discord-bot', messageGetCallback)
       options.router.unregisterList('discord-bot', listCallback)
