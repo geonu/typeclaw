@@ -48,6 +48,38 @@ describe('prepareReviewerCheckout', () => {
     expect(calls[2]?.args).toContain(SHA)
   })
 
+  test('fetches the base commit alongside the head so base..head diffs resolve', async () => {
+    const BASE = 'fedcba9876543210fedcba9876543210fedcba98'
+    const calls: string[][] = []
+    await prepareReviewerCheckout({
+      repoSlug: 'acme/widgets',
+      headSha: SHA,
+      baseSha: BASE,
+      sessionId,
+      resolveTokenForRepo: async () => ({ kind: 'token', token: 'secret' }),
+      fetchImpl: async () => new Response(JSON.stringify({ sha: SHA })),
+      ensureAskPass: async () => '/safe/typeclaw-git-askpass',
+      runProcess: async (_file, args) => {
+        calls.push(args)
+      },
+    })
+
+    const fetchArgs = calls.find((args) => args.includes('fetch'))
+    expect(fetchArgs?.slice(-2)).toEqual([SHA, BASE])
+  })
+
+  test('rejects a non-full base SHA', async () => {
+    await expect(
+      prepareReviewerCheckout({
+        repoSlug: 'acme/widgets',
+        headSha: SHA,
+        baseSha: 'main',
+        sessionId,
+        resolveTokenForRepo: async () => ({ kind: 'token', token: 'secret' }),
+      }),
+    ).rejects.toThrow(/baseSha must be a full/i)
+  })
+
   test('rejects non-full SHAs before token resolution', async () => {
     let resolved = false
     await expect(
