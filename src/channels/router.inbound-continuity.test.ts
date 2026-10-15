@@ -2218,14 +2218,32 @@ for (const published of [false, true]) {
           onError: (error) => errors.push(error),
         })
         await dispatcher.wake()
+        await f.noticeTransition(frozen.deliveryId, 'suppressed').promise
+        await dispatcher.stop()
+        dispatcher = new RecoveryDispatcher(f.outbox, f.router, {
+          backgroundObligations: f.store,
+          inboundJournal: f.journal,
+          onError: (error) => errors.push(error),
+        })
+        await dispatcher.wake()
         await f.noticeTransition(frozen.deliveryId, 'retired').promise
         await dispatcher.stop()
         await debt.expectPhase('closed')
-        expect(f.sent).toEqual([recoveryNoticeDisplayText(frozen)])
+        if (debt.inputId)
+          expect(f.journal.get(debt.inputId)).toMatchObject({
+            outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+          })
+        if (debt.backgroundId)
+          expect(await f.store.get(debt.backgroundId)).toMatchObject({
+            outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+          })
+        expect(f.sent).toEqual([])
         expect(errors).toEqual([])
         expect(await f.outbox.list()).toEqual([])
-        expect(await f.outbox.retired(frozen.deliveryId)).toBeDefined()
-        expect((await f.outbox.import(frozen)).state).toBe('delivered')
+        expect(await f.outbox.retired(frozen.deliveryId)).toMatchObject({
+          dispatch: { state: 'suppressed', suppression: { reason: 'operator-log-only' } },
+        })
+        expect((await f.outbox.import(frozen)).state).toBe('suppressed')
         await f.router.__testing!.runIdleGc()
         expect(f.sessions.map((session) => session.prompts)).toEqual(prompts)
         expect(f.sessions.every((session) => session.providerRequests === 0)).toBe(true)
@@ -2233,9 +2251,9 @@ for (const published of [false, true]) {
           await f.reboot(epoch)
           const recovered = new RecoveryOutbox(f.dir)
           expect((await recovered.list()).some((notice) => notice.deliveryId === frozen.deliveryId)).toBe(false)
-          expect((await recovered.import(frozen)).state).toBe('delivered')
+          expect((await recovered.import(frozen)).state).toBe('suppressed')
         }
-        expect(f.sent).toEqual([recoveryNoticeDisplayText(frozen)])
+        expect(f.sent).toEqual([])
       } finally {
         restore()
         await dispatcher?.stop()

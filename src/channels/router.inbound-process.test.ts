@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { Subprocess } from 'bun'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { LIVE_TURN_ENDED_NOTICE_TEXT, RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
+import { LIVE_TURN_ENDED_NOTICE_TEXT, type RecoveryRecord } from './continuity-types'
 import { RecoveryOutbox } from './recovery-outbox'
 
 const moduleUrl = (path: string) => JSON.stringify(new URL(path, import.meta.url).href)
@@ -157,26 +157,25 @@ else{
  const outbox=new RecoveryOutbox(dir,{epoch:mode});
  const importing=outbox.import.bind(outbox);outbox.import=async(...args)=>{if(mode==='transfer-before-import')await boundary();const r=await importing(...args);if(mode==='transfer-after-import')await boundary();return r};
  try{await bootBackgroundObligations({inboundJournal:journal,obligations:background,outbox,inventory:new LegacyBackgroundHandoffReader(dir,{processEpoch:mode})})}catch(error){if(mode!=='frozen')throw error;await appendFile(dir+'/recovery-errors',String(error)+'\\n')}
+ await appendFile(dir+'/recovery-records',JSON.stringify(await outbox.list())+'\\n');
  if(mode==='frozen'){
-  const receipt=Promise.withResolvers();const delivered=outbox.delivered.bind(outbox);outbox.delivered=async(...args)=>{const r=await delivered(...args);if(r)receipt.resolve();return r};
+  const receipt=Promise.withResolvers();const suppress=outbox.suppress.bind(outbox);outbox.suppress=async(...args)=>{const r=await suppress(...args);if(args[1]==='operator-log-only')receipt.resolve();return r};
   const dispatcher=new RecoveryDispatcher(outbox,router,{backgroundObligations:background,inboundJournal:journal,onError:async(error)=>{await appendFile(dir+'/recovery-errors',String(error)+'\\n')}});
   await dispatcher.wake();await receipt.promise;await dispatcher.stop();await journal.close();console.log('recovered');process.exit(0);
  }
- if(mode==='rotate-blocked'){
-  const blocked=Promise.withResolvers();const fail=outbox.fail.bind(outbox);outbox.fail=async(...args)=>{const r=await fail(...args);blocked.resolve();return r};
-  const dispatcher=new RecoveryDispatcher(outbox,router,{backgroundObligations:background,inboundJournal:journal,onError:blocked.reject});
-  await dispatcher.wake();await blocked.promise;await dispatcher.stop();await journal.close();console.log('recovered');process.exit(0);
- }
- if(mode==='receipt'){const delivered=outbox.delivered.bind(outbox);outbox.delivered=async(...args)=>{const r=await delivered(...args);if(r)await boundary();return r};}
+ if(mode==='receipt'){const suppress=outbox.suppress.bind(outbox);outbox.suppress=async(...args)=>{const r=await suppress(...args);if(r)await boundary();return r};}
  const acknowledged=Promise.withResolvers();
  // Recovered once every owed source this boot holds, inbound and background alike, is closed.
  const settle=async()=>{if(journal.list().every(row=>row.phase==='closed')&&(await background.list()).every(row=>row.phase==='closed'))acknowledged.resolve()};
- const acknowledge=journal.acknowledgeNotice.bind(journal);journal.acknowledgeNotice=async(...args)=>{await acknowledge(...args);await settle()};
- const acknowledgeChild=background.acknowledgeNotice.bind(background);background.acknowledgeNotice=async(...args)=>{await acknowledgeChild(...args);await settle()};
+ const suppress=journal.suppressNoticeCoverage.bind(journal);journal.suppressNoticeCoverage=async(...args)=>{await suppress(...args);await settle()};
+ const suppressChild=background.suppressNoticeCoverage.bind(background);background.suppressNoticeCoverage=async(...args)=>{await suppressChild(...args);await settle()};
  const dispatcher=new RecoveryDispatcher(outbox,router,{backgroundObligations:background,inboundJournal:journal,onError:acknowledged.reject});
  await dispatcher.wake();
  await settle();await acknowledged.promise;
- await dispatcher.stop();await journal.flush();await journal.close();console.log('recovered');process.exit(0);
+ await dispatcher.stop();
+ const retirement=new RecoveryDispatcher(outbox,router,{backgroundObligations:background,inboundJournal:journal,onError:acknowledged.reject});await retirement.wake();await retirement.stop();
+ await appendFile(dir+'/closed-inbound',JSON.stringify(journal.list())+'\\n');
+ await journal.flush();await journal.close();console.log('recovered');process.exit(0);
 }
 `
 
@@ -214,10 +213,21 @@ async function reboot(dir: string, mode: string) {
   const output = await new Response(child.stdout).text()
   expect(await child.exited).toBe(0)
   expect(await new Response(child.stderr).text()).toBe('')
-  expect(output).toBe('recovered\n')
+  expect(output).toEndWith('recovered\n')
 }
 
 const optionalRead = (dir: string, name: string) => readFile(join(dir, name), 'utf8').catch(() => '')
+
+async function issuedRecords(dir: string): Promise<RecoveryRecord[]> {
+  return (
+    (await optionalRead(dir, 'recovery-records'))
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as RecoveryRecord[])
+      .find((records) => records.length > 0) ?? []
+  )
+}
 
 /** Every notice ever issued, whether still in the live outbox or retired after acknowledgment. */
 async function deliveries(dir: string) {
@@ -368,16 +378,23 @@ for (const mode of [
       } else {
         // Inputs from one author, account and captured parent recover under a
         // single notice. Real process death keeps the frozen restart template.
-        expect(retired.map((record) => record.dispatch)).toMatchObject([{ state: 'delivered', attempts: 1 }])
-        expect(notices).toEqual([
-          {
-            accounting: 'recovery',
-            text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
-            deliveryId: retired[0]!.deliveryId,
-            coveredIds: expect.any(Array),
-          },
+        expect(retired.map((record) => record.dispatch)).toMatchObject([
+          { state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } },
         ])
-        expect([...notices[0].coveredIds].sort()).toEqual(acceptedIds)
+        expect(notices).toEqual([])
+        expect((await issuedRecords(dir)).flatMap((row) => row.covers.map((cover) => cover.id)).sort()).toEqual(
+          acceptedIds,
+        )
+        const rows = JSON.parse((await optionalRead(dir, 'closed-inbound')).trim().split('\n').at(-1)!)
+        expect(rows).toHaveLength(acceptedIds.length)
+        expect(
+          rows.every(
+            (row: { phase: string; outcome: { kind: string; reason: string } }) =>
+              row.phase === 'closed' &&
+              row.outcome.kind === 'intentionally-suppressed' &&
+              row.outcome.reason === 'operator-log-only',
+          ),
+        ).toBe(true)
       }
       if (mode === 'output')
         expect(posts.filter((post) => post.accounting !== 'recovery')).toEqual([
@@ -434,15 +451,9 @@ test('mixed stop committed before JSON remains authoritative through corruption;
     ])
     const frozen = await deliveries(dir)
     expect(frozen).toHaveLength(3)
-    const inventory = frozen.filter((record) => record.state === 'delivered')
-    expect(inventory).toMatchObject([{ attempts: 1 }])
-    const posts = (await optionalRead(dir, 'posts'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line))
-    expect(posts.map((post) => [post.accounting, post.deliveryId, post.text])).toEqual([
-      ['recovery', inventory[0]!.deliveryId, recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT })],
-    ])
+    const inventory = frozen.filter((record) => record.state === 'suppressed')
+    expect(inventory).toMatchObject([{ attempts: 0 }])
+    expect(await optionalRead(dir, 'posts')).toBe('')
     expect(await optionalRead(dir, 'recovery-errors')).toContain('journal')
     const calls = await optionalRead(dir, 'provider-calls')
     await writeFile(path, valid)
@@ -457,14 +468,14 @@ test('mixed stop committed before JSON remains authoritative through corruption;
     expect(await optionalRead(dir, 'provider-calls')).toBe(calls)
     expect(await optionalRead(dir, 'effects')).toBe('')
     expect(await deliveries(dir)).toEqual(
-      frozen.map((record) => ({ deliveryId: record.deliveryId, state: 'delivered', attempts: 1 })),
+      frozen.map((record) => ({ deliveryId: record.deliveryId, state: 'suppressed', attempts: 0 })),
     )
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
 }, 120_000)
 
-test('account rotation transfers queued old-account input and child while compatible input runs; original account alone recovers', async () => {
+test('account rotation transfers queued old-account input and child while compatible input runs; recovery suppresses without an account lookup', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-inbound-account-'))
   await writeFile(
     join(dir, 'typeclaw.json'),
@@ -493,26 +504,20 @@ test('account rotation transfers queued old-account input and child while compat
     ])
     await reboot(dir, 'rotate-blocked')
     expect(await optionalRead(dir, 'posts')).toBe('')
-    expect((await new RecoveryOutbox(dir).list())[0]).toMatchObject({
-      accountIdentity: 'actorA',
-      state: 'blocked',
-      attempts: 1,
-    })
+    expect((await deliveries(dir))[0]).toMatchObject({ state: 'suppressed', attempts: 0 })
     await reboot(dir, 'rotate-restored')
     await reboot(dir, 'rotate-second')
-    expect(await deliveries(dir)).toEqual([{ deliveryId: notices[0]!.deliveryId, state: 'delivered', attempts: 2 }])
+    expect(await deliveries(dir)).toEqual([{ deliveryId: notices[0]!.deliveryId, state: 'suppressed', attempts: 0 }])
     expect(await new BackgroundObligationStore(dir).list()).toMatchObject([
-      { taskId: 'actorA-child', phase: 'closed', outcome: { kind: 'delivered' } },
+      {
+        taskId: 'actorA-child',
+        phase: 'closed',
+        outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+      },
     ])
     expect(await optionalRead(dir, 'provider-calls')).toBe('call\n')
     expect(await optionalRead(dir, 'effects')).toBe('')
-    expect(
-      (await optionalRead(dir, 'posts'))
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line))
-        .map((post) => [post.accounting, post.deliveryId, post.text]),
-    ).toEqual([['recovery', notices[0]!.deliveryId, recoveryNoticeDisplayText(notices[0]!)]])
+    expect(await optionalRead(dir, 'posts')).toBe('')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -568,35 +573,30 @@ for (const mode of ['idle-gc', 'stale-rollover']) {
       expect(await optionalRead(dir, 'posts')).toBe(firstBoot)
       expect(await optionalRead(dir, 'provider-calls')).toBe(calls)
       expect(await optionalRead(dir, 'effects')).toBe('')
-      const notices = firstBoot
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line))
-        .filter((post) => post.accounting === 'recovery')
-      // No notice is re-sent: each delivery is posted once and lands on its first attempt.
-      expect(await deliveries(dir)).toEqual(
-        notices
-          .map((post) => ({ deliveryId: post.deliveryId, state: 'delivered' as const, attempts: 1 }))
-          .sort((left, right) => left.deliveryId.localeCompare(right.deliveryId)),
-      )
-      // Each owed fact is answered exactly once, by its own notice, and nothing else is (C included):
-      // the request by its live notice, never a restart; the unconsumed child by its own boot notice.
+      expect(
+        firstBoot
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .filter((post) => post.accounting === 'recovery'),
+      ).toEqual([])
+      const outbox = new RecoveryOutbox(dir)
+      const retired = await outbox.listRetired()
+      expect(retired).toHaveLength(2)
+      expect(retired.map((row) => row.dispatch)).toMatchObject([
+        { state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } },
+        { state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } },
+      ])
       const [child] = (await new BackgroundObligationStore(dir).list()).filter((row) => row.taskId === 'child')
-      expect(notices.flatMap((post) => post.coveredIds).sort()).toEqual([a, child!.obligationId].sort())
-      expect(notices.find((post) => post.coveredIds.includes(a))).toEqual({
-        text: recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT }),
-        accounting: 'recovery',
-        deliveryId: notice!.deliveryId,
-        coveredIds: [a],
-      })
-      const childNotice = notices.find((post) => post.coveredIds.includes(child!.obligationId))
-      expect(childNotice).toMatchObject({
-        text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
-        coveredIds: [child!.obligationId],
-      })
+      const issued = await issuedRecords(dir)
+      expect(issued.flatMap((row) => row.covers.map((cover) => cover.id)).sort()).toEqual(
+        [a, child!.obligationId].sort(),
+      )
+      expect(issued.find((row) => row.deliveryId === notice!.deliveryId)?.covers.map((cover) => cover.id)).toEqual([a])
       expect(child).toMatchObject({
         phase: 'closed',
-        outcome: { kind: 'delivered', deliveryId: childNotice!.deliveryId },
+        outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
       })
       expect(await optionalRead(dir, 'errors')).toBe('')
     } finally {
