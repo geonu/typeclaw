@@ -122,6 +122,17 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
     sinceMs = Date.now() - d.ms
   }
 
+  const interactive = Boolean(process.stdin.isTTY)
+  // Reject picker-only invocations before probing Docker: no container state
+  // can make a non-interactive terminal capable of driving the picker.
+  if (!interactive && opts.sessionArg === undefined) {
+    process.stderr.write(`${errorLine('typeclaw inspect needs an interactive terminal to pick a session.')}\n`)
+    process.stderr.write(
+      'Pass an explicit session id (`typeclaw inspect <id>`) or use `--json <id>` for a scriptable stream.\n',
+    )
+    return 2
+  }
+
   const containerRunning = (await requireContainerRunning({ cwd })).ok
   if (!containerRunning) {
     process.stderr.write(`${c.yellow('⚠')} container not running; showing read-only history and logs only\n`)
@@ -147,20 +158,6 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
     preselectKey = resolved.summary.sessionId
   } else if (opts.sessionArg === 'logs') {
     preselectKey = 'logs'
-  }
-
-  const interactive = Boolean(process.stdin.isTTY)
-
-  // Without a TTY, clack's picker keypress loop busy-spins kevent64 at 100% CPU
-  // forever instead of resolving (e.g. `typeclaw inspect | head`, a daemon
-  // spawn). A resolved session arg auto-opens without the picker, so only the
-  // picker-mandatory case is refused — mirroring --json's explicit-id rule.
-  if (!interactive && preselectKey === undefined) {
-    process.stderr.write(`${errorLine('typeclaw inspect needs an interactive terminal to pick a session.')}\n`)
-    process.stderr.write(
-      'Pass an explicit session id (`typeclaw inspect <id>`) or use `--json <id>` for a scriptable stream.\n',
-    )
-    return 2
   }
 
   const liveHint = interactive ? escHintLine(color) : undefined

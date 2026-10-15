@@ -91,6 +91,7 @@ const pendingPullSchema = z.object({
 
 const submittedReviewsSchema = z.array(
   z.object({
+    id: z.number().optional(),
     state: z.string(),
     commit_id: z.string().nullable(),
     submitted_at: z.string().nullable(),
@@ -126,18 +127,15 @@ export async function replayPendingReviews(
       // the local completion callback or the self-review webhook being saved.
       let reviewUrl: string | null = `${url}/reviews?per_page=100`
       let done = false
+      let latestDecisive: { id?: number; state: string } | undefined
       while (reviewUrl !== null && !done) {
         const reviews = await fetchImpl(reviewUrl, { headers: githubJsonHeaders(token) })
         if (!reviews.ok) throw new Error(`GitHub pending reviews ${reviews.status}`)
         for (const review of submittedReviewsSchema.parse(await reviews.json())) {
-          if (
-            review.user === null ||
-            review.state === 'PENDING' ||
-            review.submitted_at === null ||
-            review.commit_id === null
-          )
+          if (review.user === null || !isSelfLogin(review.user.login, review.user.type === 'Bot', options.selfLogin))
             continue
-          if (!isSelfLogin(review.user.login, review.user.type === 'Bot', options.selfLogin)) continue
+          if (DECISIVE_REVIEW_STATES.has(review.state)) latestDecisive = { id: review.id, state: review.state }
+          if (review.state === 'PENDING' || review.submitted_at === null || review.commit_id === null) continue
           if (
             Date.parse(review.submitted_at) < Math.floor(entry.admittedAt / 1000) * 1000 ||
             !Number.isFinite(Date.parse(review.submitted_at))
@@ -150,6 +148,14 @@ export async function replayPendingReviews(
         }
         reviewUrl = nextLink(reviews.headers.get('link'))
       }
+      if (
+        !done &&
+        entry.kind === 'rereview' &&
+        latestDecisive?.state === 'DISMISSED' &&
+        latestDecisive.id !== undefined
+      ) {
+        done = await pendingReviewDismissed(entry, latestDecisive.id, token, fetchImpl)
+      }
       if (options.isCancelled?.() === true) return
       if (done) {
         await options.pendingStore.clear(entry.repo, entry.prNumber, entry)
@@ -160,25 +166,71 @@ export async function replayPendingReviews(
       const latest = (await options.pendingStore.list()).find(
         (p) => canonicalGithubRepo(p.repo) === canonicalGithubRepo(entry.repo) && p.prNumber === entry.prNumber,
       )
-      if (latest?.headSha !== entry.headSha || latest.admittedAt !== entry.admittedAt) continue
+      if (
+        latest?.headSha !== entry.headSha ||
+        latest.admittedAt !== entry.admittedAt ||
+        latest.authorId !== entry.authorId ||
+        latest.authorName !== entry.authorName ||
+        latest.authorIsBot !== entry.authorIsBot
+      )
+        continue
       const pr = parsePrRow(row)
       if (pr === null || pr.id !== entry.prId) continue
       if (options.isCancelled?.() === true) return
-      await options.route(
-        buildSyntheticInbound(
+      await options.route({
+        ...buildSyntheticInbound(
           pr,
           target,
           entry.kind,
           options.generateReviewRoundId ?? randomUUID,
           `boot-${options.replayId}`,
         ),
-      )
+        authorId: entry.authorId,
+        authorName: entry.authorName,
+        authorIsBot: entry.authorIsBot,
+      })
     } catch (error) {
       options.logger.warn(
         `[github] pending review ${entry.repo}#${entry.prNumber} replay failed: ${describeError(error)}`,
       )
     }
   }
+}
+
+async function pendingReviewDismissed(
+  entry: PendingReview,
+  reviewId: number,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
+  let url: string | null = `${GITHUB_API_BASE}/repos/${entry.repo}/issues/${entry.prNumber}/timeline?per_page=100`
+  const eventsSchema = z.array(
+    z.object({
+      event: z.string(),
+      created_at: z.string().optional(),
+      dismissed_review: z
+        .object({
+          review_id: z.union([z.string(), z.number()]),
+          dismissal_commit_id: z.string().nullable().optional(),
+        })
+        .optional(),
+    }),
+  )
+  // A dismissed review retains its original commit_id/submitted_at. Only the
+  // matching timeline event dates the dismissal itself, including after a crash.
+  while (url !== null) {
+    const response = await fetchImpl(url, { headers: githubJsonHeaders(token) })
+    if (!response.ok) throw new Error(`GitHub pending dismissal timeline ${response.status}`)
+    for (const event of eventsSchema.parse(await response.json())) {
+      if (event.event !== 'review_dismissed' || String(event.dismissed_review?.review_id) !== String(reviewId)) continue
+      const dismissedAt = Date.parse(event.created_at ?? '')
+      if (!Number.isFinite(dismissedAt) || dismissedAt < Math.floor(entry.admittedAt / 1000) * 1000) continue
+      const commitSha = event.dismissed_review?.dismissal_commit_id
+      if (commitSha == null || (await pendingHeadCovered(entry, commitSha, token, fetchImpl))) return true
+    }
+    url = nextLink(response.headers.get('link'))
+  }
+  return false
 }
 
 // Any submitted state completes logged work, but an old-head review must not

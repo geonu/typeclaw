@@ -14,6 +14,9 @@ const entry: PendingReview = {
   kind: 'review',
   headSha: 'head-one',
   admittedAt: 100,
+  authorId: '10',
+  authorName: 'alice',
+  authorIsBot: false,
 }
 
 beforeEach(async () => {
@@ -56,6 +59,15 @@ test('same-head sibling admissions preserve the obligation admission time', asyn
   await store.record(entry)
   await store.record({ ...entry, admittedAt: 200 })
   expect(await store.list()).toEqual([entry])
+})
+
+test('same-head requester replacement is not cleared by an older snapshot on the same clock', async () => {
+  const store = await loadPendingReviewStore(agentDir, logger)
+  await store.record(entry)
+  const requested = { ...entry, authorId: '20', authorName: 'maintainer' }
+  await store.record(requested)
+  await store.clear(entry.repo, entry.prNumber, entry)
+  expect(await store.list()).toEqual([requested])
 })
 
 test('ignores malformed rows and tolerates a corrupted file', async () => {

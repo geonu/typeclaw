@@ -240,13 +240,17 @@ export default definePlugin({
       selfLogin: ctx.github.getAppSelfLogin ?? (() => null),
       isAppAuth: hasAppTokenResolver,
     })
+    const resolveHeadSha = createGithubHeadShaResolver({ resolveToken })
     configureReviewVerdictCoordinator({
       resolveEffectiveApproval,
-      resolveHeadSha: createGithubHeadShaResolver({ resolveToken }),
+      resolveHeadSha,
       logger: ctx.logger,
     })
     const verdictGuard = createSharedReviewVerdictGuard()
-    const pendingDismissals = new Map<string, { workspace: string; prNumber: number }>()
+    const pendingDismissals = new Map<
+      string,
+      { workspace: string; prNumber: number; commitSha?: string; startedAt: number }
+    >()
 
     type HookResult = void | { block: true; reason: string }
 
@@ -346,6 +350,7 @@ export default definePlugin({
       }
       const dismissal = detectReviewDismissal(command)
       if (dismissal !== null) {
+        const startedAt = Date.now()
         const block = await guardGithubReviewRoundDismissal({
           callId: event.callId,
           workspace: dismissal.workspace,
@@ -356,7 +361,14 @@ export default definePlugin({
         })
         if (block !== null) return block
         dismissalLeaseClaimed = event.origin?.kind === 'channel' && event.origin.githubReviewRound !== undefined
-        pendingDismissals.set(event.callId, dismissal)
+        pendingDismissals.set(event.callId, {
+          ...dismissal,
+          startedAt,
+          commitSha:
+            event.origin?.kind === 'channel' && event.origin.githubReviewRound !== undefined
+              ? event.origin.githubReviewRound.headSha
+              : ((await resolveHeadSha(dismissal)) ?? undefined),
+        })
       }
       let review: NoteReviewResult
       try {
@@ -709,10 +721,12 @@ export default definePlugin({
               if (dismissalMutationSucceeded(event.result)) {
                 const effective = await resolveEffectiveApproval(dismissal)
                 if (effective.ok && effective.effective === 'DISMISSED') {
-                  recordVerifiedDismissal({
+                  await recordVerifiedDismissal({
                     sessionId: event.sessionId,
                     workspace: dismissal.workspace,
                     prNumber: dismissal.prNumber,
+                    commitSha: dismissal.commitSha,
+                    startedAt: dismissal.startedAt,
                   })
                   verified = true
                 }

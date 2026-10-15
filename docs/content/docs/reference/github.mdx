@@ -186,6 +186,8 @@ For `review.on: "opened"`, the scan only replays PRs created since the adapter w
 
 Admitted review triggers are also saved in `channels/github-pending-reviews.json` before the router can start the work. This log covers opened, ready-for-review, bot review requests, blocking push re-reviews, and admitted scan replays. On every start, logged PRs are checked individually and replayed regardless of age or the scan cooldown, using a fresh boot identity so an interrupted admission cannot dedupe away its retry. The scan skips logged work to avoid racing an in-flight review. A posted review at the logged commit or a descendant clears the entry, as do closing/merging the PR and converting it to draft. Boot checks also clear reviews that posted remotely just before a crash.
 
+The log retains the admitted requester's identity; boot replay rechecks current permissions against that requester, not the PR author. An authoritatively verified dismissal also completes its matching pending re-review without clearing a newer head or admission. Boot uses the matching dismissal timeline event, rather than the review's original submission time, to recognize a dismissal that completed before a crash.
+
 The start-time scan still catches a held `CHANGES_REQUESTED` whose commit predates the current head; periodic scans skip held reviews. Interrupted logged review turns get no restart notice because the log retains their retry obligation. Human comments and thread replies are not logged or automatically replayed; their existing recovery behavior is unchanged. `review.on: "off"` pauses review replay without discarding pending work.
 
 ## Webhook lifecycle

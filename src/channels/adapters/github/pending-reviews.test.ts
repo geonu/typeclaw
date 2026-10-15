@@ -7,10 +7,12 @@ import { join } from 'node:path'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
 import { createSessionWithDispose } from '@/agent'
+import { recordVerifiedDismissal } from '@/channels/github-review-turn-ledger'
 import { createRecoveryNotice } from '@/channels/recovery-notice'
 import { createChannelRouter } from '@/channels/router'
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST, defaultHistoryConfig, type GithubAdapterConfig } from '@/channels/schema'
 import type { InboundMessage, RouteReceipt } from '@/channels/types'
+import { noopPermissionService } from '@/permissions'
 
 import { createGithubAdapter } from './index'
 import { loadPendingReviewStore, type PendingReview } from './pending-review-store'
@@ -29,6 +31,9 @@ const pending: PendingReview = {
   kind: 'review',
   headSha: 'head-one',
   admittedAt: 1,
+  authorId: '10',
+  authorName: 'alice',
+  authorIsBot: false,
 }
 const logger = { info: () => {}, warn: () => {}, error: () => {} }
 const pull = {
@@ -49,6 +54,9 @@ async function fixture() {
   const store = await loadPendingReviewStore(dir, logger)
   const calls: string[] = []
   const reviews: Array<Record<string, unknown>> = []
+  const timeline: Array<Record<string, unknown>> = []
+  const allowedAuthors = new Set<string>()
+  const scanRead = Promise.withResolvers<void>()
   const currentPull = { ...pull }
   let comparison = 'behind'
   const fetchImpl = Object.assign(
@@ -56,10 +64,15 @@ async function fixture() {
       const url = String(input)
       calls.push(url)
       if (url.endsWith('/user')) return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/timeline?')) return Response.json(timeline)
       if (url.includes('/compare/')) return Response.json({ status: comparison })
       if (url.endsWith('/reviews/123')) return Response.json({ id: 123, state: 'COMMENTED' })
       if (url.endsWith('/reviews') && init?.method === 'POST') return Response.json({ id: 123 })
-      if (url.includes('/reviews?')) return Response.json(reviews)
+      if (url.includes('/reviews?')) {
+        const response = Response.json(reviews)
+        if (url.includes('/pulls/8/')) scanRead.resolve()
+        return response
+      }
       if (url.includes('/files?')) return Response.json([])
       if (url.endsWith('/pulls/7')) return Response.json(currentPull)
       if (url.includes('/pulls?')) return Response.json([pull, { ...pull, id: 800, number: 8 }])
@@ -92,6 +105,13 @@ async function fixture() {
     agentDir: dir,
     configForAdapter: () => config,
     logger,
+    permissions: {
+      ...noopPermissionService,
+      has: (origin, permission) =>
+        permission !== 'channel.respond' ||
+        allowedAuthors.size === 0 ||
+        (origin?.kind === 'channel' && allowedAuthors.has(origin.lastInboundAuthorId ?? '')),
+    },
     createSessionForChannel: async () => {
       const session = await createSessionWithDispose({
         sessionManager: SessionManager.create(dir, join(dir, 'sessions')),
@@ -142,6 +162,9 @@ async function fixture() {
     fetchImpl,
     calls,
     reviews,
+    timeline,
+    allowedAuthors,
+    scanRead: scanRead.promise,
     pull: currentPull,
     routed,
     setComparison: (status: string) => {
@@ -189,14 +212,140 @@ test.each(['opened', 'ready_for_review', 'review_requested'])('logs an admitted 
 
 test('logs an admitted synchronize blocking re-review', async () => {
   const f = await fixture()
-  f.reviews.push({ id: 5, state: 'CHANGES_REQUESTED', commit_id: 'old-head', user: { login: 'bot', type: 'User' } })
   await f.adapter.start()
+  // The boot scan must finish reading its non-blocking snapshot before the
+  // live push introduces a blocking review. Neither path wins by timing luck.
+  await f.scanRead
+  f.reviews.push({ id: 5, state: 'CHANGES_REQUESTED', commit_id: 'old-head', user: { login: 'bot', type: 'User' } })
   const admitted = f.nextRoute()
   await f.deliver('synchronize')
   expect((await admitted).kind).toBe('accepted')
   expect(f.routed[0]?.eventKind).toBe('pull_request:synchronize:review-followup')
   expect(await f.store.list()).toMatchObject([{ kind: 'rereview', headSha: 'head-one', prId: 700 }])
 })
+
+test('a permitted requester on an external contributor PR replays under the admitted requester', async () => {
+  const f = await fixture()
+  f.allowedAuthors.add('20')
+  f.config.review.on = 'review_requested'
+  await f.adapter.start()
+  let admitted = f.nextRoute()
+  await f.deliver('review_requested', 'pull_request', {
+    sender: { id: 20, login: 'maintainer', type: 'User' },
+    requested_reviewer: { login: 'bot', id: 1, type: 'User' },
+  })
+  expect((await admitted).kind).toBe('accepted')
+  expect(await f.store.list()).toMatchObject([{ authorId: '20', authorName: 'maintainer', authorIsBot: false }])
+  await f.adapter.stop()
+  admitted = f.nextRoute()
+  await f.adapter.start()
+  expect((await admitted).kind).toBe('accepted')
+  expect(f.routed.at(-1)).toMatchObject({ authorId: '20', authorName: 'maintainer', authorIsBot: false })
+})
+
+test('replay rechecks permissions and does not authorize the unpermitted PR author', async () => {
+  const f = await fixture()
+  f.allowedAuthors.add('20')
+  await f.store.record(pending)
+  const admitted = f.nextRoute()
+  await f.adapter.start()
+  expect((await admitted).kind).toBe('denied')
+  expect(await f.store.list()).toEqual([pending])
+})
+
+test('a permitted PR author cannot replace a requester whose permission was revoked', async () => {
+  const f = await fixture()
+  f.allowedAuthors.add('10')
+  const requested = { ...pending, authorId: '20', authorName: 'maintainer' }
+  await f.store.record(requested)
+  const admitted = f.nextRoute()
+  await f.adapter.start()
+  expect((await admitted).kind).toBe('denied')
+  expect(await f.store.list()).toEqual([requested])
+})
+
+test('verified dismissal completes only the matching pending re-review', async () => {
+  const f = await fixture()
+  f.config.review.approve = false
+  await f.adapter.start()
+  await f.store.record({ ...pending, kind: 'rereview' })
+  const dismissal = {
+    sessionId: 'review-session',
+    workspace: pending.repo,
+    prNumber: 7,
+    commitSha: pending.headSha,
+    startedAt: 100,
+  }
+  await recordVerifiedDismissal(dismissal)
+  expect(await f.store.list()).toEqual([])
+})
+
+test.each(['new-head', 'new-admission'] as const)('verified dismissal preserves a %s obligation', async (change) => {
+  const f = await fixture()
+  await f.adapter.start()
+  const newer = {
+    ...pending,
+    kind: 'rereview' as const,
+    headSha: change === 'new-head' ? 'head-two' : pending.headSha,
+    admittedAt: 200,
+  }
+  await f.store.record(newer)
+  const dismissal = {
+    sessionId: 'review-session',
+    workspace: pending.repo,
+    prNumber: 7,
+    commitSha: pending.headSha,
+    startedAt: 100,
+  }
+  await recordVerifiedDismissal(dismissal)
+  expect(await f.store.list()).toEqual([newer])
+})
+
+test.each([
+  ['2026-01-03T00:00:00Z', 'DISMISSED', true],
+  ['2026-01-01T00:00:00Z', 'DISMISSED', false],
+  ['2026-01-03T00:00:00Z', 'CHANGES_REQUESTED', false],
+] as const)(
+  'boot only retires the latest decisive dismissal after the obligation (%s, %s)',
+  async (dismissedAt, latest, done) => {
+    const f = await fixture()
+    await f.store.record({ ...pending, kind: 'rereview', admittedAt: Date.parse('2026-01-02T00:00:00Z') })
+    f.reviews.push({
+      id: 5,
+      state: 'DISMISSED',
+      commit_id: 'old-head',
+      submitted_at: '2026-01-01T00:00:00Z',
+      user: { login: 'bot', type: 'User' },
+    })
+    if (latest === 'CHANGES_REQUESTED')
+      f.reviews.push({
+        id: 6,
+        state: latest,
+        commit_id: 'old-head',
+        submitted_at: '2026-01-01T01:00:00Z',
+        user: { login: 'bot', type: 'User' },
+      })
+    f.timeline.push({ event: 'review_dismissed', created_at: dismissedAt, dismissed_review: { review_id: 5 } })
+    const replays: InboundMessage[] = []
+    await replayPendingReviews({
+      repos: [pending.repo],
+      reviewOn: 'review_requested',
+      selfLogin: 'bot',
+      authType: 'pat',
+      token: async () => 'test-token',
+      fetchImpl: f.fetchImpl,
+      logger,
+      pendingStore: f.store,
+      replayId: 'test-boot',
+      route: async (message) => {
+        replays.push(message)
+        return { kind: 'observed' }
+      },
+    })
+    expect(replays).toHaveLength(done ? 0 : 1)
+    expect(await f.store.list()).toHaveLength(done ? 0 : 1)
+  },
+)
 
 test.each(['closed', 'converted_to_draft'])('clears pending work on %s, even without a live turn', async (action) => {
   const f = await fixture()

@@ -13,6 +13,9 @@ const pendingReviewSchema = z.object({
   kind: z.enum(['review', 'rereview']),
   headSha: z.string().min(1),
   admittedAt: z.number().finite().nonnegative(),
+  authorId: z.string().min(1),
+  authorName: z.string(),
+  authorIsBot: z.boolean(),
 })
 
 export type PendingReview = Readonly<z.infer<typeof pendingReviewSchema>>
@@ -75,7 +78,14 @@ export async function loadPendingReviewStore(agentDir: string, logger: Logger = 
         if (previous !== undefined && previous.admittedAt > entry.admittedAt) return
         // Several thread siblings can carry the same push. They share one PR
         // obligation; keep its original admission time for completion checks.
-        if (previous?.headSha === entry.headSha && previous.kind === entry.kind) return
+        if (
+          previous?.headSha === entry.headSha &&
+          previous.kind === entry.kind &&
+          previous.authorId === entry.authorId &&
+          previous.authorName === entry.authorName &&
+          previous.authorIsBot === entry.authorIsBot
+        )
+          return
         next.set(id, entry)
         await persist(next)
       }),
@@ -90,7 +100,10 @@ export async function loadPendingReviewStore(agentDir: string, logger: Logger = 
           (current.prId !== expected.prId ||
             current.headSha !== expected.headSha ||
             current.kind !== expected.kind ||
-            current.admittedAt !== expected.admittedAt)
+            current.admittedAt !== expected.admittedAt ||
+            current.authorId !== expected.authorId ||
+            current.authorName !== expected.authorName ||
+            current.authorIsBot !== expected.authorIsBot)
         )
           return
         next.delete(id)

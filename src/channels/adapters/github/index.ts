@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { githubReviewChecks } from '@/channels/github-review-check'
+import { observeVerifiedDismissals } from '@/channels/github-review-turn-ledger'
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
@@ -152,6 +153,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let reconcileTimer: { clear: () => void } | null = null
   let reconcileCooldownStore: ReconcileCooldownStore | null = null
   let pendingReviewStore: PendingReviewStore | null = null
+  let stopObservingDismissals: (() => void) | null = null
   let lifecycleGeneration = 0
   let unregisterTokenBridge: (() => void) | null = null
   const workspaceByChat = new Map<string, string>()
@@ -292,7 +294,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       },
       store !== null && pending !== undefined && prNumber !== undefined
         ? () =>
-            store.record({ repo: message.workspace, prNumber: Number(prNumber), ...pending, admittedAt: Date.now() })
+            store.record({
+              repo: message.workspace,
+              prNumber: Number(prNumber),
+              ...pending,
+              admittedAt: Date.now(),
+              authorId: message.authorId,
+              authorName: message.authorName,
+              authorIsBot: message.authorIsBot,
+            })
         : undefined,
     )
   }
@@ -340,6 +350,21 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // entry as already completed or closed: there is no lost work to announce.
       for (const pending of await loadedPendingReviewStore.list())
         reconcileReplayedPrs.add(prReplayKey(pending.repo, `pr:${pending.prNumber}`))
+      stopObservingDismissals = observeVerifiedDismissals(async (dismissal) => {
+        if (dismissal.commitSha === undefined || dismissal.startedAt === undefined) return
+        const pending = (await loadedPendingReviewStore.list()).find(
+          (entry) =>
+            canonicalGithubRepo(entry.repo) === canonicalGithubRepo(dismissal.workspace) &&
+            entry.prNumber === dismissal.prNumber,
+        )
+        if (
+          pending?.kind !== 'rereview' ||
+          pending.headSha !== dismissal.commitSha ||
+          pending.admittedAt > dismissal.startedAt
+        )
+          return
+        await loadedPendingReviewStore.clear(pending.repo, pending.prNumber, pending)
+      })
       // Register all callbacks before binding the HTTP listener so the router
       // is fully wired before any webhook can arrive.
       options.router.registerOutbound('github', outbound)
@@ -360,6 +385,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       try {
         server = (options.httpListenImpl ?? listenWithBun)(options.configRef().webhookPort, handler)
       } catch (err) {
+        stopObservingDismissals?.()
+        stopObservingDismissals = null
         // Listener failed — roll back all registrations so stop() is a no-op
         // and the manager can report the failure cleanly.
         options.router.unregisterOutbound('github', outbound)
@@ -611,6 +638,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (!started) return
       started = false
       lifecycleGeneration += 1
+      stopObservingDismissals?.()
+      stopObservingDismissals = null
       // Stop the recovery sweep first: its async work outlives the synchronous
       // unregister calls below, and a tick landing mid-teardown would query a
       // hook we're about to deregister and could route during shutdown.
