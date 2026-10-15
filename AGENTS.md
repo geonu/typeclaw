@@ -159,6 +159,8 @@ The agent lives in people's chats, and every runtime-authored error message ther
 - **It is critical.** The user's request was lost and nothing else will answer it, or the agent stays broken for every request until someone acts (auth, billing, quota, model config). A transient blip, an unclassified failure with nothing the user could act on, or a turn that already delivered its answer does not qualify.
 - **A channel message is the only way to reach them.** Prefer the quieter channel whenever one exists: a reaction on the user's own message for a retry-and-see failure (`reactTurnFailed` in `src/channels/router.ts`), and the operator log (`typeclaw logs`) for details only an operator can use. Fall back to text only when the quieter channel cannot land.
 
+The same bar applies to **system messages**: any runtime-authored notice about the agent's own state rather than the user's request, such as restarts, recovery or continuity status ("I restarted before I could confirm a reply"), queue or retry state, or other internal stats. These never qualify on their own. Send them to the operator log. Turns woken by a subagent or background completion, with no user message behind them, post no error or recovery notices at all. Only the main agent answering a user may error out.
+
 When a notice is warranted, say what happened and what the user can do, in plain words. Don't lead with ⚠️ or other alarm emoji, because the wording carries the meaning. The recovery-notice templates in `src/channels/continuity-types.ts` are frozen into persisted outbox payloads and still carry a historical ⚠️, so `recoveryNoticeDisplayText` strips it at send time. Never edit the template bytes.
 
 ## Multi-language
