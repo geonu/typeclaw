@@ -22,6 +22,7 @@ type GithubFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Res
 export async function prepareReviewerCheckout(options: {
   repoSlug: string
   headSha: string
+  baseSha?: string
   sessionId: string
   resolveTokenForRepo: ResolveGithubTokenForRepo
   fetchImpl?: GithubFetch
@@ -30,6 +31,8 @@ export async function prepareReviewerCheckout(options: {
 }): Promise<{ path: string; repoSlug: string; headSha: string }> {
   if (!REPO_SLUG.test(options.repoSlug)) throw new Error('repository must be one owner/repo slug')
   if (!FULL_SHA.test(options.headSha)) throw new Error('headSha must be a full 40-character commit SHA')
+  if (options.baseSha !== undefined && !FULL_SHA.test(options.baseSha))
+    throw new Error('baseSha must be a full 40-character commit SHA')
   const tokenResult = await options.resolveTokenForRepo(options.repoSlug)
   if (tokenResult.kind !== 'token') throw new Error(tokenResult.reason)
   const token = tokenResult.token
@@ -61,6 +64,9 @@ export async function prepareReviewerCheckout(options: {
         '--depth=1',
         `https://github.com/${options.repoSlug}.git`,
         options.headSha,
+        // Without the base commit, `git diff <base> <head>` fails with "bad
+        // object" and the reviewer falls back to truncated per-file API patches.
+        ...(options.baseSha !== undefined ? [options.baseSha] : []),
       ],
       { env: { ...baseEnv, GIT_ASKPASS: askPass, TYPECLAW_GIT_TOKEN: token } },
     )
@@ -99,19 +105,20 @@ export function createReviewerCheckoutTool(resolveTokenForRepo: ResolveGithubTok
   return defineTool({
     description:
       'Prepare a runtime-owned token-safe scratch checkout of one allowlisted GitHub repository at an exact full commit SHA.',
-    parameters: z.object({ repoSlug: z.string(), headSha: z.string() }),
+    parameters: z.object({ repoSlug: z.string(), headSha: z.string(), baseSha: z.string().optional() }),
     // `repoSlug` ("owner/repo") and `headSha` (40-hex) are remote GitHub
     // coordinates, never local paths — repoSlug is only ever interpolated into
     // `https://github.com/<slug>.git` and prepareReviewerCheckout rejects
     // anything not matching /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/. Declared so the
     // required "/" in a slug isn't misread as a path separator. Scoped to THIS
     // tool: an undeclared reader passing a slug-shaped value still fails closed.
-    fileOperands: { nonFile: ['repoSlug', 'headSha'] },
+    fileOperands: { nonFile: ['repoSlug', 'headSha', 'baseSha'] },
     async execute(args, ctx) {
       try {
         const receipt = await prepareReviewerCheckout({
           repoSlug: args.repoSlug,
           headSha: args.headSha,
+          ...(args.baseSha !== undefined ? { baseSha: args.baseSha } : {}),
           sessionId: ctx.sessionId,
           resolveTokenForRepo,
         })
