@@ -332,7 +332,10 @@ function buildSyntheticInbound(
           },
         }
       : {}),
-    eventKind: 'pull_request:reconcile',
+    // Held re-reviews only replay on boot, so unlike a fresh review their retry
+    // is not guaranteed by the periodic pass; a distinct kind keeps their
+    // restart notice behavior separate from the fresh-review replay's.
+    eventKind: kind === 'rereview' ? 'pull_request:reconcile:rereview' : 'pull_request:reconcile',
     revision: pr.updatedAt,
     authorId: String(pr.authorId),
     authorName: pr.authorLogin,

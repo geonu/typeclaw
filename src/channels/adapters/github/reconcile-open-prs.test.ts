@@ -291,7 +291,7 @@ describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
     expect(routed).toHaveLength(1)
     expect(routed[0]?.chat).toBe('pr:7')
     expect(routed[0]?.thread).toBeNull()
-    expect(routed[0]?.eventKind).toBe('pull_request:reconcile')
+    expect(routed[0]?.eventKind).toBe('pull_request:reconcile:rereview')
     expect(routed[0]?.externalMessageId).toBe('pr-700-reconcile-rereview-new-head-2026-01-01T00:00:00Z')
     expect(routed[0]?.githubReviewRound).toEqual({
       kind: 'push',

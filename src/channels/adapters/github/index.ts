@@ -176,8 +176,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     ...createGithubRecoveryCallbacks(auth, fetchImpl, () => (selfId !== null ? `github:${selfId}` : undefined)),
     redelivery: (record, eventKinds) => {
       if (!eventKinds.every((kind) => REVIEW_TRIGGER_EVENT_KINDS.has(kind))) return 'not-redelivered'
-      // A reconcile replay is runtime-synthesized: nobody asked, so a restart notice would only
-      // announce system state. The next reconcile pass after the cooldown is its retry path.
+      // A fresh-review reconcile replay is runtime-synthesized: nobody asked, so a restart notice
+      // would only announce system state. The next periodic pass after the cooldown retries it.
+      // Held re-reviews (`pull_request:reconcile:rereview`) replay only on boot, so they keep the
+      // normal notice path below.
       if (eventKinds.every((kind) => kind === 'pull_request:reconcile')) return 'redelivered'
       if (reconcileReplayedPrs.has(prReplayKey(record.target.workspace, record.target.chat))) return 'redelivered'
       return firstReconcilePending ? 'pending' : 'not-redelivered'
@@ -745,6 +747,7 @@ const REVIEW_TRIGGER_EVENT_KINDS: ReadonlySet<string> = new Set([
   'pull_request:review_requested',
   'pull_request:synchronize:review-followup',
   'pull_request:reconcile',
+  'pull_request:reconcile:rereview',
 ])
 
 function prReplayKey(workspace: string, chat: string): string {
