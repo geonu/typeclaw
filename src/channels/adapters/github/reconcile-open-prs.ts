@@ -184,7 +184,9 @@ async function replayPr(
   const repo = `${target.owner}/${target.repo}`
   let receipt: RouteReceipt
   try {
-    receipt = await options.route(buildSyntheticInbound(pr, target, kind, options.generateReviewRoundId ?? randomUUID))
+    receipt = await options.route(
+      buildSyntheticInbound(pr, target, kind, options.generateReviewRoundId ?? randomUUID, cooldownWindow(options)),
+    )
   } catch (err) {
     options.logger.warn(`[github] reconcile ${repo}: PR #${pr.number} replay failed: ${describeError(err)}`)
     await releaseReservation(options, repo, pr, reservation)
@@ -275,11 +277,22 @@ async function isTeamReviewRequestedFromSelf(
   return false
 }
 
+// An interrupted reconcile replay gets no restart notice; its retry is the next
+// pass after the cooldown. Keying the identity by cooldown window lets that pass
+// admit afresh instead of deduping against the interrupted admission, while a
+// retry within the same window (e.g. after a rejected route) still dedupes.
+function cooldownWindow(options: ReconcileOpenPrsOptions): number | null {
+  if (options.cooldownStore === undefined) return null
+  const cooldownMs = options.cooldownMs ?? DEFAULT_RECONCILE_COOLDOWN_MS
+  return Math.floor((options.now ?? Date.now)() / cooldownMs)
+}
+
 function buildSyntheticInbound(
   pr: OpenPr,
   target: RepoTarget,
   kind: ReplayKind,
   generateReviewRoundId: () => string,
+  window: number | null,
 ): InboundMessage {
   const branchSegment = pr.headRef !== null && pr.baseRef !== null ? ` Branch: ${pr.headRef} → ${pr.baseRef}.` : ''
   const text =
@@ -292,10 +305,11 @@ function buildSyntheticInbound(
   // `pr-<n>-recheck-<sha>` ids: a duplicate of the very admission a restart
   // interrupted would be deduped instead of re-run. Repeated reconciles for the
   // same unchanged PR still dedupe against each other (same updatedAt).
+  const windowSuffix = window === null ? '' : `-w${window}`
   const externalMessageId =
     kind === 'rereview'
-      ? `pr-${pr.id}-reconcile-rereview-${pr.headSha}-${pr.updatedAt}`
-      : `pr-${pr.id}-reconcile-${pr.updatedAt}`
+      ? `pr-${pr.id}-reconcile-rereview-${pr.headSha}-${pr.updatedAt}${windowSuffix}`
+      : `pr-${pr.id}-reconcile-${pr.updatedAt}${windowSuffix}`
   return {
     adapter: 'github',
     workspace: `${target.owner}/${target.repo}`,

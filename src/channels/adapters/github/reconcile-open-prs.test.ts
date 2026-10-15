@@ -522,6 +522,22 @@ describe('reconcileOpenPrs cooldown', () => {
     expect(routed).toHaveLength(0)
   })
 
+  test('a retry after the cooldown uses a fresh identity so the router admits it instead of deduping', async () => {
+    // given a first replay admitted at t=1000
+    const routed: InboundMessage[] = []
+    const fetchImpl = fakeGithub([{ number: 7, id: 700 }])
+    await reconcileOpenPrs(baseOptions({ routed, cooldownStore: await loadStore(), now: () => 1_000, fetchImpl }))
+
+    // when the next pass runs after the cooldown on the unchanged PR
+    await reconcileOpenPrs(
+      baseOptions({ routed, cooldownStore: await loadStore(), now: () => 1_000 + WINDOW + 1, fetchImpl }),
+    )
+
+    // then both replays routed with distinct identities
+    expect(routed).toHaveLength(2)
+    expect(routed[0]?.externalMessageId).not.toBe(routed[1]?.externalMessageId)
+  })
+
   test('retries a still-unreviewed PR after the cooldown expires', async () => {
     await seedMarker(700, 1_000)
     const routed: InboundMessage[] = []
