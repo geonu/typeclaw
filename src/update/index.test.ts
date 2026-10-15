@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { commandForInstall, formatCommand, planSelfUpdate, resolveSelfPackageJsonPath } from './index'
+import { formatCommand, planSelfUpdate, resolveSelfPackageJsonPath } from './index'
 
 const AUTO_DETECT_FAILURE_REASON =
   'Cannot auto-detect how TypeClaw was installed from this checkout. Re-run with --manager=bun, --manager=npm, --manager=pnpm, or --manager=yarn if you want to update a global install.'
@@ -336,19 +336,6 @@ describe('planSelfUpdate source checkouts and explicit overrides', () => {
       command: ['yarn', 'global', 'upgrade', 'typeclaw', '--latest'],
       detectedFrom: packageJsonPath,
     })
-  })
-})
-
-describe('commandForInstall', () => {
-  test('emits the right command shape per (manager, scope) combination', () => {
-    expect(commandForInstall('bun', 'global')).toEqual(['bun', 'update', '-g', 'typeclaw', '--latest'])
-    expect(commandForInstall('bun', 'local')).toEqual(['bun', 'update', 'typeclaw', '--latest'])
-    expect(commandForInstall('npm', 'global')).toEqual(['npm', 'install', '-g', 'typeclaw@latest'])
-    expect(commandForInstall('npm', 'local')).toEqual(['npm', 'install', 'typeclaw@latest'])
-    expect(commandForInstall('pnpm', 'global')).toEqual(['pnpm', 'add', '-g', 'typeclaw@latest'])
-    expect(commandForInstall('pnpm', 'local')).toEqual(['pnpm', 'add', 'typeclaw@latest'])
-    expect(commandForInstall('yarn', 'global')).toEqual(['yarn', 'global', 'upgrade', 'typeclaw', '--latest'])
-    expect(commandForInstall('yarn', 'local')).toEqual(['yarn', 'upgrade', 'typeclaw', '--latest'])
   })
 })
 

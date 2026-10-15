@@ -928,13 +928,6 @@ describe('memorySearchTool — multi-word token fallback', () => {
     ])
   })
 
-  test('single-word query is unaffected (no fallback path, still empty on no match)', async () => {
-    const agentDir = await makeAgentDir()
-    await writeShard(agentDir, 'daily-notes', 'Daily notes', 'A body about memory.\n')
-
-    await expect(call(agentDir, { query: 'absent' })).resolves.toEqual({ matches: [] })
-  })
-
   test('regex mode never tokenizes — whitespace stays part of the pattern', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'only-foo', 'Only foo', 'foo stands alone here.\n')

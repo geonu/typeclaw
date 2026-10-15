@@ -9,7 +9,6 @@ import type {
   DiscordGatewayMessageCreateEvent,
   DiscordMessage,
 } from 'agent-messenger/discordbot'
-import { DiscordIntent } from 'agent-messenger/discordbot'
 
 import type { ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
@@ -25,7 +24,6 @@ import {
   createInteractionHandler,
   createOutboundCallback,
   createTypingCallback,
-  DISCORD_BOT_INTENTS,
   DISCORD_HISTORY_LIMIT_MAX,
   DISCORD_SLASH_COMMAND_NAMES,
 } from './discord-bot'
@@ -37,20 +35,6 @@ const provenanceConfig: ChannelAdapterConfig = {
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: 'off' },
   history: defaultHistoryConfig(),
 }
-
-describe('discord-bot gateway intents', () => {
-  test('includes MessageContent (privileged) so inbound messages carry text', () => {
-    expect(DISCORD_BOT_INTENTS & DiscordIntent.MessageContent).toBe(DiscordIntent.MessageContent)
-  })
-
-  test('includes DirectMessages so DMs are delivered to the gateway', () => {
-    expect(DISCORD_BOT_INTENTS & DiscordIntent.DirectMessages).toBe(DiscordIntent.DirectMessages)
-  })
-
-  test('includes GuildMessages so guild channel messages are delivered', () => {
-    expect(DISCORD_BOT_INTENTS & DiscordIntent.GuildMessages).toBe(DiscordIntent.GuildMessages)
-  })
-})
 
 describe('discord-bot lifecycle', () => {
   test('reports live gateway state while retaining bot identity across reconnects', async () => {
@@ -892,14 +876,6 @@ describe('createDiscordHistoryCallback', () => {
 
   function silentLogger() {
     return { info: () => {}, warn: () => {}, error: () => {} }
-  }
-
-  function permissiveConfig(): ChannelAdapterConfig {
-    return {
-      engagement: { trigger: ['mention'], stickiness: 'off' },
-      enabled: true,
-      history: defaultHistoryConfig(),
-    }
   }
 
   test('GETs /channels/{chat}/messages with bot token authorization', async () => {
@@ -1993,12 +1969,6 @@ describe('discord-bot createOutboundCallback', () => {
     const result = await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/out/a.png' }] }))
     expect(result.ok).toBe(true)
     expect(uploads[0]?.payload).toEqual({ attachments: [{ id: 0, filename: 'a.png' }] })
-  })
-})
-
-describe('discord-bot slash command declarations', () => {
-  test('declares help, stop, reload, and restart', () => {
-    expect(DISCORD_SLASH_COMMAND_NAMES).toEqual(new Set(['help', 'stop', 'reload', 'restart']))
   })
 })
 

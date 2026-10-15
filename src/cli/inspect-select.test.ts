@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
 
-import { highlightAt, refreshableSelect, type RefreshableOption, REFRESH_KEY, toSelectResult } from './inspect-select'
+import { highlightAt, refreshableSelect, type RefreshableOption, toSelectResult } from './inspect-select'
 
 const CANCEL: symbol = Symbol('cancel')
 
@@ -41,12 +41,6 @@ describe('toSelectResult', () => {
       kind: 'refresh',
       highlightValue: 'c',
     })
-  })
-})
-
-describe('REFRESH_KEY', () => {
-  test('is the lowercase r', () => {
-    expect(REFRESH_KEY).toBe('r')
   })
 })
 

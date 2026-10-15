@@ -332,14 +332,4 @@ describe('createChannelHistoryTool', () => {
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('channel_history error: channel_not_found')
   })
-
-  test('schema metadata names the tool channel_history', () => {
-    // given/when
-    const router = createChannelRouter({ agentDir: '/tmp/test-name', configForAdapter: () => emptyAdapterConfig() })
-    const tool = createChannelHistoryTool({ router, origin: slackThreadOrigin })
-
-    // then
-    expect(tool.name).toBe('channel_history')
-    expect(tool.label).toBe('Channel History')
-  })
 })

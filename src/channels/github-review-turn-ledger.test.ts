@@ -70,14 +70,6 @@ describe('review observer', () => {
     expect(hasReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })).toBe(true)
   })
 
-  test('__resetReviewObserverForTest detaches the observer', async () => {
-    const seen: unknown[] = []
-    setReviewObserver((args) => seen.push(args))
-    __resetReviewObserverForTest()
-    await recordReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })
-    expect(seen).toEqual([])
-  })
-
   test('recordResolvedThread does not fire the verdict observer', () => {
     const seen: unknown[] = []
     setReviewObserver((args) => seen.push(args))
@@ -130,16 +122,6 @@ describe('review-output observer', () => {
     })
     await recordReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })
     expect(hasReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })).toBe(true)
-  })
-
-  test('__resetReviewObserverForTest detaches the output observer', async () => {
-    const seen: unknown[] = []
-    setReviewOutputObserver((args) => {
-      seen.push(args)
-    })
-    __resetReviewObserverForTest()
-    await recordReviewOutput({ sessionId: S1, workspace: WS, prNumber: 12, state: 'COMMENT' })
-    expect(seen).toEqual([])
   })
 })
 

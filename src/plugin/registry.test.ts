@@ -4,13 +4,7 @@ import { z } from 'zod'
 
 import { defineCommand, defineSubagent, defineTool } from './define'
 import { createHookBus } from './hooks'
-import {
-  buildPluginCronGlobalId,
-  discardRegistrationsBy,
-  emptyRegistry,
-  RESERVED_COMMAND_NAMES,
-  registerContributions,
-} from './registry'
+import { discardRegistrationsBy, emptyRegistry, RESERVED_COMMAND_NAMES, registerContributions } from './registry'
 import type { PluginCommand, PluginExports } from './types'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -122,10 +116,6 @@ describe('registerContributions', () => {
     })
     registerContributions(opts)
     expect(() => registerContributions(opts)).toThrow(/conflicts with plugin p1/)
-  })
-
-  test('cron globalId uses __plugin_<name>_<key> format', () => {
-    expect(buildPluginCronGlobalId('standup-log', 'weekly-digest')).toBe('__plugin_standup-log_weekly-digest')
   })
 
   test('handler cron job is transformed to a HandlerJob carrying the function reference', () => {

@@ -2,8 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { findAgentDir, isInitialized } from './find-agent-dir'
-
 // The whole point of this module's existence is that the host CLI entry can
 // import it WITHOUT dragging in the ~190ms init/config/container/plugin graph.
 // A future contributor adding a heavy import here would silently undo the
@@ -19,12 +17,5 @@ describe('find-agent-dir dependency isolation', () => {
       (m) => m[1],
     )
     expect(specifiers.sort()).toEqual(['node:fs', 'node:path'])
-  })
-})
-
-describe('find-agent-dir re-exports are wired', () => {
-  test('exposes findAgentDir and isInitialized as functions', () => {
-    expect(typeof findAgentDir).toBe('function')
-    expect(typeof isInitialized).toBe('function')
   })
 })

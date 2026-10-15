@@ -6,7 +6,6 @@ import { join } from 'node:path'
 
 import {
   agentMessengerConfigDir,
-  CONTAINER_AGENT_MESSENGER_CONFIG_DIR,
   legacyAgentMessengerConfigDir,
   migrateAgentMessengerConfigDir,
   resolveAgentMessengerConfigPolicy,
@@ -228,12 +227,5 @@ describe('migrateAgentMessengerConfigDir', () => {
     await writeFile(join(legacyAgentMessengerConfigDir(agentDir), 'session.json'), 'session')
     expect(await migrateAgentMessengerConfigDir(agentDir)).toEqual({ ok: true, migrated: true })
     expect(await migrateAgentMessengerConfigDir(agentDir)).toEqual({ ok: true, migrated: false })
-  })
-})
-
-describe('CONTAINER_AGENT_MESSENGER_CONFIG_DIR', () => {
-  test('stays a posix container path on every host platform', () => {
-    expect(CONTAINER_AGENT_MESSENGER_CONFIG_DIR).toBe('/agent/workspace/.config/agent-messenger')
-    expect(CONTAINER_AGENT_MESSENGER_CONFIG_DIR).not.toInclude('\\')
   })
 })

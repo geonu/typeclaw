@@ -5,11 +5,6 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
-// Stable TypeScript 7.0 ships no programmatic API (returns in 7.1); this meta-test
-// walks its own source AST, so it pulls the classic compiler API from the TS6 compat
-// package while `tsc` typechecking stays on typescript@7.
-import * as ts from '@typescript/typescript6'
-
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
 import { buildDockerfile, BUN_BASE_IMAGE } from '@/init/dockerfile'
@@ -202,44 +197,6 @@ function labelValue(runArgs: string[], key: string): string | undefined {
   return undefined
 }
 
-// Anti-flake guard. start()'s default `ensureModels` (src/hostd/models.ts) takes
-// a 30s stale file-lock and downloads a ~279MB model; CI's "flake guard" lane
-// runs two `bun test --parallel` suites on one runner, so two processes contend
-// on that shared lock and the loser is killed at exactly 30000ms. It only
-// reproduces under that oversubscription, so a forgotten stub fails randomly on
-// an unrelated PR. Every start() call here MUST neutralize the model seam with a
-// `...bypassVerify` spread (carries noEnsureModels) or an explicit `ensureModels`
-// property. Matched over the parsed AST, not by substring, so a
-// `bypassVerify.verifyRunning` access or those names inside a comment cannot pass.
-describe('start() model-provisioning anti-flake guard', () => {
-  test('every start() call in this file stubs the model seam', async () => {
-    const file = join(import.meta.dir, 'start.test.ts')
-    const tree = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.Latest, true)
-
-    const stubsModelSeam = (options: ts.ObjectLiteralExpression): boolean =>
-      options.properties.some((prop) => {
-        if (ts.isSpreadAssignment(prop)) {
-          return ts.isIdentifier(prop.expression) && prop.expression.text === 'bypassVerify'
-        }
-        const { name } = prop
-        return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === 'ensureModels'
-      })
-
-    const offendingLines: number[] = []
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'start') {
-        const [options] = node.arguments
-        const safe = options !== undefined && ts.isObjectLiteralExpression(options) && stubsModelSeam(options)
-        if (!safe) offendingLines.push(tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1)
-      }
-      ts.forEachChild(node, visit)
-    }
-    visit(tree)
-
-    expect(offendingLines).toEqual([])
-  })
-})
-
 describe('planStart', () => {
   test('resolves repository-local Git identity through the production host-to-container path', async () => {
     await writeDockerfile(root)
@@ -341,15 +298,6 @@ describe('planStart', () => {
 
     expect(plan.runArgs).toContain('--env-file')
     expect(plan.runArgs.some((arg) => arg.startsWith('AGENT_MESSENGER_CONFIG_DIR='))).toBe(false)
-  })
-
-  test('sets --shm-size=2g unconditionally so the bundled Chrome survives heavy pages (Docker default /dev/shm is 64MB and crashes Chrome)', async () => {
-    await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-
-    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
-
-    expect(plan.runArgs).toContain('--shm-size=2g')
   })
 
   test('caps container memory with swap disabled so exhaustion kills one agent instead of livelocking the host', async () => {

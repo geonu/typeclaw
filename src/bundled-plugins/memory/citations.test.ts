@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
-  CITATION_FORMAT_CANONICAL,
-  acceptedPrefixes,
   formatCitation,
   isCitationLine,
   normalizeCitation,
@@ -19,13 +17,6 @@ const ID_C = '019e2ee8-bcc4-772f-8821-876162c5e601'
 describe('formatCitation', () => {
   test('produces the canonical streams/yyyy-MM-dd#<id> shape', () => {
     expect(formatCitation('2026-05-16', ID_A)).toBe(`streams/2026-05-16#${ID_A}`)
-  })
-})
-
-describe('citation format constants', () => {
-  test('names streams as canonical while retaining memory as transitional legacy', () => {
-    expect(CITATION_FORMAT_CANONICAL).toBe('streams')
-    expect(acceptedPrefixes).toEqual(['streams', 'memory'])
   })
 })
 

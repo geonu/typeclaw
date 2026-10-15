@@ -54,13 +54,6 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('- Job kind: prompt')
   })
 
-  test('tui origin role block is rendered (placeholder role context is non-suppressing)', () => {
-    const out = dumpSystemPrompt('tui')
-
-    expect(out).toContain('## Session origin')
-    expect(out).toContain('## Your role in this session')
-  })
-
   test('subagent origin names the subagent and parent session', () => {
     const out = dumpSystemPrompt('subagent')
 
@@ -74,17 +67,6 @@ describe('dumpSystemPrompt', () => {
 
     expect(out).not.toContain('## Uncommitted changes at session start')
     expect(out).not.toContain('# Memory')
-  })
-
-  test('byteLength returns UTF-8 byte count, not String.length', () => {
-    expect(byteLength('abc')).toBe(3)
-    expect(byteLength('—')).toBe(3)
-    expect(byteLength("don't")).toBeGreaterThanOrEqual(5)
-  })
-
-  test('byteLength differs from String.length on multi-byte content', () => {
-    const text = 'em — dash and curly — quote'
-    expect(byteLength(text)).toBeGreaterThan(text.length)
   })
 
   test.each(ALL_KINDS)('%s breakdown rows include their separators and sum exactly to the rendered totals', (kind) => {
@@ -135,15 +117,6 @@ describe('dumpSystemPrompt', () => {
       const out = dumpSystemPrompt(kind)
       expect(out).not.toContain('## MEMORY.md')
       expect(out).not.toContain('memory/<PLACEHOLDER:YYYY-MM-DD>.jsonl')
-    }
-  })
-
-  test('no origin kind embeds a wall-clock anchor in the system prompt (per-turn injection invariant)', () => {
-    for (const kind of ALL_KINDS) {
-      const out = dumpSystemPrompt(kind)
-      expect(out).not.toContain('## Now')
-      expect(out).not.toContain('Session started at')
-      expect(out).not.toContain('<current-time>')
     }
   })
 

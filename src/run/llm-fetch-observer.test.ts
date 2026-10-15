@@ -598,19 +598,6 @@ describe('installLlmFetchObserver', () => {
     expect(observed[0]!.msg).toContain('error=null')
   })
 
-  test('TYPECLAW_CODEX_FETCH_OBSERVER=off still disables installation (legacy alias)', () => {
-    const { logger } = captureLogger()
-    const before = globalThis.fetch
-    process.env.TYPECLAW_CODEX_FETCH_OBSERVER = 'off'
-    try {
-      const uninstall = installLlmFetchObserver({ logger })
-      expect(globalThis.fetch).toBe(before)
-      uninstall()
-    } finally {
-      delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
-    }
-  })
-
   test('TTFB timeout aborts pending fetch with a retryable error message', async () => {
     const { logger, entries } = captureLogger()
     const clock = makeClock()

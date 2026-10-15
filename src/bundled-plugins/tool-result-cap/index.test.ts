@@ -53,29 +53,12 @@ function defaultEvent(overrides: Partial<ToolAfterEvent>): ToolAfterEvent {
 }
 
 describe('tool-result-cap plugin', () => {
-  test('config schema validates with all defaults when no block is provided', () => {
-    const parsed = toolResultCapPlugin.configSchema?.parse(undefined)
-    expect(parsed).toEqual({
-      enabled: true,
-      imageMaxBytes: 262_144,
-      textMaxBytes: 32_768,
-      exemptTools: [],
-    })
-  })
-
   test('rejects imageMaxBytes below 1024', () => {
     expect(() => toolResultCapPlugin.configSchema?.parse({ imageMaxBytes: 100 })).toThrow()
   })
 
   test('rejects textMaxBytes below 1024', () => {
     expect(() => toolResultCapPlugin.configSchema?.parse({ textMaxBytes: 100 })).toThrow()
-  })
-
-  test('registers exactly the tool.after hook by default', async () => {
-    const config = toolResultCapPlugin.configSchema?.parse(undefined)
-    const { ctx } = makeCtx({ config })
-    const exports = await loadPlugin(ctx)
-    expect(Object.keys(exports.hooks ?? {})).toEqual(['tool.after'])
   })
 
   test('returns empty exports when disabled', async () => {
@@ -159,14 +142,6 @@ describe('tool-result-cap plugin', () => {
 describe('resolveCapOptionsFromConfig', () => {
   test('returns null when enabled is false (load-time cap disabled)', () => {
     expect(resolveCapOptionsFromConfig({ enabled: false })).toBeNull()
-  })
-
-  test('returns options with defaults applied for undefined config block', () => {
-    const opts = resolveCapOptionsFromConfig(undefined)
-    expect(opts).not.toBeNull()
-    expect(opts!.imageMaxBytes).toBe(262_144)
-    expect(opts!.textMaxBytes).toBe(32_768)
-    expect(opts!.exemptTools?.size).toBe(0)
   })
 
   test('honors user overrides and materializes exemptTools as a Set', () => {

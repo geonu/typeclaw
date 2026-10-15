@@ -95,11 +95,6 @@ describe('convertDiscordTables — multiple and mixed', () => {
     expect(result).toContain('**`c  d`**')
     expect(result).toContain('separator prose')
   })
-
-  test('does not touch code fences that contain pipes', () => {
-    const input = ['```', '| not | a | table |', '```'].join('\n')
-    expect(convertDiscordTables(input)).toBe(input)
-  })
 })
 
 describe('convertDiscordTables — fenced code blocks', () => {

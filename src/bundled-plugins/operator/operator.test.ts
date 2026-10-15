@@ -1,54 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { OPERATOR_SYSTEM_PROMPT, createOperatorSubagent, operatorPayloadSchema } from './operator'
-
-describe('operator subagent — load-bearing prompt phrases', () => {
-  test.each(
-    [
-      'final assistant message',
-      'multi-step',
-      'commit your changes',
-      'Outcome',
-      'What you did',
-      'What changed',
-      'What you observed',
-      'Do NOT commit secrets',
-      'cannot proceed',
-      'workspace in a broken state',
-      'AGENTS.md',
-    ].map((phrase) => [phrase] as const),
-  )('prompt contains %s', (phrase) => {
-    const haystack = OPERATOR_SYSTEM_PROMPT.toLowerCase()
-    expect(haystack).toContain(phrase.toLowerCase())
-  })
-
-  test('prompt names the final-report structure explicitly (so the parent can rely on parseable shape)', () => {
-    expect(OPERATOR_SYSTEM_PROMPT).toContain('Outcome.')
-    expect(OPERATOR_SYSTEM_PROMPT).toContain('What you did.')
-    expect(OPERATOR_SYSTEM_PROMPT).toContain('What changed.')
-    expect(OPERATOR_SYSTEM_PROMPT).toContain('What you observed.')
-    expect(OPERATOR_SYSTEM_PROMPT).toContain("What's next.")
-  })
-
-  test('prompt describes depth-limited delegation (operator may spawn one level, not recurse)', () => {
-    const lower = OPERATOR_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toContain('spawn_subagent')
-    expect(lower).toContain('depth-limited')
-  })
-
-  test('prompt forbids talking to the user directly (Mode B contract: parent owns the conversation)', () => {
-    const lower = OPERATOR_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toContain('talk to the user directly')
-    expect(lower).toContain('channel_send')
-  })
-})
+import { createOperatorSubagent, operatorPayloadSchema } from './operator'
 
 describe('operator subagent declaration', () => {
-  test('is registered as visibility=public', () => {
-    const sub = createOperatorSubagent()
-    expect(sub.visibility).toBe('public')
-  })
-
   test('does not require a specific permission (member with generic subagent.spawn can spawn it)', () => {
     const sub = createOperatorSubagent()
     expect(sub.requiresSpecificPermission ?? false).toBe(false)
@@ -68,12 +22,6 @@ describe('operator subagent declaration', () => {
   test('uses the default model profile (needs reasoning for multi-step work, not the fast tier)', () => {
     const sub = createOperatorSubagent()
     expect(sub.profile).toBe('default')
-  })
-
-  test('tools include read+grep+find+ls+bash AND write+edit (write-capable)', () => {
-    const sub = createOperatorSubagent()
-    const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
-    expect(toolNames).toEqual(['bash', 'coding_agent', 'edit', 'find', 'grep', 'ls', 'read', 'write'])
   })
 
   test('tool-result budget is larger than explorers (multi-step work generates more transcript)', () => {

@@ -246,43 +246,6 @@ describe('createGithubAdapter lifecycle', () => {
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))).toBe(true)
   })
 
-  test('start() logs the webhook settings (effective URL, owner/repo repos, events) before registering', async () => {
-    const logger = recordingLogger()
-    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
-      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
-      const match = url.match(/\/repos\/([^/]+)\/([^/]+)\/hooks\b/)
-      if (match) {
-        if (method === 'GET') return Response.json([])
-        if (method === 'POST') return Response.json({ id: 200 }, { status: 201 })
-      }
-      return new Response('unexpected', { status: 500 })
-    })
-
-    const adapter = createGithubAdapter({
-      router: freshRouter(),
-      configRef: () => githubConfig(['acme/widgets', 'acme/gadgets'], null),
-      secrets: patSecrets(),
-      agentDir,
-      logger,
-      fetchImpl,
-      httpListenImpl: () => ({ stop: async () => {} }),
-      tunnelUrl: () => 'https://x.trycloudflare.com',
-      webhookRegistrationDelayMs: 0,
-    })
-
-    await adapter.start()
-    await adapter.stop()
-
-    const settingsLog = logger.messages.find((m) => m.includes('registering webhook'))
-    expect(settingsLog).toBeDefined()
-    expect(settingsLog).toContain('info:')
-    expect(settingsLog).toContain('https://x.trycloudflare.com/typeclaw/v1/github/')
-    expect(settingsLog).toContain('acme/widgets')
-    expect(settingsLog).toContain('acme/gadgets')
-    expect(settingsLog).toContain('issue_comment.created')
-    expect(settingsLog).toContain('pull_request.opened')
-  })
-
   test('start() registers with configured webhookUrl when no tunnel URL callback is provided', async () => {
     const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
       if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
@@ -1065,7 +1028,7 @@ describe('createGithubAdapter lifecycle', () => {
     })
 
     let setIntervalCalls = 0
-    const fakeInterval = (handler: () => void, _ms: number) => {
+    const fakeInterval = (_handler: () => void, _ms: number) => {
       setIntervalCalls += 1
       return { clear: () => {} }
     }

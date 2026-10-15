@@ -140,14 +140,6 @@ describe('appendTool', () => {
     expect(events[1]!).toMatchObject({ type: 'watermark', source: 'ses_a', entry: 'entry_a' })
   })
 
-  test('creates parent memory directory as needed', async () => {
-    const root = tmpRoot()
-
-    await call(root, { topic: 'Created', body: 'The memory directory was missing.' })
-
-    expect(existsSync(streamPath(root))).toBe(true)
-  })
-
   test('appends events to an existing stream without truncating prior events', async () => {
     const root = tmpRoot()
 

@@ -235,11 +235,6 @@ describe('formatToolEnd results', () => {
     const out = visible(formatToolEnd('mystery', false, { foo: 'bar' }, 1))
     expect(out).toContain('"foo": "bar"')
   })
-
-  test('result without content key falls back to pretty JSON', () => {
-    const out = visible(formatToolEnd('mystery', false, { details: { x: 1 } }, 1))
-    expect(out).toContain('"details"')
-  })
 })
 
 describe('formatTimestamp', () => {

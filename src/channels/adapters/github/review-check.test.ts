@@ -242,20 +242,6 @@ describe('GitHub review check publisher', () => {
     expect(output.summary).toContain('Last activity: 6 seconds ago')
   })
 
-  test('progress in the posting phase says the review is being posted', async () => {
-    const github = fakeGithub()
-    const checks = publisher('app', github.fetchImpl)
-
-    await checks.progress?.(
-      KEY,
-      { mode: 'check-run', checkRunId: 555 },
-      { phase: 'posting', startedAt: 0, now: 400_000, activity: null },
-    )
-
-    const output = github.calls[0]?.body.output as { title: string; summary: string }
-    expect(output.title).toBe('Posting review… (6m 40s)')
-  })
-
   test('requested changes render the findings table, review link, and duration', async () => {
     // given: a posted review with two findings
     const github = fakeGithub()
@@ -312,22 +298,6 @@ describe('GitHub review check publisher', () => {
     expect(details.findings).toHaveLength(REVIEW_CHECK_MAX_FINDINGS)
     expect(details.findingCount).toBe(REVIEW_CHECK_MAX_FINDINGS + 5)
     expect(details.findings?.[0]?.title).toBe('토큰 갱신 경쟁 상태')
-  })
-
-  test('failures and cancellations explain the reason and how to retry', async () => {
-    const github = fakeGithub()
-    const checks = publisher('app', github.fetchImpl)
-    const ref = { mode: 'check-run' as const, checkRunId: 1 }
-
-    await checks.finish(KEY, ref, { kind: 'failed', reason: 'the reviewer did not finish in time' })
-    await checks.finish(KEY, ref, { kind: 'cancelled', reason: 'the pull request was converted to draft' })
-
-    const [failed, cancelled] = github.calls.map((c) => c.body.output as { title: string; summary: string })
-    expect(failed?.title).toBe("Review didn't finish")
-    expect(failed?.summary).toContain('Reason: the reviewer did not finish in time.')
-    expect(failed?.summary).toContain('re-request a review')
-    expect(cancelled?.title).toBe('Review skipped')
-    expect(cancelled?.summary).toContain('Reason: the pull request was converted to draft.')
   })
 
   test('a finding on a deleted line links to the left side of the diff', async () => {

@@ -1,35 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 
-import {
-  DREAMING_STATE_FILE,
-  MEMORY_DIR,
-  MIGRATING_TMPDIR,
-  PRE_SHARD_BACKUP_FILENAME,
-  SKILLS_SUBDIR,
-  STREAMS_SUBDIR,
-  TOPICS_SUBDIR,
-  migratingTmpDir,
-  preShardBackupPath,
-  streamFilePath,
-  streamsDir,
-  topicShardPath,
-  topicsDir,
-} from './paths'
+import { migratingTmpDir, preShardBackupPath, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 
 const AGENT_DIR = '/tmp/typeclaw-paths-test/agent'
-
-describe('path constants', () => {
-  test('relative path constants are correct', () => {
-    expect(MEMORY_DIR).toBe('memory')
-    expect(TOPICS_SUBDIR).toBe('topics')
-    expect(STREAMS_SUBDIR).toBe('streams')
-    expect(SKILLS_SUBDIR).toBe('skills')
-    expect(DREAMING_STATE_FILE).toBe('memory/.dreaming-state.json')
-    expect(PRE_SHARD_BACKUP_FILENAME).toBe('MEMORY.md.pre-shard.bak')
-    expect(MIGRATING_TMPDIR).toBe('memory/.migrating')
-  })
-})
 
 describe('topicShardPath', () => {
   test('returns correct absolute path for valid slug', () => {

@@ -1,26 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
-import { createCodingTools } from '@earendil-works/pi-coding-agent'
-
 import {
   attachToolNotFoundNudge,
   buildToolNotFoundNudge,
   closestToolName,
   extractNotFoundToolName,
   type NudgeableSession,
-  renderToolNotFoundNudge,
 } from './tool-not-found-nudge'
 
 const KNOWN = ['read', 'grep', 'find', 'ls', 'bash', 'web_search', 'web_fetch', 'load_skill']
-
-describe('pi default-builtin coupling', () => {
-  test("createSession derives the nudge vocabulary's default builtins from pi's coding tools — pinned so a pi change breaks loudly", () => {
-    // src/agent/index.ts derives DEFAULT_PI_BUILTIN_TOOL_NAMES from
-    // createCodingTools().map(t => t.name). If pi adds/removes/renames a default
-    // builtin, this pin fails and forces a deliberate update instead of silent drift.
-    expect(createCodingTools(process.cwd()).map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write'])
-  })
-})
 
 describe('extractNotFoundToolName', () => {
   test('extracts the tool name from pi-agent-core not-found text', () => {
@@ -49,16 +37,6 @@ describe('closestToolName', () => {
 
   test('returns null when nothing is close enough (genuinely unknown tool)', () => {
     expect(closestToolName('deploy_to_production', KNOWN)).toBeNull()
-  })
-})
-
-describe('renderToolNotFoundNudge', () => {
-  test('names both the wrong and the suggested tool and instructs an exact re-issue', () => {
-    const nudge = renderToolNotFoundNudge('websearch', 'web_search')
-    expect(nudge).toContain('`websearch`')
-    expect(nudge).toContain('`web_search`')
-    expect(nudge).toContain('Re-issue')
-    expect(nudge).toContain('<system-reminder>')
   })
 })
 

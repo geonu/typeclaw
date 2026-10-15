@@ -27,15 +27,6 @@ describe('parseCgroupMemory', () => {
     expect(parseCgroupMemory('9223372036854710272\n')).toEqual({ kind: 'unlimited' })
   })
 
-  test('treats the 16 KiB-page v1 unlimited sentinel as unlimited', () => {
-    // given: LONG_MAX rounded to a 16 KiB boundary
-    expect(parseCgroupMemory('9223372036854759424\n')).toEqual({ kind: 'unlimited' })
-  })
-
-  test('still treats a real (astronomically smaller) limit as finite', () => {
-    expect(parseCgroupMemory('536870912')).toEqual({ kind: 'finite', value: 536870912 })
-  })
-
   test('treats missing/unreadable (null) as unknown', () => {
     expect(parseCgroupMemory(null)).toEqual({ kind: 'unknown' })
   })

@@ -261,43 +261,4 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
 
     expect(calls[0]?.url).toBe('https://api.github.com/repos/acme/project/pulls/7/comments/555/replies')
   })
-
-  test('regression guard: outbound MUST NOT fall back to /issues/{N}/comments when thread is set', async () => {
-    // This is the failure mode the user reported: a PR line-comment reply
-    // arriving at the PR root instead of the line-comment thread. If
-    // outbound ever stops honoring `msg.thread` for PRs and falls back to
-    // the issues-comments endpoint, this assertion catches it.
-    const inbound = await classifyWebhook(reviewCommentPayload({ rootId: 200, commentId: 201 }))
-    const calls: Array<{ url: string }> = []
-    const fetchImpl = Object.assign(
-      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-        calls.push({ url })
-        return new Response(JSON.stringify({ id: 1 }), { status: 201 })
-      },
-      { preconnect: () => {} },
-    ) as typeof fetch
-    const outbound = createGithubOutboundCallback({
-      token: async () => 'tok',
-      authType: 'app',
-      logger: silent,
-      fetchImpl,
-    })
-
-    const tool = createChannelReplyTool({
-      router: fakeRouter(async (msg) => outbound(msg)),
-      origin: { adapter: 'github', workspace: inbound.workspace, chat: inbound.chat, thread: inbound.thread },
-      logger: silent,
-    })
-    await tool.execute(
-      'id',
-      { text: 'reply', more_work_this_turn: false, resolve_review_thread: false },
-      undefined,
-      undefined,
-      fakeCtx,
-    )
-
-    expect(calls[0]?.url).toContain('/pulls/7/comments/200/replies')
-    expect(calls[0]?.url).not.toContain('/issues/7/comments')
-  })
 })

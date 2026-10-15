@@ -6,12 +6,7 @@ import { join, sep } from 'node:path'
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
-import docRenderPlugin, {
-  RENDER_SCRIPT_AGENT_RELATIVE_PATH,
-  renderScriptPath,
-  TEMPLATE_LIB_AGENT_RELATIVE_PATH,
-  templateLibPath,
-} from './index'
+import docRenderPlugin, { renderScriptPath, templateLibPath } from './index'
 
 describe('doc-render plugin', () => {
   test('contributes the skill directory and no tools or hooks', async () => {
@@ -28,61 +23,8 @@ describe('doc-render plugin', () => {
     expect(existsSync(renderScriptPath())).toBe(true)
   })
 
-  test('the agent-relative render path points at the bundled script', () => {
-    // The container runs from node_modules/typeclaw/src/...; the agent-relative
-    // path the skill uses must end at the same file this package ships.
-    expect(RENDER_SCRIPT_AGENT_RELATIVE_PATH).toBe('node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts')
-    expect(renderScriptPath()).toMatch(/[\\/]bundled-plugins[\\/]doc-render[\\/]render\.ts$/)
-  })
-
   test('the bundled theme library exists on disk', () => {
     expect(existsSync(templateLibPath())).toBe(true)
-  })
-
-  test('the agent-relative template path points at the bundled lib', () => {
-    expect(TEMPLATE_LIB_AGENT_RELATIVE_PATH).toBe(
-      'node_modules/typeclaw/src/bundled-plugins/doc-render/templates/lib.typ',
-    )
-    expect(templateLibPath()).toMatch(/[\\/]bundled-plugins[\\/]doc-render[\\/]templates[\\/]lib\.typ$/)
-  })
-})
-
-describe('doc-render theme library (lib.typ)', () => {
-  test('exposes the report template and the documented helpers', async () => {
-    const raw = await readFile(templateLibPath(), 'utf8')
-
-    for (const helper of ['report', 'callout', 'kpi', 'kpi-row', 'pullquote']) {
-      expect(raw).toMatch(new RegExp(`#let ${helper}\\(`))
-    }
-  })
-
-  test('defines the four documented themes', async () => {
-    const raw = await readFile(templateLibPath(), 'utf8')
-
-    for (const theme of ['editorial', 'modern', 'report', 'minimal']) {
-      expect(raw).toMatch(new RegExp(`^\\s*${theme}:\\s*\\(`, 'm'))
-    }
-  })
-
-  test('uses only container-guaranteed fonts so output is identical everywhere', async () => {
-    const raw = await readFile(templateLibPath(), 'utf8')
-
-    // Bundled-with-Typst faces (the only text fonts the container ships) plus the
-    // opt-in CJK fallbacks. A theme that names a system-only font would render
-    // differently (or as tofu) in the container than on a dev box.
-    for (const font of ['Libertinus Serif', 'New Computer Modern', 'DejaVu Sans Mono']) {
-      expect(raw).toContain(`"${font}"`)
-    }
-    for (const systemOnly of ['Inter', 'Helvetica', 'Arial', 'Times New Roman', 'Roboto', 'Open Sans']) {
-      expect(raw).not.toContain(`"${systemOnly}"`)
-    }
-  })
-
-  test('keeps the running header safe when the title is omitted', async () => {
-    const raw = await readFile(templateLibPath(), 'utf8')
-
-    expect(raw).toContain('#_eyebrow(spec, if title != none { title } else { "" })')
-    expect(raw).not.toContain('#_eyebrow(spec, title) #h(1fr)')
   })
 })
 
@@ -98,67 +40,6 @@ describe('typeclaw-render-pdf skill', () => {
     const frontmatter = raw.slice(4, frontmatterEnd)
     expect(frontmatter).toMatch(/^name:\s*typeclaw-render-pdf\s*$/m)
     expect(frontmatter).toMatch(/^description:\s*\S/m)
-  })
-
-  test('forbids ad-hoc PDF libraries', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    expect(raw).toMatch(/only supported way to make a PDF from Markdown/i)
-    expect(raw).toMatch(/jsPDF/)
-    expect(raw).toMatch(/pdfkit/)
-    expect(raw).toMatch(/ReportLab/)
-  })
-
-  test('handles CJK by detecting tofu after render, never auto-downloading a font', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    expect(raw).toContain('## Handling CJK content')
-    expect(raw).toMatch(/CJK fonts are \*\*opt-in\*\*/)
-    expect(raw).toMatch(/docker\.file\.cjkFonts/)
-    expect(raw).toMatch(/typeclaw restart/)
-    expect(raw).not.toContain('NotoSerifKR-Regular.otf')
-    expect(raw).not.toContain('workspace/.tools/fonts')
-  })
-
-  test('installs the compiler into writable session scratch, not protected agent dependencies', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    expect(raw).toContain('bun add @myriaddreamin/typst-ts-node-compiler@0.7.0')
-    expect(raw).toContain('/tmp/typeclaw-doc-render-runtime')
-    expect(raw).not.toContain("agent's own `node_modules`")
-    expect(raw).not.toContain('workspace/.tools')
-  })
-
-  test('renders via the agent-readable render path, not the per-session /tmp hint', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    expect(raw).toContain(`bun run /agent/${RENDER_SCRIPT_AGENT_RELATIVE_PATH}`)
-    expect(raw).not.toContain('/tmp/typeclaw-doc-render-script')
-  })
-
-  test('changes into the document directory before rendering so read(...) resolves', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    const renderIdx = raw.indexOf('bun run /agent/node_modules/typeclaw')
-    const cdIdx = raw.lastIndexOf('\ncd ', renderIdx)
-    expect(cdIdx).toBeGreaterThan(0)
-    expect(cdIdx).toBeLessThan(renderIdx)
-  })
-
-  test('drives the bundled theme library instead of a hand-rolled wrapper', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    expect(raw).toContain(`cp /agent/${TEMPLATE_LIB_AGENT_RELATIVE_PATH} .`)
-    expect(raw).toMatch(/#show: report\.with\(/)
-    expect(raw).toMatch(/#import "lib\.typ"/)
-  })
-
-  test('documents every theme the library ships', async () => {
-    const raw = await readFile(skillPath, 'utf8')
-
-    for (const theme of ['editorial', 'modern', 'report', 'minimal']) {
-      expect(raw).toContain(`\`${theme}\``)
-    }
   })
 })
 

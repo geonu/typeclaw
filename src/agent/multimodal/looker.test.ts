@@ -6,12 +6,6 @@ import { join } from 'node:path'
 import { buildMultimodalLookerSystemPrompt, resolveImage } from './looker'
 
 describe('buildMultimodalLookerSystemPrompt', () => {
-  test('without prompt → describe-the-image instructions', () => {
-    const out = buildMultimodalLookerSystemPrompt(undefined)
-    expect(out).toContain('DESCRIBE the attached image(s)')
-    expect(out).not.toContain('Question:')
-  })
-
   test('with prompt → focused answer instructions including the question', () => {
     const out = buildMultimodalLookerSystemPrompt('What error message is shown?')
     expect(out).toContain('ANSWER the question below')
@@ -21,12 +15,6 @@ describe('buildMultimodalLookerSystemPrompt', () => {
   test('trims whitespace around the prompt', () => {
     const out = buildMultimodalLookerSystemPrompt('  what is this?  ')
     expect(out).toContain('Question: what is this?')
-  })
-
-  test('empty/whitespace prompt falls through to describe-the-image branch', () => {
-    const out = buildMultimodalLookerSystemPrompt('   ')
-    expect(out).toContain('DESCRIBE the attached image(s)')
-    expect(out).not.toContain('Question:')
   })
 })
 

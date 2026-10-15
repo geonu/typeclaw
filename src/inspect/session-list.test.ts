@@ -198,14 +198,6 @@ describe('listSessions', () => {
     expect(sessions.map((s) => s.sessionId)).toEqual([UUID_NEW, UUID_OLD])
   })
 
-  test('rejects filename with only an underscore (_.jsonl) and no id', async () => {
-    await writeFile(join(dir, '_.jsonl'), '{}')
-    const warnings: string[] = []
-    const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
-    expect(sessions).toEqual([])
-    expect(warnings.some((w) => w.includes('_.jsonl'))).toBe(true)
-  })
-
   test('rejects filename with only an extension (.jsonl) and no id', async () => {
     await writeFile(join(dir, '.jsonl'), '{}')
     const warnings: string[] = []

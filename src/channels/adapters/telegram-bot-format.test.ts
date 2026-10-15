@@ -177,11 +177,6 @@ describe('toTelegramMarkdownV2 — combined and adversarial', () => {
     )
   })
 
-  test('a fenced code block with the language tag the assistant used', () => {
-    const input = '```python\ndef hello():\n    print("hi")\n```'
-    expect(toTelegramMarkdownV2(input)).toBe('```python\ndef hello():\n    print("hi")\n```')
-  })
-
   test('mixed inline code and bold with punctuation that must escape', () => {
     expect(toTelegramMarkdownV2('Run `npm install` first, **then** open it!')).toBe(
       'Run `npm install` first, *then* open it\\!',

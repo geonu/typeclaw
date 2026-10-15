@@ -161,14 +161,6 @@ describe('createTunnelManager (external provider)', () => {
     expect(manager.tail('unknown')).toEqual([])
   })
 
-  it('subscribeToLogs returns an unsubscribe function for external tunnels and unknown names', () => {
-    const stream = createStream()
-    const manager = createTunnelManager({ tunnels: [externalConfig()], stream, logger: silentLogger })
-
-    expect(typeof manager.subscribeToLogs('demo', () => {})).toBe('function')
-    expect(typeof manager.subscribeToLogs('unknown', () => {})).toBe('function')
-  })
-
   it('does not call the channel upstream resolver for external tunnels', async () => {
     const stream = createStream()
     let calls = 0

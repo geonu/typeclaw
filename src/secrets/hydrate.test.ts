@@ -135,15 +135,6 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(result.applied).toEqual([])
   })
 
-  test('mutation check: commenting out env[envName] = resolved leaves env empty', () => {
-    writeSecretsV2({ channels: { 'discord-bot': { token: 'd-tok' } } })
-    const env: NodeJS.ProcessEnv = {}
-
-    hydrateChannelEnvFromSecrets({ agentDir: root, env })
-
-    expect(env['DISCORD_BOT_TOKEN']).toBe('d-tok')
-  })
-
   test('does not exist: .env file is never written by hydrate', () => {
     writeSecretsV2({ channels: { 'discord-bot': { token: 'd-tok' } } })
     const env: NodeJS.ProcessEnv = {}

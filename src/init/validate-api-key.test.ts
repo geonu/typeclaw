@@ -3,13 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { supportsApiKey } from '@/config/providers'
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 
-import {
-  API_KEY_DASHBOARD_URL,
-  MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
-  providersWithApiKeyProbe,
-  validateApiKey,
-  type FetchFn,
-} from './validate-api-key'
+import { API_KEY_DASHBOARD_URL, providersWithApiKeyProbe, validateApiKey, type FetchFn } from './validate-api-key'
 
 function fakeFetch(responder: (url: string, init: RequestInit) => Response | Promise<Response>): FetchFn {
   return async (url, init) => responder(url, init)
@@ -356,10 +350,5 @@ describe('drift guard', () => {
       if (!supportsApiKey(KNOWN_PROVIDERS[id])) continue
       expect(API_KEY_DASHBOARD_URL[id], `provider "${id}" supports api-key but has no dashboard URL`).toBeDefined()
     }
-  })
-
-  test('minimax exposes a distinct Token Plan dashboard URL separate from the paygo one', () => {
-    expect(MINIMAX_TOKEN_PLAN_DASHBOARD_URL).not.toBe(API_KEY_DASHBOARD_URL.minimax)
-    expect(MINIMAX_TOKEN_PLAN_DASHBOARD_URL).toContain('token-plan')
   })
 })

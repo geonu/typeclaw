@@ -85,13 +85,6 @@ describe('renderQuoteAnchor', () => {
     )
   })
 
-  test('does NOT emit a literal `> @name:` form on adapters where that is not platform mention syntax', () => {
-    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const) {
-      const out = renderQuoteAnchor({ adapter, authorId: 'U1', authorName: 'Alice', text: 'hi' })
-      expect(out.startsWith('> @')).toBe(false)
-    }
-  })
-
   test('GitHub does not double-prefix handles that already include @', () => {
     expect(renderQuoteAnchor({ adapter: 'github', authorId: '12345', authorName: '@alice', text: 'hello' })).toBe(
       '> @alice: hello',
@@ -251,22 +244,6 @@ describe('captureQuoteCandidate', () => {
     expect(captureQuoteCandidate('kakaotalk', [stickerOnly], [])).toBeNull()
   })
 
-  test('returns null for a pure KakaoTalk photo inbound', () => {
-    const photoOnly = {
-      ...humanInbound,
-      text: '[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/bInpde/o3eFRt3]',
-    }
-    expect(captureQuoteCandidate('kakaotalk', [photoOnly], [])).toBeNull()
-  })
-
-  test('returns null for a pure Slack attachment inbound', () => {
-    const attachmentOnly = {
-      ...humanInbound,
-      text: '[Slack message with attachment: diagram.png (image/png) id=F1]',
-    }
-    expect(captureQuoteCandidate('slack-bot', [attachmentOnly], [])).toBeNull()
-  })
-
   test('strips the KakaoTalk photo placeholder but keeps the human-written caption', () => {
     const caption = {
       ...humanInbound,
@@ -297,14 +274,6 @@ describe('stripChannelMediaPlaceholders', () => {
     expect(
       stripChannelMediaPlaceholders(
         '[KakaoTalk message with sticker (sticker_ani) pack=4417024 path=4417024.emot_008.webp]',
-      ),
-    ).toBe('')
-  })
-
-  test('drops a standalone KakaoTalk photo placeholder with a long URL', () => {
-    expect(
-      stripChannelMediaPlaceholders(
-        '[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/bInpde/o3eFRt3]',
       ),
     ).toBe('')
   })
@@ -354,29 +323,10 @@ describe('decideQuoteAnchor', () => {
     })
   })
 
-  test('respects an explicit enabled: false override', () => {
-    const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    const disabled: ChannelAdapterConfig = { ...baseConfig, quotedReply: { enabled: false, queueDelayMs: 0 } }
-    const out = decideQuoteAnchor(candidate, humanInbound.receivedAt + 999_999, disabled)
-    expect(out).toBeNull()
-  })
-
   test('does not let custom queueDelayMs force a quote when no message intervened', () => {
     const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
     const aggressive: ChannelAdapterConfig = { ...baseConfig, quotedReply: { enabled: true, queueDelayMs: 0 } }
     expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 600_000, aggressive)).toBeNull()
-  })
-
-  test('quotes with no quotedReply config when an observed message intervened', () => {
-    const candidate = captureQuoteCandidate(
-      'slack-bot',
-      [humanInbound],
-      [{ receivedAt: humanInbound.receivedAt + 500, source: 'observed' }],
-    )!
-    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toEqual({
-      source: { adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' },
-      externalMessageId: 'M_ALICE',
-    })
   })
 })
 

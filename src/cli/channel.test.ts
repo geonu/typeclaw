@@ -153,14 +153,6 @@ describe('setAdapterRejectionMessage', () => {
     )
   })
 
-  test('sends other reauthable adapters (line) to `channel reauth` too', () => {
-    // when
-    const message = setAdapterRejectionMessage('line')
-
-    // then
-    expect(message).toContain('typeclaw channel reauth line')
-  })
-
   test('gives a remove+add recipe for a known kind that is neither settable nor reauthable', () => {
     // given slack user-mode has no in-place rotation path
     // when

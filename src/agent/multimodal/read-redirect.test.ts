@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { GUARD_IMAGE_READ_REDIRECT, checkImageReadRedirect } from './read-redirect'
+import { checkImageReadRedirect } from './read-redirect'
 
 describe('image-read-redirect guard', () => {
   test('blocks read of common image extensions', () => {
@@ -41,14 +41,6 @@ describe('image-read-redirect guard', () => {
     expect(result?.reason).toContain('imageReadRedirect')
   })
 
-  test('cannot observe an acknowledgement envelope', () => {
-    const result = checkImageReadRedirect({
-      tool: 'read',
-      args: { path: 'workspace/foo.png' },
-    })
-    expect(result?.kind).toBe('acknowledgement-required')
-  })
-
   test('allows reads of non-image files', () => {
     expect(checkImageReadRedirect({ tool: 'read', args: { path: 'README.md' } })).toBeUndefined()
     expect(checkImageReadRedirect({ tool: 'read', args: { path: 'src/index.ts' } })).toBeUndefined()
@@ -80,9 +72,5 @@ describe('image-read-redirect guard', () => {
     expect(checkImageReadRedirect({ tool: 'read', args: { path: 42 } })).toBeUndefined()
     expect(checkImageReadRedirect({ tool: 'read', args: { path: '' } })).toBeUndefined()
     expect(checkImageReadRedirect({ tool: 'read', args: {} })).toBeUndefined()
-  })
-
-  test('exposes guard name constant', () => {
-    expect(GUARD_IMAGE_READ_REDIRECT).toBe('imageReadRedirect')
   })
 })

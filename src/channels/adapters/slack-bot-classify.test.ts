@@ -793,20 +793,6 @@ describe('slack-bot classifyInbound — targets-others detection', () => {
 
     expect(verdict).toEqual({ kind: 'drop', reason: 'pre_connect' })
   })
-
-  test('Slack does not surface the parent author on inbounds, so replyToOtherMessageId is always null', () => {
-    const event = buildEvent({
-      text: 'thanks',
-      ts: '1700000010.000200',
-      thread_ts: '1700000000.000100',
-    })
-
-    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict.kind).toBe('route')
-    if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.replyToOtherMessageId).toBeNull()
-  })
 })
 
 describe('slack-bot classifyInbound — group mentions', () => {

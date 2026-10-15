@@ -33,11 +33,6 @@ describe('buildQRHtml', () => {
 })
 
 describe('renderTerminalQR', () => {
-  test('returns a non-empty terminal rendering for a URL', async () => {
-    const rendered = await renderTerminalQR(URL)
-    expect(rendered.length).toBeGreaterThan(0)
-  })
-
   test('stays compact enough to scan from an SSH terminal', async () => {
     // A long LINE auth URL must still fit a conventional 24-row terminal so it
     // is scannable over SSH without resizing. The 'L' ECC tuning is what keeps

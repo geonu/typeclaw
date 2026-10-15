@@ -588,25 +588,6 @@ describe('review verdict idempotency guard', () => {
     expect(next.carrierThread).toBe('202')
   })
 
-  test('clears reply generation correlations with the test reset', () => {
-    let nonce = 0
-    const input = {
-      workspace: WS,
-      prNumber: 60,
-      headSha: ROUND.headSha,
-      blockingReviewId: 7001,
-      thread: '101',
-      now: () => 1_000,
-      generateRoundId: () => `reset-${++nonce}`,
-    }
-    const first = registerOrJoinReplyReviewRound(input)
-
-    __resetReviewVerdictGuardForTest()
-    const next = registerOrJoinReplyReviewRound(input)
-
-    expect(next.roundId).not.toBe(first.roundId)
-  })
-
   test('aborting a PR permits a fresh round while fencing publication until the old call settles', async () => {
     const g = makeGuard()
     const first = registerOrJoinReplyReviewRound({

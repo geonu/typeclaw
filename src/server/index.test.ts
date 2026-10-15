@@ -1624,23 +1624,6 @@ describe('createServer with stream — input queueing bugfix', () => {
     session.resolvePrompt()
     ws.close()
   })
-
-  test('close() unsubscribes from the stream so further publishes do not error', async () => {
-    const session = createFakeSession()
-    const stream = createStream()
-    const { url } = await startWithSession(session, { stream })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    ws.close()
-    await waitForState(() => ws.readyState === WebSocket.CLOSED)
-
-    // when: publish a broadcast after close
-    stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'noise' } })
-
-    // then: no crash; the test passes if we get here
-    expect(true).toBe(true)
-  })
 })
 
 describe('createServer subagent.completed broadcast → session reminder injection', () => {

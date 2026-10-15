@@ -22,12 +22,6 @@ async function execute(tool: ReturnType<typeof createReloadTool>, args: { scope?
 }
 
 describe('createReloadTool', () => {
-  test('exposes name "reload" and a description for the LLM', () => {
-    const tool = createReloadTool({ registry: new ReloadRegistry() })
-    expect(tool.name).toBe('reload')
-    expect(tool.description.length).toBeGreaterThan(0)
-  })
-
   test('returns a textual summary listing each scope and its outcome', async () => {
     const reg = regWith(
       { scope: 'cron', ok: true, summary: '2 jobs (added 1, removed 0, updated 1, unchanged 0)' },

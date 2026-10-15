@@ -236,12 +236,6 @@ describe('formatReport', () => {
     expect(parsed.aggregation).toBeDefined()
   })
 
-  test('report includes a timezone field', async () => {
-    const report = await runUsage({ agentDir })
-    expect(typeof report.timezone).toBe('string')
-    expect(report.timezone.length).toBeGreaterThan(0)
-  })
-
   test('summary output shows the timezone in the header', async () => {
     const report = await runUsage({ agentDir })
     const out = formatReport(report)

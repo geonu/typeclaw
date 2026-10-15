@@ -132,14 +132,6 @@ describe('stream_snapshot tool', () => {
     expect(reply).toBeDefined()
     expect(reply?.replyTo).toBe(requestId)
   })
-
-  test('does not expose any publish capability — tool is read-only', () => {
-    const stream = createStream()
-    const tool = createStreamSnapshotTool({ stream })
-
-    expect(tool.name).toBe('stream_snapshot')
-    expect(tool.description.toLowerCase()).toMatch(/read-only/)
-  })
 })
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {

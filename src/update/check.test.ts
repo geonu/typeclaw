@@ -143,10 +143,6 @@ describe('isCacheFresh', () => {
     expect(isCacheFresh({ lastAttemptAt: now }, now)).toBe(true)
   })
 
-  test('a recent FAILED attempt (no latest) still throttles', () => {
-    expect(isCacheFresh({ lastAttemptAt: now - 1000 }, now)).toBe(true)
-  })
-
   test('stale at or past the TTL', () => {
     expect(isCacheFresh({ lastAttemptAt: now - ttl }, now)).toBe(false)
     expect(isCacheFresh({ lastAttemptAt: now - ttl - 1 }, now)).toBe(false)

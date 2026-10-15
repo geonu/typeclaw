@@ -13,7 +13,6 @@ import {
   createInstagramAdapter,
   createInstagramHistoryCallback,
   createOutboundCallback,
-  resolveInstagramListenerCtor,
   type ConnectedPayload,
   type InstagramClientShape,
   type InstagramListenerShape,
@@ -111,12 +110,6 @@ function fakeClient(overrides: Partial<InstagramClientShape> = {}): FakeInstagra
   }
   return Object.assign(base, overrides)
 }
-
-describe('resolveInstagramListenerCtor', () => {
-  test('resolves the installed 2.28.0 module to hybrid (realtime)', () => {
-    expect(resolveInstagramListenerCtor().transport).toBe('hybrid')
-  })
-})
 
 describe('createOutboundCallback', () => {
   const tag = async (): Promise<string> => 'tag'

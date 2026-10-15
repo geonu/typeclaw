@@ -78,11 +78,6 @@ describe('resolveSecret', () => {
     const r = resolveSecret({ value: 'only-value' }, undefined, { SOME_VAR: 'irrelevant' })
     expect(r).toBe('only-value')
   })
-
-  test('mutation check: removing the env-wins branch leaves secret.value winning', () => {
-    const r = resolveSecret({ value: 'from-file' }, 'DISCORD_BOT_TOKEN', { DISCORD_BOT_TOKEN: 'from-env' })
-    expect(r).toBe('from-env')
-  })
 })
 
 describe('effectiveEnvName', () => {

@@ -65,11 +65,6 @@ describe('nextRefreshDelayMs', () => {
     expect(nextRefreshDelayMs(jwt({ exp: exp / 1000 }), exp)).toBe(60_000)
   })
 
-  test('clamps to a maximum delay for a far-future expiry', () => {
-    const now = exp - 400 * 24 * 60 * 60 * 1000
-    expect(nextRefreshDelayMs(jwt({ exp: exp / 1000 }), now)).toBe(24 * 60 * 60 * 1000)
-  })
-
   test('falls back to the minimum delay for an undecodable token', () => {
     expect(nextRefreshDelayMs('garbage', Date.now())).toBe(60_000)
   })

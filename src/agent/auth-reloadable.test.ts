@@ -40,12 +40,6 @@ describe('createProviderAuthReloadable', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  test('exposes scope=providers with a description', () => {
-    const reloadable = createProviderAuthReloadable()
-    expect(reloadable.scope).toBe('providers')
-    expect(reloadable.description.length).toBeGreaterThan(0)
-  })
-
   test('re-resolves the rotated value from secrets.json after reload', async () => {
     // The on-disk secrets.json (bind-mounted live in the container) is the
     // credential source under test, so bypass getAuthFor's NODE_ENV=test

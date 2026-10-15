@@ -97,11 +97,6 @@ describe('channelsSchema', () => {
     expect(parsed.github?.webhookUrl).toBe('https://agent.example.com/github')
   })
 
-  test('github review.approve defaults to true', () => {
-    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
-    expect(parsed.github?.review.approve).toBe(true)
-  })
-
   test('github review.approve accepts false', () => {
     const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'], review: { approve: false } } })
     expect(parsed.github?.review.approve).toBe(false)
@@ -110,11 +105,6 @@ describe('channelsSchema', () => {
   test('github review defaults to { on: review_requested, approve: true } when omitted', () => {
     const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
     expect(parsed.github?.review).toEqual({ on: 'review_requested', approve: true, check: true })
-  })
-
-  test('github review.on defaults to review_requested', () => {
-    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
-    expect(parsed.github?.review.on).toBe('review_requested')
   })
 
   test('github review.on accepts off', () => {

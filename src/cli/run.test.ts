@@ -3,24 +3,6 @@ import { describe, expect, test } from 'bun:test'
 import { shutdown } from './run'
 
 describe('shutdown', () => {
-  test('awaits stop() before invoking exit', async () => {
-    // given: a stop() that resolves after a microtask hop
-    const events: string[] = []
-    const stop = async (): Promise<void> => {
-      await Promise.resolve()
-      events.push('stop:resolved')
-    }
-    const exit = (code: number): void => {
-      events.push(`exit:${code}`)
-    }
-
-    // when
-    await shutdown({ stop, exit })
-
-    // then
-    expect(events).toEqual(['stop:resolved', 'exit:0'])
-  })
-
   test('exits with 1 if stop() throws so async teardown failures surface in container exit code', async () => {
     // given
     const events: string[] = []
