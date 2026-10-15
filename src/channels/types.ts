@@ -85,6 +85,8 @@ export type InboundMessage = {
   chat: string
   thread: string | null
   githubReviewRound?: GithubReviewFollowupRound
+  // Only dedicated adapter-classified review triggers create durable PR work.
+  githubPendingReview?: { prId: number; headSha: string; kind: 'review' | 'rereview' }
   // Adapter-authoritative obligation created only for a non-self reply whose
   // review-thread ROOT comment was authored by this agent. Kept separate from
   // replyToBotMessageId, which describes only the immediate parent.

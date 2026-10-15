@@ -169,12 +169,46 @@ test('denied, observed and control receipts create no durable inbound obligation
   }
 })
 
+test('adapter obligation persists after journal admission and before work can run', async () => {
+  const state = await fixture()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    const routed = state.router.route(event, async () => {
+      expect(state.journal.list()).toHaveLength(1)
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    expect(state.counters.publications).toBe(0)
+    expect(state.counters.prompts).toBe(0)
+    release.resolve()
+    expect((await routed).kind).toBe('accepted')
+    let duplicateHookCalls = 0
+    expect(
+      (
+        await state.router.route(event, async () => {
+          duplicateHookCalls++
+        })
+      ).kind,
+    ).toBe('duplicate')
+    expect(duplicateHookCalls).toBe(1)
+  } finally {
+    release.resolve()
+    await state.cleanup()
+  }
+})
+
 test('admission durability failure rejects before publish, reaction and prompt; stop can still abort', async () => {
   const state = await fixture({ failAdmission: true })
   try {
-    await expect(state.router.route({ ...event, reactionRef: { adapter: event.adapter, value: 'A' } })).rejects.toThrow(
-      'controlled admission durability failure',
-    )
+    let hooks = 0
+    await expect(
+      state.router.route({ ...event, reactionRef: { adapter: event.adapter, value: 'A' } }, async () => {
+        hooks++
+      }),
+    ).rejects.toThrow('controlled admission durability failure')
+    expect(hooks).toBe(0)
     expect(state.counters.publications).toBe(0)
     expect(state.counters.reactions).toBe(0)
     expect(state.counters.prompts).toBe(0)

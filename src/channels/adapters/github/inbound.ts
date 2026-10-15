@@ -69,6 +69,8 @@ export type GithubWebhookHandlerOptions = {
     | { kind: 'no-live-session' }
   >
   clearReconcileCooldown?: (workspace: string, prId: number) => Promise<'cleared' | 'not-initialized'>
+  clearPendingReview?: (workspace: string, prNumber: number) => Promise<void>
+  reviewSubmitted?: (review: { repo: string; prNumber: number; headSha: string; submittedAt: number }) => Promise<void>
 }
 
 export const GITHUB_REVIEW_STATE_UNKNOWN_TTL_MS = 2 * 60_000
@@ -113,6 +115,31 @@ export async function processVerifiedGithubDelivery(
 ): Promise<void> {
   const { event, delivery, payload } = input
   const action = readString(payload, 'action')
+  // Completion bookkeeping is independent of the conversational event allowlist.
+  // In particular, self-authored reviews are deliberately never routed.
+  const repository = readRepository(payload)
+  const pr = readRecord(payload.pull_request)
+  const prNumber = readNumber(pr, 'number')
+  if (repository !== null && prNumber !== null) {
+    const repo = `${repository.owner}/${repository.name}`
+    if (event === 'pull_request' && action === 'closed') {
+      await options.clearPendingReview?.(repo, prNumber)
+    }
+    if (event === 'pull_request_review' && action === 'submitted') {
+      const review = readRecord(payload.review)
+      const reviewer = readUser(review?.user)
+      const headSha = readString(review, 'commit_id')
+      const submittedAt = Date.parse(readString(review, 'submitted_at') ?? '')
+      if (
+        reviewer !== null &&
+        isSelfAuthor(reviewer, options.selfId(), options.selfLogin()) &&
+        headSha !== null &&
+        Number.isFinite(submittedAt)
+      ) {
+        await options.reviewSubmitted?.({ repo, prNumber, headSha, submittedAt })
+      }
+    }
+  }
   const eventAllowed = isGithubEventAllowed(options.allowlist(), event, action)
   let staleRecoveredDraft = false
   if (input.recovered === true && eventAllowed && event === 'pull_request' && action === 'converted_to_draft') {
@@ -159,6 +186,7 @@ export async function processVerifiedGithubDelivery(
       return
     }
     const workspace = `${repository.owner}/${repository.name}`
+    await options.clearPendingReview?.(workspace, prNumber)
     invalidateGithubReviewSubmission(workspace, prNumber)
     void githubReviewChecks.cancelPullRequest(workspace, prNumber, 'the pull request was converted to draft')
     scheduleDraftAbort({ workspace, prNumber, prId: readNumber(pr, 'id'), options })
@@ -547,6 +575,7 @@ function scheduleReviewFollowup(input: {
                 repository,
                 pullNumber,
                 headSha,
+                prId: readNumber(pr, 'id') ?? pullNumber,
                 thread: null,
                 selfBlocking: true,
                 round,
@@ -582,6 +611,7 @@ function scheduleReviewFollowup(input: {
               repository,
               pullNumber,
               headSha,
+              prId: readNumber(pr, 'id') ?? pullNumber,
               thread,
               selfBlocking: carriesBlockingObligation,
               ...(round !== undefined ? { round } : {}),
@@ -625,6 +655,7 @@ function buildReviewFollowupInbound(input: {
   repository: { owner: string; name: string }
   pullNumber: number
   headSha: string
+  prId: number
   thread: UnresolvedSelfReviewThread | null
   selfBlocking: boolean
   round?: GithubReviewFollowupRound
@@ -643,6 +674,7 @@ function buildReviewFollowupInbound(input: {
     chat: `pr:${pullNumber}`,
     thread: thread === null ? null : String(thread.rootCommentId),
     ...(round !== undefined ? { githubReviewRound: round } : {}),
+    ...(selfBlocking ? { githubPendingReview: { prId: input.prId, headSha, kind: 'rereview' as const } } : {}),
     text,
     externalMessageId: `pr-${pullNumber}-recheck-${headSha}${thread === null ? '' : `-thread-${thread.rootCommentId}`}`,
     eventKind: 'pull_request:synchronize:review-followup',
@@ -1129,6 +1161,7 @@ function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null
     thread: null,
     text,
     externalMessageId,
+    ...(action === 'review_requested' ? pendingReviewMetadata(pr, prId) : {}),
     authorId: String(sender.id),
     authorName: sender.login,
     authorIsBot: sender.type === 'Bot',
@@ -1176,6 +1209,7 @@ function classifyOpenedReviewTrigger(input: OpenedReviewTriggerInput): InboundMe
     thread: null,
     text,
     externalMessageId,
+    ...pendingReviewMetadata(pr, prId),
     authorId: String(sender.id),
     authorName: sender.login,
     authorIsBot: sender.type === 'Bot',
@@ -1183,6 +1217,11 @@ function classifyOpenedReviewTrigger(input: OpenedReviewTriggerInput): InboundMe
     replyToBotMessageId: null,
     ts: updatedAt !== '' ? Date.parse(updatedAt) || 0 : 0,
   }
+}
+
+function pendingReviewMetadata(pr: Record<string, unknown>, prId: number): Pick<InboundMessage, 'githubPendingReview'> {
+  const headSha = readString(readRecord(pr.head), 'sha')
+  return headSha === null ? {} : { githubPendingReview: { prId, headSha, kind: 'review' } }
 }
 
 export type GithubReviewerTeam = { slug: string; id: number; org: string | null }

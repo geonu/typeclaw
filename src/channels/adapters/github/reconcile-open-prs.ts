@@ -1,12 +1,16 @@
 import { randomUUID } from 'node:crypto'
 
+import { z } from 'zod'
+
 import type { GithubReviewOn } from '@/channels/schema'
 import type { InboundMessage, RouteReceipt } from '@/channels/types'
 
 import { describeError } from '../../describe-error'
+import { canonicalGithubRepo } from '../../github-repo'
 import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { followupInstruction } from './inbound'
+import type { PendingReview, PendingReviewStore } from './pending-review-store'
 import {
   DEFAULT_RECONCILE_COOLDOWN_MS,
   type ReconcileCooldownStore,
@@ -48,6 +52,7 @@ export type ReconcileOpenPrsOptions = {
   // Omitted in tests that assert the raw replay decision.
   cooldownStore?: ReconcileCooldownStore
   cooldownMs?: number
+  pendingStore?: PendingReviewStore
   // Under review.on 'opened', only PRs created at or after this instant (epoch
   // ms) are replayed. Reconcile catches webhooks missed since the adapter was
   // last alive; without a bound, adding a repo would review its whole backlog.
@@ -71,6 +76,146 @@ export type ReconcileOpenPrsOptions = {
 export type ReconcileOutcome = { repo: string; scanned: number; replayed: number } | { repo: string; error: string }
 
 const BOT_LOGIN_SUFFIX = '[bot]'
+
+const pendingPullSchema = z.object({
+  number: z.number(),
+  id: z.number(),
+  state: z.enum(['open', 'closed']),
+  draft: z.boolean(),
+  title: z.string(),
+  user: z.object({ login: z.string(), id: z.number(), type: z.string() }),
+  head: z.object({ sha: z.string(), ref: z.string().optional() }),
+  base: z.object({ ref: z.string().optional() }).optional(),
+  updated_at: z.string().optional(),
+})
+
+const submittedReviewsSchema = z.array(
+  z.object({
+    state: z.string(),
+    commit_id: z.string().nullable(),
+    submitted_at: z.string().nullable(),
+    user: z.object({ login: z.string(), type: z.string() }).nullable(),
+  }),
+)
+
+// This path deliberately does not consult the scan age or launch cooldown. Each
+// boot needs a fresh identity: the previous admission may be the interrupted one.
+export async function replayPendingReviews(
+  options: ReconcileOpenPrsOptions & { pendingStore: PendingReviewStore; replayId: string },
+): Promise<void> {
+  if (options.reviewOn === 'off' || options.selfLogin === null) return
+  const repos = new Set(options.repos.map(canonicalGithubRepo))
+  const fetchImpl = options.fetchImpl ?? fetch
+  for (const entry of await options.pendingStore.list()) {
+    if (options.isCancelled?.() === true) return
+    if (!repos.has(canonicalGithubRepo(entry.repo))) continue
+    try {
+      const target = parseRepo(entry.repo)
+      if (target === null) continue
+      const token = await options.token({ repoSlug: entry.repo })
+      const url = `${GITHUB_API_BASE}/repos/${target.owner}/${target.repo}/pulls/${entry.prNumber}`
+      const response = await fetchImpl(url, { headers: githubJsonHeaders(token) })
+      if (!response.ok) throw new Error(`GitHub pending pull ${response.status}`)
+      const row = pendingPullSchema.parse(await response.json())
+      if (options.isCancelled?.() === true) return
+      if (row.state === 'closed' || row.draft) {
+        await options.pendingStore.clear(entry.repo, entry.prNumber, entry)
+        continue
+      }
+      // A submission can succeed remotely just before a crash, without either
+      // the local completion callback or the self-review webhook being saved.
+      let reviewUrl: string | null = `${url}/reviews?per_page=100`
+      let done = false
+      while (reviewUrl !== null && !done) {
+        const reviews = await fetchImpl(reviewUrl, { headers: githubJsonHeaders(token) })
+        if (!reviews.ok) throw new Error(`GitHub pending reviews ${reviews.status}`)
+        for (const review of submittedReviewsSchema.parse(await reviews.json())) {
+          if (
+            review.user === null ||
+            review.state === 'PENDING' ||
+            review.submitted_at === null ||
+            review.commit_id === null
+          )
+            continue
+          if (!isSelfLogin(review.user.login, review.user.type === 'Bot', options.selfLogin)) continue
+          if (
+            Date.parse(review.submitted_at) < Math.floor(entry.admittedAt / 1000) * 1000 ||
+            !Number.isFinite(Date.parse(review.submitted_at))
+          )
+            continue
+          if (await pendingHeadCovered(entry, review.commit_id, token, fetchImpl)) {
+            done = true
+            break
+          }
+        }
+        reviewUrl = nextLink(reviews.headers.get('link'))
+      }
+      if (options.isCancelled?.() === true) return
+      if (done) {
+        await options.pendingStore.clear(entry.repo, entry.prNumber, entry)
+        continue
+      }
+      // A concurrent live admission may have advanced this obligation while the
+      // API reads were in flight. Its live turn owns the newer head.
+      const latest = (await options.pendingStore.list()).find(
+        (p) => canonicalGithubRepo(p.repo) === canonicalGithubRepo(entry.repo) && p.prNumber === entry.prNumber,
+      )
+      if (latest?.headSha !== entry.headSha || latest.admittedAt !== entry.admittedAt) continue
+      const pr = parsePrRow(row)
+      if (pr === null || pr.id !== entry.prId) continue
+      if (options.isCancelled?.() === true) return
+      await options.route(
+        buildSyntheticInbound(
+          pr,
+          target,
+          entry.kind,
+          options.generateReviewRoundId ?? randomUUID,
+          `boot-${options.replayId}`,
+        ),
+      )
+    } catch (error) {
+      options.logger.warn(
+        `[github] pending review ${entry.repo}#${entry.prNumber} replay failed: ${describeError(error)}`,
+      )
+    }
+  }
+}
+
+// Any submitted state completes logged work, but an old-head review must not
+// erase a newer push. Compare ancestry only when the SHAs differ.
+export async function completePendingReview(
+  store: PendingReviewStore,
+  submitted: { repo: string; prNumber: number; headSha: string; submittedAt: number },
+  token: (context?: GithubAuthContext) => Promise<string>,
+  fetchImpl: typeof fetch,
+): Promise<void> {
+  const entry = (await store.list()).find(
+    (p) => canonicalGithubRepo(p.repo) === canonicalGithubRepo(submitted.repo) && p.prNumber === submitted.prNumber,
+  )
+  if (entry === undefined || submitted.submittedAt < Math.floor(entry.admittedAt / 1000) * 1000) return
+  if (
+    entry.headSha === submitted.headSha ||
+    (await pendingHeadCovered(entry, submitted.headSha, await token({ repoSlug: submitted.repo }), fetchImpl))
+  ) {
+    await store.clear(entry.repo, entry.prNumber, entry)
+  }
+}
+
+async function pendingHeadCovered(
+  entry: PendingReview,
+  headSha: string,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
+  if (entry.headSha === headSha) return true
+  const response = await fetchImpl(
+    `${GITHUB_API_BASE}/repos/${entry.repo}/compare/${encodeURIComponent(entry.headSha)}...${encodeURIComponent(headSha)}`,
+    { headers: githubJsonHeaders(token) },
+  )
+  if (!response.ok) throw new Error(`GitHub pending head comparison ${response.status}`)
+  const comparison = z.object({ status: z.string() }).parse(await response.json())
+  return comparison.status === 'ahead' || comparison.status === 'identical'
+}
 
 export async function reconcileOpenPrs(options: ReconcileOpenPrsOptions): Promise<ReconcileOutcome[]> {
   // `off` disables code review entirely, so there is nothing to catch up on.
@@ -120,6 +265,9 @@ async function reconcileRepo(
 
   let replayed = 0
   for (const pr of prs) {
+    // Logged work is retried separately on boot, even when outside the scan
+    // window. Never race it with a periodic scan while its review is in flight.
+    if (options.pendingStore?.has(repo, pr.number)) continue
     const kind = await prReplayKind({ pr, options, target, token, selfLogin, decoyLogin, fetchImpl })
     if (kind === null) continue
     if (options.isCancelled?.() === true) return { repo, scanned: prs.length, replayed }
@@ -295,7 +443,7 @@ function buildSyntheticInbound(
   target: RepoTarget,
   kind: ReplayKind,
   generateReviewRoundId: () => string,
-  window: number | null,
+  window: number | string | null,
 ): InboundMessage {
   const branchSegment = pr.headRef !== null && pr.baseRef !== null ? ` Branch: ${pr.headRef} → ${pr.baseRef}.` : ''
   const text =
@@ -320,6 +468,7 @@ function buildSyntheticInbound(
     thread: null,
     text,
     externalMessageId,
+    ...(pr.headSha !== null ? { githubPendingReview: { prId: pr.id, headSha: pr.headSha, kind } } : {}),
     // A re-review must land a fresh blocking verdict at the new head, which the
     // verdict coordinator allows over a standing CHANGES_REQUESTED only inside a
     // current-head push round, exactly like the live push follow-up's.

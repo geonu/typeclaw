@@ -35,7 +35,7 @@ export function createGithubReviewSubmitter(deps: {
     state: VerifiedReviewState
     reviewId: number
     comments: readonly ReviewFinding[]
-  }) => void
+  }) => void | Promise<void>
   fetchImpl?: typeof fetch
 }): ReviewSubmitter {
   const fetchImpl = deps.fetchImpl ?? fetch
@@ -90,7 +90,7 @@ export function createGithubReviewSubmitter(deps: {
     if (!posted.ok) return posted
     const verified = await verifyReview(fetchImpl, token, target, posted.reviewId, event)
     if (!verified.ok) return { ...verified, submitted: true }
-    deps.onReviewPosted?.({
+    await deps.onReviewPosted?.({
       repo: `${target.owner}/${target.repo}`,
       prNumber: target.prNumber,
       headSha: stable.headSha,

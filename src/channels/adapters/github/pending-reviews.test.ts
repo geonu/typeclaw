@@ -1,0 +1,353 @@
+import { afterEach, expect, test } from 'bun:test'
+import { createHmac } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { SessionManager } from '@earendil-works/pi-coding-agent'
+
+import { createSessionWithDispose } from '@/agent'
+import { createRecoveryNotice } from '@/channels/recovery-notice'
+import { createChannelRouter } from '@/channels/router'
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST, defaultHistoryConfig, type GithubAdapterConfig } from '@/channels/schema'
+import type { InboundMessage, RouteReceipt } from '@/channels/types'
+
+import { createGithubAdapter } from './index'
+import { loadPendingReviewStore, type PendingReview } from './pending-review-store'
+import { loadReconcileCooldownStore } from './reconcile-cooldown-store'
+import { completePendingReview, reconcileOpenPrs, replayPendingReviews } from './reconcile-open-prs'
+
+const cleanups: Array<() => Promise<void>> = []
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+})
+
+const pending: PendingReview = {
+  repo: 'acme/widgets',
+  prNumber: 7,
+  prId: 700,
+  kind: 'review',
+  headSha: 'head-one',
+  admittedAt: 1,
+}
+const logger = { info: () => {}, warn: () => {}, error: () => {} }
+const pull = {
+  id: 700,
+  number: 7,
+  title: 'A change',
+  state: 'open',
+  draft: false,
+  user: { login: 'alice', id: 10, type: 'User' },
+  head: { sha: 'head-one', ref: 'feature' },
+  base: { ref: 'main' },
+  created_at: '2020-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
+
+async function fixture() {
+  const dir = await mkdtemp(join(tmpdir(), 'github-pending-reviews-'))
+  const store = await loadPendingReviewStore(dir, logger)
+  const calls: string[] = []
+  const reviews: Array<Record<string, unknown>> = []
+  const currentPull = { ...pull }
+  let comparison = 'behind'
+  const fetchImpl = Object.assign(
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.endsWith('/user')) return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/compare/')) return Response.json({ status: comparison })
+      if (url.endsWith('/reviews/123')) return Response.json({ id: 123, state: 'COMMENTED' })
+      if (url.endsWith('/reviews') && init?.method === 'POST') return Response.json({ id: 123 })
+      if (url.includes('/reviews?')) return Response.json(reviews)
+      if (url.includes('/files?')) return Response.json([])
+      if (url.endsWith('/pulls/7')) return Response.json(currentPull)
+      if (url.includes('/pulls?')) return Response.json([pull, { ...pull, id: 800, number: 8 }])
+      if (url.endsWith('/graphql'))
+        return Response.json({
+          data: {
+            repository: {
+              pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            },
+          },
+        })
+      throw new Error(`Unexpected request: ${url}`)
+    },
+    { preconnect: () => {} },
+  )
+  const config: GithubAdapterConfig & {
+    enabled: boolean
+    engagement: { trigger: Array<'mention'>; stickiness: 'off' }
+    history: ReturnType<typeof defaultHistoryConfig>
+  } = {
+    enabled: true,
+    engagement: { trigger: ['mention'], stickiness: 'off' },
+    history: defaultHistoryConfig(),
+    repos: ['acme/widgets'],
+    eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+    webhookPort: 0,
+    review: { on: 'opened', approve: true, check: false },
+  }
+  const router = createChannelRouter({
+    agentDir: dir,
+    configForAdapter: () => config,
+    logger,
+    createSessionForChannel: async () => {
+      const session = await createSessionWithDispose({
+        sessionManager: SessionManager.create(dir, join(dir, 'sessions')),
+        systemPromptOverride: 'Use channel tools.',
+        tools: [],
+        customTools: [],
+      })
+      session.session.prompt = async () => {}
+      return { ...session, sessionId: session.session.sessionId }
+    },
+  })
+  const routed: InboundMessage[] = []
+  let routeSignal = Promise.withResolvers<RouteReceipt>()
+  const route = router.route.bind(router)
+  router.route = async (message, onAdmitted) => {
+    const receipt = await route(message, onAdmitted)
+    routed.push(message)
+    routeSignal.resolve(receipt)
+    return receipt
+  }
+  let handler: ((req: Request) => Promise<Response>) | undefined
+  const adapter = createGithubAdapter({
+    router,
+    agentDir: dir,
+    configRef: () => config,
+    logger,
+    fetchImpl,
+    secrets: { auth: { type: 'pat', token: { value: 'test-token' } }, webhookSecret: { value: 'test-secret' } },
+    httpListenImpl: (_port, callback) => {
+      handler = callback
+      return { stop: async () => {} }
+    },
+    tokenRefreshIntervalMs: 0,
+    deliveryRecoveryIntervalMs: 0,
+    reconcileIntervalMs: 0,
+  })
+  cleanups.push(async () => {
+    await adapter.stop()
+    await router.stop()
+    await rm(dir, { recursive: true, force: true })
+  })
+  return {
+    dir,
+    store,
+    router,
+    adapter,
+    config,
+    fetchImpl,
+    calls,
+    reviews,
+    pull: currentPull,
+    routed,
+    setComparison: (status: string) => {
+      comparison = status
+    },
+    nextRoute: () => {
+      routeSignal = Promise.withResolvers<RouteReceipt>()
+      return routeSignal.promise
+    },
+    deliver: async (action: string, event = 'pull_request', extra: Record<string, unknown> = {}) => {
+      if (handler === undefined) throw new Error('Adapter not listening')
+      const body = JSON.stringify({
+        action,
+        repository: { name: 'widgets', owner: { login: 'acme' } },
+        pull_request: pull,
+        sender: { login: 'alice', id: 10, type: 'User' },
+        ...extra,
+      })
+      return handler(
+        new Request('https://example.com/github', {
+          method: 'POST',
+          body,
+          headers: {
+            'x-github-event': event,
+            'x-github-delivery': `${event}-${action}`,
+            'x-hub-signature-256': `sha256=${createHmac('sha256', 'test-secret').update(body).digest('hex')}`,
+          },
+        }),
+      )
+    },
+  }
+}
+
+test.each(['opened', 'ready_for_review', 'review_requested'])('logs an admitted live %s trigger', async (action) => {
+  const f = await fixture()
+  await f.adapter.start()
+  const admitted = f.nextRoute()
+  await f.deliver(action, 'pull_request', { requested_reviewer: { login: 'bot', id: 1, type: 'User' } })
+  expect((await admitted).kind).toBe('accepted')
+  expect(f.routed[0]?.eventKind).toBe(`pull_request:${action}`)
+  expect(await f.store.list()).toMatchObject([
+    { repo: pending.repo, prId: 700, prNumber: 7, kind: 'review', headSha: 'head-one' },
+  ])
+})
+
+test('logs an admitted synchronize blocking re-review', async () => {
+  const f = await fixture()
+  f.reviews.push({ id: 5, state: 'CHANGES_REQUESTED', commit_id: 'old-head', user: { login: 'bot', type: 'User' } })
+  await f.adapter.start()
+  const admitted = f.nextRoute()
+  await f.deliver('synchronize')
+  expect((await admitted).kind).toBe('accepted')
+  expect(f.routed[0]?.eventKind).toBe('pull_request:synchronize:review-followup')
+  expect(await f.store.list()).toMatchObject([{ kind: 'rereview', headSha: 'head-one', prId: 700 }])
+})
+
+test.each(['closed', 'converted_to_draft'])('clears pending work on %s, even without a live turn', async (action) => {
+  const f = await fixture()
+  await f.adapter.start()
+  await f.store.record(pending)
+  await f.deliver(action)
+  expect(await f.store.list()).toEqual([])
+})
+
+test('clears pending work through the registered review submitter before it returns', async () => {
+  const f = await fixture()
+  await f.adapter.start()
+  await f.store.record(pending)
+  const result = await f.router.submitReview({
+    adapter: 'github',
+    workspace: 'acme/widgets',
+    chat: 'pr:7',
+    event: 'COMMENT',
+    body: 'Reviewed',
+    comments: [],
+  })
+  expect(result.ok).toBe(true)
+  expect(await f.store.list()).toEqual([])
+})
+
+test.each(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'])(
+  'clears pending work on the bot submitted %s webhook outside the conversational allowlist',
+  async (state) => {
+    const f = await fixture()
+    await f.adapter.start()
+    await f.store.record(pending)
+    f.config.eventAllowlist = []
+    await f.deliver('submitted', 'pull_request_review', {
+      review: {
+        id: 123,
+        state,
+        commit_id: 'head-one',
+        submitted_at: '2026-01-01T00:00:00Z',
+        user: { login: 'bot', id: 1, type: 'User' },
+      },
+    })
+    expect(await f.store.list()).toEqual([])
+    expect(f.routed).toEqual([])
+  },
+)
+
+test('older-head completion preserves pending work while a descendant review clears it', async () => {
+  const f = await fixture()
+  await f.store.record(pending)
+  const submitted = { repo: pending.repo, prNumber: 7, headSha: 'different-head', submittedAt: 100 }
+  await completePendingReview(f.store, submitted, async () => 'test-token', f.fetchImpl)
+  expect(await f.store.list()).toEqual([pending])
+  f.setComparison('ahead')
+  await completePendingReview(f.store, submitted, async () => 'test-token', f.fetchImpl)
+  expect(await f.store.list()).toEqual([])
+})
+
+test.each(['review', 'rereview'] as const)(
+  'boot retries a logged old %s despite cooldown, but not unlogged backlog, without a restart notice',
+  async (kind) => {
+    const f = await fixture()
+    await f.store.record({ ...pending, kind })
+    const cooldown = await loadReconcileCooldownStore(f.dir, logger)
+    await cooldown.markReplayed(pending.repo, pending.prId, { now: Date.now(), cooldownMs: 86_400_000 })
+    let admitted = f.nextRoute()
+    await f.adapter.start()
+    expect((await admitted).kind).toBe('accepted')
+    const first = f.routed[0]
+    await f.adapter.stop()
+    admitted = f.nextRoute()
+    await f.adapter.start()
+    expect((await admitted).kind).toBe('accepted')
+    expect(f.routed.map((m) => m.chat)).toEqual(['pr:7', 'pr:7'])
+    expect(f.routed[1]?.externalMessageId).not.toBe(first?.externalMessageId)
+    if (kind === 'rereview') expect(f.routed[1]?.githubReviewRound).toMatchObject({ kind: 'push', headSha: 'head-one' })
+    const scanRoutes: string[] = []
+    await reconcileOpenPrs({
+      repos: [pending.repo],
+      reviewOn: 'opened',
+      selfLogin: 'bot',
+      authType: 'pat',
+      token: async () => 'test-token',
+      fetchImpl: f.fetchImpl,
+      logger,
+      pendingStore: f.store,
+      createdSince: Date.now(),
+      includeHeldReviews: true,
+      route: async (message) => {
+        scanRoutes.push(message.chat)
+        return { kind: 'observed' }
+      },
+    })
+    expect(scanRoutes).toEqual([])
+    const notice = createRecoveryNotice({
+      target: { adapter: 'github', workspace: pending.repo, chat: 'pr:7', thread: null },
+      accountIdentity: 'github:1',
+      principal: { kind: 'channel', adapter: 'github', workspace: pending.repo, chat: 'pr:7' },
+      covers: [{ store: 'inbound', id: 'test-input', generation: 1 }],
+      recoveryGeneration: 'boot',
+      transferId: 'test',
+    })
+    expect(f.router.recoveryRedelivery?.(notice, ['pull_request:synchronize:review-followup'])).toBe('redelivered')
+    expect(f.router.recoveryRedelivery?.(notice, ['pull_request:reconcile:rereview'])).toBe('redelivered')
+    expect(f.router.recoveryRedelivery?.(notice, ['issue_comment:created'])).toBe('not-redelivered')
+  },
+)
+
+test.each(['closed', 'draft'])('boot drops a logged PR that is now %s', async (status) => {
+  const f = await fixture()
+  await f.store.record(pending)
+  f.pull.state = status === 'closed' ? 'closed' : 'open'
+  f.pull.draft = status === 'draft'
+  await replayPendingReviews({
+    repos: [pending.repo],
+    reviewOn: 'opened',
+    selfLogin: 'bot',
+    authType: 'pat',
+    token: async () => 'test-token',
+    fetchImpl: f.fetchImpl,
+    logger,
+    pendingStore: f.store,
+    replayId: 'test-boot',
+    route: async () => {
+      throw new Error('Closed or draft work must not replay')
+    },
+  })
+  expect(await f.store.list()).toEqual([])
+})
+
+test('boot drops work already reviewed remotely without replaying it', async () => {
+  const f = await fixture()
+  await f.store.record(pending)
+  f.reviews.push({
+    state: 'COMMENTED',
+    commit_id: pending.headSha,
+    submitted_at: '2026-01-01T00:00:00Z',
+    user: { login: 'bot', type: 'User' },
+  })
+  await replayPendingReviews({
+    repos: [pending.repo],
+    reviewOn: 'opened',
+    selfLogin: 'bot',
+    authType: 'pat',
+    token: async () => 'test-token',
+    fetchImpl: f.fetchImpl,
+    logger,
+    pendingStore: f.store,
+    replayId: 'test-boot',
+    route: async () => {
+      throw new Error('Completed work must not replay')
+    },
+  })
+  expect(await f.store.list()).toEqual([])
+})
