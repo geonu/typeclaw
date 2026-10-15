@@ -214,6 +214,36 @@ describe('coding inference broker', () => {
     for (const canary of [CANARY, REFRESH, 'rotated-canary']) expect(reply.text).not.toContain(canary)
   })
 
+  test('Codex streams a 2xx upstream response that omits Content-Type as SSE', async () => {
+    const broker = await fixture(
+      (_req, res) => {
+        res.writeHead(200)
+        res.end('data: {"type":"response.completed"}\n\n')
+      },
+      true,
+      'openai-codex',
+    )
+    const reply = await send(broker, '/v1/responses')
+    expect(reply.status).toBe(200)
+    expect(reply.headers['content-type']).toBe('text/event-stream')
+    expect(reply.text).toContain('response.completed')
+  })
+
+  test('Codex still rejects a 2xx upstream response with a non-JSON, non-SSE Content-Type', async () => {
+    const broker = await fixture(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/html' })
+        res.end(`<html>${CANARY}</html>`)
+      },
+      true,
+      'openai-codex',
+    )
+    const reply = await send(broker, '/v1/responses')
+    expect(reply.status).toBe(502)
+    expect(reply.text).toContain('unsupported_response')
+    expect(reply.text).not.toContain(CANARY)
+  })
+
   test.each([302, 401, 429, 500])(
     'Codex normalizes upstream %s without reflecting auth or redirect headers',
     async (status) => {
@@ -344,7 +374,9 @@ describe('coding inference broker', () => {
     socket.destroy()
     expect(reply).toMatch(/HTTP\/1.1 (400|405)/)
     expect(outbound).toBe(0)
-    expect((await send(broker, provider === 'anthropic' ? '/v1/messages' : '/v1/responses')).status).toBe(502)
+    expect((await send(broker, provider === 'anthropic' ? '/v1/messages' : '/v1/responses')).status).toBe(
+      provider === 'anthropic' ? 502 : 200,
+    )
     expect(outbound).toBe(1)
   })
 
