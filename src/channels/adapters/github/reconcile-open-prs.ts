@@ -48,6 +48,10 @@ export type ReconcileOpenPrsOptions = {
   // Omitted in tests that assert the raw replay decision.
   cooldownStore?: ReconcileCooldownStore
   cooldownMs?: number
+  // Under review.on 'opened', only PRs created within this window are replayed.
+  // Reconcile catches recently missed webhooks; without a bound, adding a repo
+  // would review its entire open backlog.
+  maxPrAgeMs?: number
   // Also replay PRs where the bot's standing CHANGES_REQUESTED predates the
   // current head: a push follow-up a restart killed (or whose synchronize
   // delivery was lost) is never re-sent, so the block would hold until a human
@@ -67,6 +71,7 @@ export type ReconcileOpenPrsOptions = {
 export type ReconcileOutcome = { repo: string; scanned: number; replayed: number } | { repo: string; error: string }
 
 const BOT_LOGIN_SUFFIX = '[bot]'
+export const DEFAULT_RECONCILE_MAX_PR_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export async function reconcileOpenPrs(options: ReconcileOpenPrsOptions): Promise<ReconcileOutcome[]> {
   // `off` disables code review entirely, so there is nothing to catch up on.
@@ -246,7 +251,15 @@ async function prReplayKind(input: {
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
-  return !pr.draft && !(await selfReviews()).reviewed ? 'review' : null
+  if (pr.draft || isOlderThanReplayWindow(pr, options)) return null
+  return (await selfReviews()).reviewed ? null : 'review'
+}
+
+function isOlderThanReplayWindow(pr: OpenPr, options: ReconcileOpenPrsOptions): boolean {
+  const createdAt = Date.parse(pr.createdAt)
+  if (Number.isNaN(createdAt)) return false
+  const now = (options.now ?? Date.now)()
+  return now - createdAt > (options.maxPrAgeMs ?? DEFAULT_RECONCILE_MAX_PR_AGE_MS)
 }
 
 async function isTeamReviewRequestedFromSelf(
@@ -333,6 +346,7 @@ type OpenPr = {
   headSha: string | null
   baseRef: string | null
   updatedAt: string
+  createdAt: string
   requestedReviewerLogins: string[]
   requestedTeamSlugs: string[]
 }
@@ -452,6 +466,7 @@ type PrRow = {
   title?: unknown
   draft?: unknown
   updated_at?: unknown
+  created_at?: unknown
   user?: { login?: unknown; id?: unknown; type?: unknown }
   head?: { ref?: unknown; sha?: unknown }
   base?: { ref?: unknown }
@@ -478,6 +493,7 @@ function parsePrRow(row: PrRow): OpenPr | null {
     headSha: typeof row.head?.sha === 'string' ? row.head.sha : null,
     baseRef: typeof row.base?.ref === 'string' ? row.base.ref : null,
     updatedAt: typeof row.updated_at === 'string' ? row.updated_at : '',
+    createdAt: typeof row.created_at === 'string' ? row.created_at : '',
     requestedReviewerLogins: (row.requested_reviewers ?? []).flatMap((r) =>
       typeof r.login === 'string' ? [r.login] : [],
     ),

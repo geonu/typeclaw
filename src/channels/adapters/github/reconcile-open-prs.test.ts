@@ -29,6 +29,7 @@ type PrFixture = {
   headRef?: string
   baseRef?: string
   updatedAt?: string
+  createdAt?: string
   requestedReviewers?: string[]
   requestedTeams?: string[]
   selfReviewed?: boolean
@@ -45,6 +46,7 @@ function prJson(pr: PrFixture): Record<string, unknown> {
     title: pr.title ?? `PR ${pr.number}`,
     draft: pr.draft ?? false,
     updated_at: pr.updatedAt ?? '2026-01-01T00:00:00Z',
+    ...(pr.createdAt !== undefined ? { created_at: pr.createdAt } : {}),
     user: { login: pr.authorLogin ?? 'alice', id: pr.authorId ?? 10, type: pr.authorType ?? 'User' },
     head: { ref: pr.headRef ?? 'feature', sha: pr.headSha ?? 'head-sha' },
     base: { ref: pr.baseRef ?? 'main' },
@@ -126,6 +128,22 @@ describe('reconcileOpenPrs', () => {
     const routed: InboundMessage[] = []
     await reconcileOpenPrs(baseOptions({ routed, fetchImpl: fakeGithub([{ number: 7, id: 700, draft: true }]) }))
     expect(routed).toHaveLength(0)
+  })
+
+  test("reviewOn 'opened' skips a PR created before the replay window and replays a recent one", async () => {
+    // given an old backlog PR and one opened a day ago
+    const routed: InboundMessage[] = []
+    const now = Date.parse('2026-10-15T00:00:00Z')
+    const prs = [
+      { number: 7, id: 700, createdAt: '2021-05-01T00:00:00Z' },
+      { number: 8, id: 800, createdAt: '2026-10-14T00:00:00Z' },
+    ]
+
+    // when reconcile runs
+    await reconcileOpenPrs(baseOptions({ routed, now: () => now, fetchImpl: fakeGithub(prs) }))
+
+    // then only the recent PR is replayed
+    expect(routed.map((m) => m.chat)).toEqual(['pr:8'])
   })
 
   test("reviewOn 'opened' skips a PR the bot already reviewed", async () => {
@@ -283,6 +301,19 @@ describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
       headSha: 'new-head',
       carrierThread: null,
     })
+  })
+
+  test('replays a held re-review even when the PR predates the replay window', async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        includeHeldReviews: true,
+        now: () => Date.parse('2026-10-15T00:00:00Z'),
+        fetchImpl: fakeGithub([held({ createdAt: '2021-05-01T00:00:00Z' })]),
+      }),
+    )
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
   })
 
   describe('formal verdict submission', () => {
