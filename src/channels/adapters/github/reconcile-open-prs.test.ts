@@ -130,19 +130,20 @@ describe('reconcileOpenPrs', () => {
     expect(routed).toHaveLength(0)
   })
 
-  test("reviewOn 'opened' skips a PR created before the replay window and replays a recent one", async () => {
-    // given an old backlog PR and one opened a day ago
+  test("reviewOn 'opened' replays only PRs created since the adapter was last alive", async () => {
+    // given a PR opened before the last shutdown and one opened during downtime
     const routed: InboundMessage[] = []
-    const now = Date.parse('2026-10-15T00:00:00Z')
     const prs = [
-      { number: 7, id: 700, createdAt: '2021-05-01T00:00:00Z' },
-      { number: 8, id: 800, createdAt: '2026-10-14T00:00:00Z' },
+      { number: 7, id: 700, createdAt: '2026-10-14T23:00:00Z' },
+      { number: 8, id: 800, createdAt: '2026-10-15T01:00:00Z' },
     ]
 
-    // when reconcile runs
-    await reconcileOpenPrs(baseOptions({ routed, now: () => now, fetchImpl: fakeGithub(prs) }))
+    // when reconcile runs bounded by the last-alive instant
+    await reconcileOpenPrs(
+      baseOptions({ routed, createdSince: Date.parse('2026-10-15T00:00:00Z'), fetchImpl: fakeGithub(prs) }),
+    )
 
-    // then only the recent PR is replayed
+    // then only the downtime PR is replayed
     expect(routed.map((m) => m.chat)).toEqual(['pr:8'])
   })
 
@@ -309,7 +310,7 @@ describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
       baseOptions({
         routed,
         includeHeldReviews: true,
-        now: () => Date.parse('2026-10-15T00:00:00Z'),
+        createdSince: Date.parse('2026-10-15T00:00:00Z'),
         fetchImpl: fakeGithub([held({ createdAt: '2021-05-01T00:00:00Z' })]),
       }),
     )

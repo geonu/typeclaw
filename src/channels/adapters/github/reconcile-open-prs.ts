@@ -48,10 +48,10 @@ export type ReconcileOpenPrsOptions = {
   // Omitted in tests that assert the raw replay decision.
   cooldownStore?: ReconcileCooldownStore
   cooldownMs?: number
-  // Under review.on 'opened', only PRs created within this window are replayed.
-  // Reconcile catches recently missed webhooks; without a bound, adding a repo
-  // would review its entire open backlog.
-  maxPrAgeMs?: number
+  // Under review.on 'opened', only PRs created at or after this instant (epoch
+  // ms) are replayed. Reconcile catches webhooks missed since the adapter was
+  // last alive; without a bound, adding a repo would review its whole backlog.
+  createdSince?: number
   // Also replay PRs where the bot's standing CHANGES_REQUESTED predates the
   // current head: a push follow-up a restart killed (or whose synchronize
   // delivery was lost) is never re-sent, so the block would hold until a human
@@ -71,7 +71,6 @@ export type ReconcileOpenPrsOptions = {
 export type ReconcileOutcome = { repo: string; scanned: number; replayed: number } | { repo: string; error: string }
 
 const BOT_LOGIN_SUFFIX = '[bot]'
-export const DEFAULT_RECONCILE_MAX_PR_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export async function reconcileOpenPrs(options: ReconcileOpenPrsOptions): Promise<ReconcileOutcome[]> {
   // `off` disables code review entirely, so there is nothing to catch up on.
@@ -253,15 +252,14 @@ async function prReplayKind(input: {
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
-  if (pr.draft || isOlderThanReplayWindow(pr, options)) return null
+  if (pr.draft || createdBeforeReplayWindow(pr, options.createdSince)) return null
   return (await selfReviews()).reviewed ? null : 'review'
 }
 
-function isOlderThanReplayWindow(pr: OpenPr, options: ReconcileOpenPrsOptions): boolean {
+function createdBeforeReplayWindow(pr: OpenPr, createdSince: number | undefined): boolean {
+  if (createdSince === undefined) return false
   const createdAt = Date.parse(pr.createdAt)
-  if (Number.isNaN(createdAt)) return false
-  const now = (options.now ?? Date.now)()
-  return now - createdAt > (options.maxPrAgeMs ?? DEFAULT_RECONCILE_MAX_PR_AGE_MS)
+  return !Number.isNaN(createdAt) && createdAt < createdSince
 }
 
 async function isTeamReviewRequestedFromSelf(
