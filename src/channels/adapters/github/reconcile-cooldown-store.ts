@@ -53,6 +53,9 @@ export type ReconcileMarker = {
   // reservations had owners omit it: they keep their cooldown meaning, and no
   // attempt's rollback can remove them.
   replayId?: string
+  // When this PR was first replayed in its current owed streak; carried across
+  // re-reservations so `owesReplay` eligibility expires instead of renewing daily.
+  firstReplayAt?: number
 }
 
 export type ReconcileReplayReservation = {
@@ -97,9 +100,10 @@ export type ReconcileCooldownStore = {
   // can be stale across store instances, so it must not decide a launch; only
   // markReplayed's serialized check against the latest file does.
   isCoolingDown: (repo: string, prId: number, now: number, cooldownMs: number) => boolean
-  // Whether reconcile has replayed this PR within marker retention, i.e. it owes
-  // the PR an unfinished review regardless of the last-alive creation bound.
-  hasMarker: (repo: string, prId: number) => boolean
+  // Whether reconcile first replayed this PR less than MARKER_RETENTION_MS ago,
+  // i.e. it still owes the PR an unfinished review regardless of the last-alive
+  // creation bound. Measured from the first replay, so retries are bounded.
+  owesReplay: (repo: string, prId: number, now: number) => boolean
   // Persists a launch reservation BEFORE the synthetic inbound is routed: a
   // crash between reserving and session creation must not re-trigger a replay
   // on the next restart. Resolves null without launching when the latest
@@ -162,6 +166,8 @@ export async function loadReconcileCooldownStore(
   // Lane-only helpers. `latest` refreshes this instance's view from disk and
   // hands back a working copy; `persist` publishes the copy once it is on disk.
   // A mutation that fails before the rename leaves the file and view unchanged.
+  // Markers a still-unsettled reservation replaced, keyed by its replayId.
+  const supersededMarkers = new Map<string, ReconcileMarker>()
   const latest = async (): Promise<Map<string, ReconcileMarker>> => {
     markers = await readMarkers(path, logger)
     return new Map(markers)
@@ -177,8 +183,10 @@ export async function loadReconcileCooldownStore(
       if (marker === undefined) return false
       return now - marker.lastReplayAt < cooldownMs
     },
-    hasMarker(repo, prId): boolean {
-      return markers.has(markerKey(repo, prId))
+    owesReplay(repo, prId, now): boolean {
+      const marker = markers.get(markerKey(repo, prId))
+      if (marker === undefined) return false
+      return now - (marker.firstReplayAt ?? marker.lastReplayAt) < MARKER_RETENTION_MS
     },
     markReplayed(repo, prId, { now, cooldownMs, isCancelled }): Promise<ReconcileReplayReservation | null> {
       return onFileLane(path, async () => {
@@ -188,9 +196,13 @@ export async function loadReconcileCooldownStore(
         const previous = next.get(key)
         if (previous !== undefined && now - previous.lastReplayAt < cooldownMs) return null
         const replayId = randomUUID()
-        next.set(key, { repo, prId, lastReplayAt: now, replayId })
+        const firstReplayAt = previous !== undefined ? (previous.firstReplayAt ?? previous.lastReplayAt) : now
+        next.set(key, { repo, prId, lastReplayAt: now, replayId, firstReplayAt })
         await persist(next)
-        if (isCancelled?.() !== true) return { replayId }
+        if (isCancelled?.() !== true) {
+          if (previous !== undefined) supersededMarkers.set(replayId, previous)
+          return { replayId }
+        }
         const restored = new Map(next)
         if (previous === undefined) restored.delete(key)
         else restored.set(key, previous)
@@ -206,8 +218,13 @@ export async function loadReconcileCooldownStore(
       return onFileLane(path, async () => {
         const next = await latest()
         const key = markerKey(repo, prId)
+        const superseded = supersededMarkers.get(replayId)
+        supersededMarkers.delete(replayId)
         if (next.get(key)?.replayId !== replayId) return
-        next.delete(key)
+        // Restore the marker this attempt replaced: it may be the PR's only claim
+        // to a retry once the last-alive bound has moved past its creation.
+        if (superseded !== undefined) next.set(key, superseded)
+        else next.delete(key)
         await persist(next)
       })
     },
@@ -289,8 +306,15 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function parseMarker(v: unknown): ReconcileMarker | null {
   if (!isObject(v)) return null
-  const { repo, prId, lastReplayAt, replayId } = v
+  const { repo, prId, lastReplayAt, replayId, firstReplayAt } = v
   if (typeof repo !== 'string' || typeof prId !== 'number' || typeof lastReplayAt !== 'number') return null
-  if (replayId === undefined) return { repo, prId, lastReplayAt }
-  return typeof replayId === 'string' ? { repo, prId, lastReplayAt, replayId } : null
+  if (replayId !== undefined && typeof replayId !== 'string') return null
+  if (firstReplayAt !== undefined && typeof firstReplayAt !== 'number') return null
+  return {
+    repo,
+    prId,
+    lastReplayAt,
+    ...(replayId !== undefined ? { replayId } : {}),
+    ...(firstReplayAt !== undefined ? { firstReplayAt } : {}),
+  }
 }

@@ -279,7 +279,13 @@ describe('ReconcileCooldownStore', () => {
     }
     expect(parsed.version).toBe(1)
     expect(parsed.markers).toContainEqual(legacy)
-    expect(parsed.markers).toContainEqual({ repo: REPO, prId: 701, lastReplayAt: 1_001, replayId: fresh!.replayId })
+    expect(parsed.markers).toContainEqual({
+      repo: REPO,
+      prId: 701,
+      lastReplayAt: 1_001,
+      replayId: fresh!.replayId,
+      firstReplayAt: 1_001,
+    })
 
     // while the intentional unconditional clear still removes it
     await store.clear(REPO, 700)

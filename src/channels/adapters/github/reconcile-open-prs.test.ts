@@ -564,6 +564,57 @@ describe('reconcileOpenPrs cooldown', () => {
     expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
   })
 
+  test('a rejected post-cooldown retry keeps the owed replay so the next pass retries it', async () => {
+    // given an owed PR that predates the last-alive bound
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    const fetchImpl = fakeGithub([{ number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' }])
+    await seedMarker(700, 1_000)
+    const retryAt = 1_000 + WINDOW + 1
+
+    // when the post-cooldown retry is rejected by the router
+    await reconcileOpenPrs(
+      baseOptions({
+        routed: [],
+        route: async () => {
+          throw new Error('router down')
+        },
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => retryAt,
+        fetchImpl,
+      }),
+    )
+
+    // then a reloaded store still lets the next pass retry it
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => retryAt + 1,
+        fetchImpl,
+      }),
+    )
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
+  test('an owed replay first made more than seven days ago no longer bypasses the last-alive bound', async () => {
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    await seedMarker(700, 1_000)
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => 1_000 + 8 * 24 * 60 * 60 * 1000,
+        fetchImpl: fakeGithub([{ number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' }]),
+      }),
+    )
+    expect(routed).toHaveLength(0)
+  })
+
   test('retries a still-unreviewed PR after the cooldown expires', async () => {
     await seedMarker(700, 1_000)
     const routed: InboundMessage[] = []

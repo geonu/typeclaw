@@ -255,7 +255,8 @@ async function prReplayKind(input: {
   if (pr.draft) return null
   // A PR reconcile already replayed stays eligible past the advancing bound: an
   // interrupted replay gets no restart notice, so this pass is its retry path.
-  const owedReplay = options.cooldownStore?.hasMarker(`${target.owner}/${target.repo}`, pr.id) === true
+  const owedReplay =
+    options.cooldownStore?.owesReplay(`${target.owner}/${target.repo}`, pr.id, (options.now ?? Date.now)()) === true
   if (!owedReplay && createdBeforeReplayWindow(pr, options.createdSince)) return null
   return (await selfReviews()).reviewed ? null : 'review'
 }
