@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BackgroundObligationStore } from './background-obligations'
-import { RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from './continuity-types'
 import { RecoveryOutbox } from './recovery-outbox'
 
 const cwd = join(import.meta.dir, '../..')
@@ -159,16 +158,17 @@ if(initial){
   const outbox=new RecoveryOutbox(dir,{epoch:mode});
   await bootBackgroundObligations({inboundJournal:journal,obligations:store,outbox,inventory:new LegacyBackgroundHandoffReader(dir,{processEpoch:mode})});
   if(mode==='receipt-death'){
-    const delivered=outbox.delivered.bind(outbox);
-    outbox.delivered=async(...args)=>{const result=await delivered(...args);if(result)await stopAt();return result};
+    const suppress=outbox.suppress.bind(outbox);
+    outbox.suppress=async(...args)=>{const result=await suppress(...args);if(result)await stopAt();return result};
   }
   const acknowledged=Promise.withResolvers();
-  const acknowledge=store.acknowledgeNotice.bind(store);
-  store.acknowledgeNotice=async(record)=>{await acknowledge(record);acknowledged.resolve()};
+  const suppress=store.suppressNoticeCoverage.bind(store);
+  store.suppressNoticeCoverage=async(...args)=>{await suppress(...args);acknowledged.resolve()};
   const dispatcher=new RecoveryDispatcher(outbox,router,{backgroundObligations:store,inboundJournal:journal,onError:acknowledged.reject});
   await dispatcher.wake();
   if((await store.list()).some(row=>row.phase!=='closed'))await acknowledged.promise;
   await dispatcher.stop();
+  const retirement=new RecoveryDispatcher(outbox,router,{backgroundObligations:store,inboundJournal:journal,onError:acknowledged.reject});await retirement.wake();await retirement.stop();
   if((await store.list()).some(row=>row.phase!=='closed'))throw new Error('unsettled recovery');
   console.log('recovered');
   process.exit(0);
@@ -245,7 +245,9 @@ for (const boundary of [
         const dyingBoot = spawnWorker(dir, 'receipt-death')
         await killAtBoundary(dyingBoot, 'receipt-death')
         const receipts = await new RecoveryOutbox(dir, { epoch: 'inspection' }).list()
-        expect(receipts).toMatchObject([{ state: 'delivered', attempts: 1 }])
+        expect(receipts).toMatchObject([
+          { state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } },
+        ])
         deliveryId = receipts[0]!.deliveryId
       }
       for (const mode of ['repair', 'second-repair']) {
@@ -257,9 +259,12 @@ for (const boundary of [
       }
       const rows = await new BackgroundObligationStore(dir, { epoch: 'inspection' }).list()
       expect(rows).toMatchObject([{ phase: 'closed' }])
-      if (!closed) expect(rows[0]!.outcome?.deliveryId).toBe(deliveryId)
+      if (!closed)
+        expect(rows[0]).toMatchObject({
+          outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only', deliveryId },
+        })
       const posts = await readFile(join(dir, 'posts'), 'utf8').catch(() => '')
-      const expectedPosts = Number(boundary.endsWith('-reply')) + Number(!closed)
+      const expectedPosts = Number(boundary.endsWith('-reply'))
       expect(posts.trim().split('\n').filter(Boolean)).toHaveLength(expectedPosts)
       if (boundary.endsWith('-review')) expect(await readFile(join(dir, 'reviews'), 'utf8')).toBe('APPROVE\n')
       expect(await readFile(join(dir, 'provider-calls'), 'utf8')).toBe(providerCalls)
@@ -280,12 +285,9 @@ for (const boundary of [
       else {
         if (deliveryId === undefined) throw new Error(`${boundary} recorded no delivery receipt before repair`)
         expect(retired.map((record) => [record.deliveryId, record.dispatch.state, record.dispatch.attempts])).toEqual([
-          [deliveryId, 'delivered', 1],
+          [deliveryId, 'suppressed', 0],
         ])
-        // Genuine process death keeps the frozen restart template.
-        expect(JSON.parse(posts.trim().split('\n').at(-1)!).text).toBe(
-          recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
-        )
+        expect(retired[0]!.dispatch.suppression?.reason).toBe('operator-log-only')
       }
     } finally {
       child.kill('SIGKILL')

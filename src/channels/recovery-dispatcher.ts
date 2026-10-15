@@ -1,9 +1,9 @@
 import type { BackgroundObligationStore } from './background-obligations'
-import { recoveryNoticeDisplayText, type RecoveryRecord } from './continuity-types'
+import type { RecoveryRecord } from './continuity-types'
 import type { InboundJournal } from './inbound-journal'
 import type { RecoveryOutbox } from './recovery-outbox'
 import type { ChannelRouter } from './router'
-import { channelKeyId, RecoveryTransportError, type ChannelKey, type RecoveryRedelivery } from './types'
+import { channelKeyId, type ChannelKey, type RecoveryRedelivery } from './types'
 
 // Bounds how long a restart notice waits for an adapter still deciding whether it re-admitted the
 // interrupted work (GitHub's boot reconcile pass), so a stuck pass delays the notice, never loses it.
@@ -165,7 +165,7 @@ export class RecoveryDispatcher {
     // One pass per wake avoids a blocked destination starving another record.
     for (const snapshot of await this.outbox.list()) {
       if (channelKeyId(snapshot.target) !== key || this.stopped) continue
-      let record = await this.outbox.get(snapshot.deliveryId)
+      const record = await this.outbox.get(snapshot.deliveryId)
       const now = this.options.now?.() ?? Date.now()
       if (!record || record.state === 'delivered' || record.state === 'suppressed' || (record.nextAttemptAt ?? 0) > now)
         continue
@@ -185,150 +185,15 @@ export class RecoveryDispatcher {
           await this.suppressRedelivered(record, this.options.inboundJournal)
           continue
         }
+        // Runtime state (restarts, ended turns) is never posted to channel users; the operator log
+        // carries it instead. Closing the coverage keeps boot recovery from re-importing it.
+        await this.suppressRecord(record, 'operator-log-only', crypto.randomUUID())
+        console.log(
+          `[channels] interrupted request in ${key} not re-answered (${record.cause ?? 'restart'}); no notice posted to the channel`,
+        )
       } catch (error) {
         this.options.onError?.(error)
         continue
-      }
-      const failure = await this.router.validateRecovery(record).catch((error: unknown) =>
-        error instanceof RecoveryTransportError
-          ? error.failure
-          : {
-              kind: 'transient' as const,
-              safeReason: 'recovery transport unavailable',
-              retryAfter: this.options.consistencyDelayMs ?? 5_000,
-            },
-      )
-      if (failure) {
-        const lease = await this.acquire(record)
-        if (lease) await this.outbox.fail(record.deliveryId, lease, failure)
-        continue
-      }
-      if (record.attempts > 0) {
-        const remaining =
-          record.state === 'leased'
-            ? (record.lease?.acquiredAt ?? 0) + (this.options.consistencyDelayMs ?? 5_000) - now
-            : 0
-        if (remaining > 0) {
-          this.schedule(remaining)
-          continue
-        }
-        // An unavailable history API cannot prove absence. After the bounded
-        // consistency delay we accept an at-least-once duplicate rather than
-        // turning a read outage into permanent loss of the notice.
-        const found = await this.router.reconcileRecovery(record).catch(() => ({ status: 'unknown' as const }))
-        if (found.status === 'found') {
-          const reclaimed = await this.acquire(record)
-          if (!reclaimed) continue
-          await this.outbox.delivered(record.deliveryId, reclaimed, {
-            confirmedAt: now,
-            ...(found.messageId === undefined ? {} : { messageId: found.messageId }),
-            ...(found.messageIds === undefined ? {} : { messageIds: [...found.messageIds] }),
-          })
-          const delivered = await this.outbox.get(record.deliveryId)
-          if (delivered) await this.finish(delivered, true).catch((error) => this.options.onError?.(error))
-          continue
-        }
-      }
-      record = await this.outbox.get(record.deliveryId)
-      if (!record || record.state === 'suppressed' || record.state === 'delivered') continue
-      const lease = await this.acquire(record)
-      if (!lease) continue
-      try {
-        if (record.accountIdentity === 'unbound-legacy' && record.boundAccountIdentity === undefined) {
-          const identity = await this.router.getRecoveryAccountIdentity(record.target.adapter, record.target.workspace)
-          if (identity === undefined) {
-            await this.outbox.fail(record.deliveryId, lease, {
-              kind: 'unavailable',
-              safeReason: 'adapter account is not ready',
-            })
-            continue
-          }
-          if (!(await this.outbox.bindAccount(record.deliveryId, lease, identity))) continue
-          const bound = await this.outbox.get(record.deliveryId)
-          if (!bound) continue
-          record = bound
-        }
-        // Recheck after durable lease and immediately before the remote call.
-        const invalid = await this.router.validateRecovery(record)
-        if (invalid) {
-          await this.outbox.fail(record.deliveryId, lease, invalid)
-          continue
-        }
-        if ((await this.outbox.get(record.deliveryId))?.state === 'suppressed') continue
-        const sendNotice = async () => {
-          if ((await this.validateCoverageInLane(record!)) === 'resolved') {
-            await this.outbox.suppress(record!.deliveryId, 'coverage-resolved', crypto.randomUUID())
-            return undefined
-          }
-          if ((await this.outbox.get(record!.deliveryId))?.state === 'suppressed') return undefined
-          // Begin the call under the source lane, but do not hold it during
-          // transport I/O. /stop can withdraw an already-in-flight notice.
-          return {
-            pending: this.router.send(
-              { ...record!.target, text: recoveryNoticeDisplayText(record!) },
-              {
-                source: 'system',
-                outputKind: 'meta',
-                accounting: 'recovery',
-                deliveryId: record!.deliveryId,
-                coveredIds: record!.covers.map((coverage) => coverage.id),
-                expectedAccountIdentity: record!.boundAccountIdentity ?? record!.accountIdentity,
-              },
-            ),
-          }
-        }
-        const dispatched =
-          this.options.backgroundObligations && record.covers.some((cover) => cover.store !== 'inventory')
-            ? await this.options.backgroundObligations.withTargetLane(record.target, sendNotice)
-            : await sendNotice()
-        if (!dispatched) continue
-        const result = await dispatched.pending
-        if (result.ok) {
-          await this.outbox.delivered(record.deliveryId, lease, {
-            confirmedAt: this.options.now?.() ?? Date.now(),
-            ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
-            ...(result.messageIds === undefined ? {} : { messageIds: [...result.messageIds] }),
-          })
-          const delivered = await this.outbox.get(record.deliveryId)
-          if (delivered) await this.finish(delivered, true).catch((error) => this.options.onError?.(error))
-        } else {
-          if (record.covers.some((cover) => cover.store !== 'inventory')) {
-            this.options.inboundJournal?.assertAvailable()
-            this.options.backgroundObligations?.assertAvailable()
-          }
-          await this.outbox.fail(
-            record.deliveryId,
-            lease,
-            result.recoveryFailure ?? {
-              kind: 'transient',
-              safeReason: 'adapter did not confirm recovery delivery',
-              retryAfter: this.options.consistencyDelayMs ?? 5_000,
-            },
-          )
-        }
-      } catch (error) {
-        if (record.covers.some((cover) => cover.store !== 'inventory')) {
-          try {
-            this.options.inboundJournal?.assertAvailable()
-            this.options.backgroundObligations?.assertAvailable()
-          } catch (frozen) {
-            // Leave the lease untouched: an unreadable source cannot authorize
-            // even retry-state progress. Verified repair can reclaim it later.
-            this.options.onError?.(frozen)
-            continue
-          }
-        }
-        await this.outbox.fail(
-          record.deliveryId,
-          lease,
-          error instanceof RecoveryTransportError
-            ? error.failure
-            : {
-                kind: 'transient',
-                safeReason: 'recovery transport unavailable',
-                retryAfter: this.options.consistencyDelayMs ?? 5_000,
-              },
-        )
       }
     }
   }
@@ -361,24 +226,31 @@ export class RecoveryDispatcher {
         record.sourceParentSessionId === parentSessionId ||
         (record.covers.length > 0 && record.covers.every((coverage) => coverage.parentSessionId === parentSessionId))
       ) {
-        const decisionId = `${parentDecisionId}:${record.deliveryId}`
-        const source = this.options.backgroundObligations
-        const suppress = async () => {
-          if (record.covers.some((cover) => cover.store === 'inbound')) {
-            if (!this.options.inboundJournal) throw new Error('Inbound recovery requires journal authority')
-            await this.options.inboundJournal.suppressNoticeCoverage(record, { decisionId, reason: 'user-stop' })
-          } else if (source) {
-            if (record.covers.some((cover) => cover.store === 'background'))
-              this.options.inboundJournal?.assertAvailable()
-            await source.suppressNoticeCoverage(record, { decisionId, reason: 'user-stop' })
-          }
-        }
-        if (source && record.covers.some((cover) => cover.store !== 'inventory'))
-          await source.withTargetLane(target, suppress)
-        else await suppress()
-        await this.outbox.suppress(record.deliveryId, 'user_stop', decisionId)
+        await this.suppressRecord(record, 'user-stop', `${parentDecisionId}:${record.deliveryId}`, 'user_stop')
       }
     }
+  }
+
+  private async suppressRecord(
+    record: RecoveryRecord,
+    reason: string,
+    decisionId: string,
+    outboxReason = reason,
+  ): Promise<void> {
+    const source = this.options.backgroundObligations
+    const suppress = async () => {
+      if (record.covers.some((cover) => cover.store === 'inbound')) {
+        if (!this.options.inboundJournal) throw new Error('Inbound recovery requires journal authority')
+        await this.options.inboundJournal.suppressNoticeCoverage(record, { decisionId, reason })
+      } else if (source) {
+        if (record.covers.some((cover) => cover.store === 'background')) this.options.inboundJournal?.assertAvailable()
+        await source.suppressNoticeCoverage(record, { decisionId, reason })
+      }
+    }
+    if (source && record.covers.some((cover) => cover.store !== 'inventory'))
+      await source.withTargetLane(record.target, suppress)
+    else await suppress()
+    await this.outbox.suppress(record.deliveryId, outboxReason, decisionId)
   }
 
   async stop(): Promise<void> {

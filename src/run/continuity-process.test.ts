@@ -3,12 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import {
-  LIVE_TURN_ENDED_NOTICE_TEXT,
-  RECOVERY_NOTICE_TEXT,
-  recoveryNoticeDisplayText,
-} from '@/channels/continuity-types'
-import { RecoveryOutbox } from '@/channels/recovery-outbox'
+import type { RecoveryRecord } from '@/channels/continuity-types'
+import type { InboundOutcome, InboundRecord } from '@/channels/inbound-journal'
+import { RecoveryOutbox, type RecoveryRetirement } from '@/channels/recovery-outbox'
 
 // Production composition proof: every boot is a separate process running the
 // real `startAgent` (buildChannelSessionFactory, router, inbound journal,
@@ -33,7 +30,7 @@ const forever = Bun.stdin.text();
 const stopAt = async (name) => { console.log(MARK + JSON.stringify({ boundary: name })); await forever; throw Error('boundary resumed') };
 const record = (file, value) => appendFileSync(dir + '/' + file, JSON.stringify(value) + '\\n');
 const lines = (file) => { try { return readFileSync(dir + '/' + file, 'utf8').split('\\n').filter(Boolean).map((line) => JSON.parse(line)) } catch { return [] } };
-const until = async (label, check, ms = 45_000) => { const end = Date.now() + ms; for (;;) { if (await check()) return; if (Date.now() > end) throw Error('timed out waiting for ' + label); await Bun.sleep(25) } };
+const until = async (label, check, ms = 45_000) => { const end = Date.now() + ms; for (;;) { if (await check()) return; if (Date.now() > end) throw Error('timed out waiting for ' + label); await new Promise(setImmediate) } };
 process.chdir(dir);
 reloadConfig(dir);
 const live = mode === 'live';
@@ -71,15 +68,12 @@ const outbound = async (message) => {
   const options = message.sendOptions ?? {};
   const post = { mode, text: message.text ?? '', accounting: options.accounting ?? 'live-turn', deliveryId: options.deliveryId ?? null, coveredIds: options.coveredIds ?? [] };
   record('posts', post);
-  // Remote success before the local receipt: the ambiguity the RFC permits.
-  if (live && post.accounting === 'recovery' && scenario.startsWith('receipt-')) await stopAt('notice-posted');
   return { ok: true, messageId: 'proof-' + ++sent };
 };
 const recovery = {
   accountIdentity: async () => 'proof-account',
   cachedAccountIdentity: () => 'proof-account',
-  // The controlled platform history: found only when the notice really posted.
-  reconcile: async (notice) => scenario === 'receipt-found' && lines('posts').some((post) => post.deliveryId === notice.deliveryId) ? { status: 'found', messageId: 'reconciled' } : { status: 'unreconcilable' },
+  reconcile: async () => ({ status: 'unreconcilable' }),
 };
 const running = await startAgent({
   port: 0,
@@ -103,7 +97,7 @@ const running = await startAgent({
   },
 });
 const journal = services.inboundJournal, outbox = services.recoveryOutbox;
-const snapshot = async () => ({ rows: journal.list(), outbox: await outbox.list() });
+const snapshot = async () => ({ rows: journal.list(), outbox: await outbox.list(), retired: await outbox.listRetired() });
 const inode = () => { const stats = statSync(journal.path); return { ino: stats.ino, size: stats.size, firstLine: readFileSync(journal.path, 'utf8').split('\\n')[0] } };
 if (scenario === 'maintenance') {
   const replay = async (id, ts) => { const receipt = await router.route(event(id, 'replayed ' + id, ts)); await router.__testing.flushDebounce(key); return receipt };
@@ -136,7 +130,7 @@ if (scenario === 'maintenance') {
   await until('restart recovery acknowledged', () => journal.get(openInput)?.phase === 'closed');
   const before = inode();
   const receipts = [await replay('seed-0', 3000), await replay('seed-1', 3001), await replay('seed-2', 3002), await replay('open-1', 3003)];
-  record('maintenance', { mode, before, after: inode(), receipts });
+  record('maintenance', { mode, before, after: inode(), receipts, outcome: journal.get(openInput)?.outcome });
   await running.stop();
   console.log(MARK + 'recovered');
   process.exit(0);
@@ -145,11 +139,8 @@ if (live) {
   const accepted = await router.route(event('A', ask, 1000));
   record('receipts', { id: 'A', receipt: accepted });
   await router.__testing.flushDebounce(key);
-  // The receipt scenarios die inside the notice POST (see outbound).
-  if (scenario.startsWith('receipt-')) await forever;
-  // A's own logical turn reaches its terminal decision, including delivery of
-  // any live-turn notice by the running dispatcher, before C exists.
-  await until('A terminal decision', () => journal.get(accepted.inputId)?.phase === 'closed');
+  // A closes and its recovery record suppresses before unrelated input C exists.
+  await until('A terminal decision', async () => journal.get(accepted.inputId)?.phase === 'closed' && (await outbox.list()).every((notice) => notice.state === 'suppressed'));
   record('after-a', await snapshot());
   const thanks = await router.route(event('C', 'Thanks!', 2000));
   record('receipts', { id: 'C', receipt: thanks });
@@ -159,8 +150,8 @@ if (live) {
   await stopAt('live');
 }
 // Polling durable state across a real process boundary: the dispatcher's
-// consistency delay and lane scheduling run on the platform clock.
-await until('recovery settled', async () => (await outbox.list()).every((notice) => notice.state === 'delivered') && journal.list().every((row) => row.phase === 'closed'));
+// durable suppression and lane scheduling run on the platform clock.
+await until('recovery settled', async () => (await outbox.list()).every((notice) => notice.state === 'suppressed') && journal.list().every((row) => row.phase === 'closed'));
 record('boot', { mode, ...(await snapshot()) });
 await running.stop();
 console.log(MARK + 'recovered');
@@ -263,7 +254,7 @@ async function cleanup(agent: { dir: string; home: string }): Promise<void> {
 const PROGRESS = { en: 'Let me check that.', ko: '확인해볼게요.' } as const
 
 for (const language of ['en', 'ko'] as const) {
-  test(`startAgent: progress then NO_REPLY (${language}) ends the live turn with one non-restart notice, survives SIGKILL and two boots`, async () => {
+  test(`startAgent: progress then NO_REPLY (${language}) suppresses recovery without replay across SIGKILL and two boots`, async () => {
     const agent = await newAgent()
     const scenario = `live-ended-${language}`
     try {
@@ -276,14 +267,26 @@ for (const language of ['en', 'ko'] as const) {
       const [a, c] = receipts.map((entry) => entry.receipt.inputId)
       const liveCalls = await jsonl<{ mode: string }>(agent.dir, 'provider-calls')
       const livePosts = await jsonl<Post>(agent.dir, 'posts')
-      // The abandoned request was handed to the running dispatcher and posted
-      // before the unrelated "Thanks!" turn answered.
+      // The abandoned request closes silently before the unrelated turn answers.
       expect(livePosts.map((post) => [post.accounting, post.text])).toEqual([
         ['live-turn', PROGRESS[language]],
-        ['recovery', recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT })],
         ['live-turn', "You're welcome."],
       ])
-      expect(livePosts[1]!.coveredIds).toEqual([recorded(a, 'receipt A inputId')])
+      const [afterA] = await jsonl<{ rows: InboundRecord[]; outbox: RecoveryRecord[]; retired: RecoveryRetirement[] }>(
+        agent.dir,
+        'after-a',
+      )
+      const abandoned = recorded(afterA, 'A closure snapshot').rows.find((row) => row.inputId === a)
+      expect(abandoned).toMatchObject({
+        phase: 'closed',
+        outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+      })
+      if (abandoned?.phase !== 'closed') throw new Error('Expected closed abandoned request')
+      const deliveryId = recorded(abandoned.outcome.deliveryId, 'suppressed notice deliveryId')
+      const terminal =
+        afterA!.outbox.find((notice) => notice.deliveryId === deliveryId) ??
+        afterA!.retired.find((notice) => notice.deliveryId === deliveryId)?.dispatch
+      expect(terminal).toMatchObject({ state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } })
 
       await reboot(agent, 'repair', scenario)
       await reboot(agent, 'second-repair', scenario)
@@ -293,7 +296,7 @@ for (const language of ['en', 'ko'] as const) {
       expect(liveCalls.every((call) => call.mode === 'live')).toBe(true)
       const posts = await jsonl<Post>(agent.dir, 'posts')
       expect(posts).toEqual(livePosts)
-      expect(posts.some((post) => post.text === recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))).toBe(false)
+      expect(posts.filter((post) => post.accounting === 'recovery')).toEqual([])
       expect(posts.flatMap((post) => post.coveredIds)).not.toContain(c)
       const outbox = new RecoveryOutbox(agent.dir)
       expect(await outbox.list()).toEqual([])
@@ -303,9 +306,7 @@ for (const language of ['en', 'ko'] as const) {
           state: retired.dispatch.state,
           attempts: retired.dispatch.attempts,
         })),
-      ).toEqual([
-        { deliveryId: recorded(livePosts[1]!.deliveryId, 'live notice deliveryId'), state: 'delivered', attempts: 1 },
-      ])
+      ).toEqual([{ deliveryId, state: 'suppressed', attempts: 0 }])
     } finally {
       await cleanup(agent)
     }
@@ -339,52 +340,10 @@ for (const language of ['en', 'ko'] as const) {
         expect.stringMatching(/^The upstream LLM provider /),
         "You're welcome.",
       ])
-      expect(posts.some((post) => post.text === recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }))).toBe(false)
+      expect(posts.filter((post) => post.accounting === 'recovery')).toEqual([])
       const outbox = new RecoveryOutbox(agent.dir)
       expect(await outbox.list()).toEqual([])
       expect(await outbox.listRetired()).toEqual([])
-    } finally {
-      await cleanup(agent)
-    }
-  }, 180_000)
-}
-
-for (const reconcile of ['found', 'unreconcilable'] as const) {
-  test(`startAgent: live notice remote success before receipt (${reconcile}) is repaired by reboots without work replay`, async () => {
-    const agent = await newAgent()
-    const scenario = `receipt-${reconcile}`
-    try {
-      await killAt(agent, scenario, 'notice-posted')
-      const liveCalls = await jsonl(agent.dir, 'provider-calls')
-      const [a] = (await jsonl<{ receipt: { inputId: string } }>(agent.dir, 'receipts')).map(
-        (entry) => entry.receipt.inputId,
-      )
-      const [pending] = await new RecoveryOutbox(agent.dir).list()
-      expect(pending).toMatchObject({ state: 'leased', attempts: 1, text: LIVE_TURN_ENDED_NOTICE_TEXT })
-      expect(pending!.covers.map((ref) => ref.id)).toEqual([recorded(a, 'receipt A inputId')])
-
-      await reboot(agent, 'repair', scenario)
-      await reboot(agent, 'second-repair', scenario)
-
-      expect(await jsonl(agent.dir, 'provider-calls')).toEqual(liveCalls)
-      const posts = await jsonl<Post>(agent.dir, 'posts')
-      const notices = posts.filter((post) => post.accounting === 'recovery')
-      // Reconciled history proves the first post; otherwise the RFC accepts one
-      // at-least-once duplicate. Neither path re-runs work, and the second
-      // reboot never posts again.
-      expect(notices.map((post) => [post.mode, post.deliveryId, post.text])).toEqual(
-        (reconcile === 'found' ? ['live'] : ['live', 'repair']).map((mode) => [
-          mode,
-          pending!.deliveryId,
-          recoveryNoticeDisplayText({ text: LIVE_TURN_ENDED_NOTICE_TEXT }),
-        ]),
-      )
-      expect(posts.filter((post) => post.accounting !== 'recovery').map((post) => post.text)).toEqual([PROGRESS.en])
-      const outbox = new RecoveryOutbox(agent.dir)
-      expect(await outbox.list()).toEqual([])
-      expect((await outbox.listRetired()).map((retired) => [retired.deliveryId, retired.dispatch.state])).toEqual([
-        [pending!.deliveryId, 'delivered'],
-      ])
     } finally {
       await cleanup(agent)
     }
@@ -402,6 +361,7 @@ type MaintenanceEntry = {
   before?: Inode
   after?: Inode
   receipts?: Array<{ kind: string; inputId?: string }>
+  outcome?: InboundOutcome
 }
 
 // Fields that make a closed row a full admission payload; compacted history must not keep them.
@@ -457,19 +417,15 @@ test('startAgent: production maintenance compacts journal growth, keeps dedupe a
       // A duplicate appends nothing.
       expect(boot.after!.size).toBe(boot.before!.size)
     }
-    // A genuine old-epoch request recovers with the frozen restart notice, once.
-    const notices = (await jsonl<Post>(agent.dir, 'posts')).filter((post) => post.accounting === 'recovery')
-    expect(notices.map((post) => [post.mode, post.text, post.coveredIds])).toEqual([
-      [
-        'maintenance-1',
-        recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }),
-        [recorded(seeded!.openInput, 'open inputId')],
-      ],
-    ])
+    expect((await jsonl<Post>(agent.dir, 'posts')).filter((post) => post.accounting === 'recovery')).toEqual([])
+    for (const boot of boots)
+      expect(boot.outcome).toMatchObject({ kind: 'intentionally-suppressed', reason: 'operator-log-only' })
+    const deliveryId = recorded(boots[0]!.outcome?.deliveryId, 'suppressed restart deliveryId')
+    expect(boots.map((boot) => boot.outcome?.deliveryId)).toEqual([deliveryId, deliveryId, deliveryId])
     const outbox = new RecoveryOutbox(agent.dir)
     expect(await outbox.list()).toEqual([])
-    expect((await outbox.listRetired()).map((retired) => retired.deliveryId)).toEqual([
-      recorded(notices[0]!.deliveryId, 'restart notice deliveryId'),
+    expect(await outbox.listRetired()).toMatchObject([
+      { deliveryId, dispatch: { state: 'suppressed', attempts: 0, suppression: { reason: 'operator-log-only' } } },
     ])
     // Replays never reached the provider.
     expect(await jsonl(agent.dir, 'provider-calls')).toEqual(liveCalls)

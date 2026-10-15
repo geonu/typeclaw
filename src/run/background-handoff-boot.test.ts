@@ -9,7 +9,7 @@ import { LegacyBackgroundHandoffReader } from '@/channels/background-handoff'
 import { createLegacyRecoveryNotice } from '@/channels/background-handoff'
 import { BackgroundObligationStore } from '@/channels/background-obligations'
 import type { BackgroundAcceptance } from '@/channels/background-obligations'
-import { RECOVERY_NOTICE_TEXT, recoveryNoticeDisplayText } from '@/channels/continuity-types'
+import { RECOVERY_NOTICE_TEXT } from '@/channels/continuity-types'
 import type { RecoveryRecord } from '@/channels/continuity-types'
 import { InboundJournal } from '@/channels/inbound-journal'
 import type { InboundAdmission } from '@/channels/inbound-journal'
@@ -137,7 +137,7 @@ async function newDirectory() {
 /** Real router transport and dispatcher authority checks; only the adapter transport is controlled. */
 async function dispatch(
   booted: Runtime,
-  options: { sends: number; beforeWake?: (dispatcher: RecoveryDispatcher) => Promise<void> },
+  options: { suppressions: number; beforeWake?: (dispatcher: RecoveryDispatcher) => Promise<void> },
 ) {
   const sent: { deliveryId?: string; chat: string; text: string }[] = []
   const errors: unknown[] = []
@@ -166,16 +166,22 @@ async function dispatch(
       chat: message.chat,
       text: message.text ?? '',
     })
-    if (sent.length === options.sends) settled.resolve()
     return { ok: true, messageId: `notice-${sent.length}` }
   })
+  const suppress = booted.outbox.suppress.bind(booted.outbox)
+  let suppressions = 0
+  booted.outbox.suppress = async (...args) => {
+    const result = await suppress(...args)
+    if (args[1] === 'operator-log-only' && ++suppressions === options.suppressions) settled.resolve()
+    return result
+  }
   const dispatcher = new RecoveryDispatcher(booted.outbox, router, {
     backgroundObligations: booted.obligations,
     inboundJournal: booted.inboundJournal,
     onError: (error) => {
       errors.push(error)
       // Expected-send runs must not hide an authority failure behind a timeout.
-      if (options.sends === 0) settled.resolve()
+      if (options.suppressions === 0) settled.resolve()
       else settled.reject(error)
     },
   })
@@ -183,14 +189,26 @@ async function dispatch(
     await options.beforeWake?.(dispatcher)
     await dispatcher.wake()
     await settled.promise
+    await dispatcher.stop()
+    const retirement = new RecoveryDispatcher(booted.outbox, router, {
+      backgroundObligations: booted.obligations,
+      inboundJournal: booted.inboundJournal,
+      onError: (error) => errors.push(error),
+    })
+    try {
+      await retirement.wake()
+    } finally {
+      await retirement.stop()
+    }
   } finally {
+    booted.outbox.suppress = suppress
     await dispatcher.stop()
     await router.stop()
   }
   return { sent, errors }
 }
 
-test('two admitted inputs and a compatible child recover as one notice, one send and one closing receipt', async () => {
+test('two admitted inputs and a compatible child recover as one suppressed notice with full source closure', async () => {
   const dir = await newDirectory()
   let claimed = '',
     queued = '',
@@ -234,26 +252,30 @@ test('two admitted inputs and a compatible child recover as one notice, one send
     [2, 3],
   ])
 
-  const { sent, errors } = await dispatch(booted, { sends: 1 })
+  const { sent, errors } = await dispatch(booted, { suppressions: 1 })
   expect(errors).toEqual([])
-  expect(sent).toEqual([
-    { deliveryId: notice.deliveryId, chat: room.chat, text: recoveryNoticeDisplayText({ text: RECOVERY_NOTICE_TEXT }) },
-  ])
+  expect(sent).toEqual([])
   for (const id of [claimed, queued])
     expect(booted.inboundJournal.get(id)).toMatchObject({
       phase: 'closed',
-      outcome: { kind: 'delivered', deliveryId: notice.deliveryId },
+      outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only', deliveryId: notice.deliveryId },
     })
   expect(await booted.obligations.get(child)).toMatchObject({
     phase: 'closed',
-    outcome: { kind: 'delivered', deliveryId: notice.deliveryId },
+    outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only', deliveryId: notice.deliveryId },
   })
   // Closed sources are never reintroduced by a later boot: the finished delivery stays fenced, so
   // re-importing its frozen transfer resolves to the terminal record instead of a new send intent.
   const later = await boot(dir, 'later')
   expect(await later.outbox.list()).toEqual([])
-  expect(await later.outbox.retired(notice.deliveryId)).toMatchObject({ dispatch: { state: 'delivered' } })
-  expect(await later.outbox.import(notice)).toMatchObject({ deliveryId: notice.deliveryId, state: 'delivered' })
+  expect(await later.outbox.retired(notice.deliveryId)).toMatchObject({
+    dispatch: { state: 'suppressed', suppression: { reason: 'operator-log-only' } },
+  })
+  expect(await later.outbox.import(notice)).toMatchObject({
+    deliveryId: notice.deliveryId,
+    state: 'suppressed',
+    suppression: { reason: 'operator-log-only' },
+  })
 })
 
 test('authors, accounts, threads and captured parents partition notices; reordered principal keys do not', async () => {
@@ -406,7 +428,7 @@ test('issued singleton, mixed and legacy transfers keep identity; a late matchin
   expect(await second.outbox.list()).toEqual(issued)
 })
 
-test('grouped stop suppresses every covered source while a different-parent partition still delivers', async () => {
+test('grouped stop suppresses its covered sources before operator-log-only closes another parent', async () => {
   const dir = await newDirectory()
   let input = '',
     child = '',
@@ -422,10 +444,13 @@ test('grouped stop suppresses every covered source while a different-parent part
   const surviving = records.find((r) => r.sourceParentSessionId === 'other-parent')!
   expect(groups(records)).toEqual(normalize([[input, child], [other]]))
   const { sent } = await dispatch(booted, {
-    sends: 1,
+    suppressions: 1,
     beforeWake: (dispatcher) => dispatcher.suppressParent(room, 'parent'),
   })
-  expect(sent.map((s) => s.deliveryId)).toEqual([surviving.deliveryId])
+  expect(sent).toEqual([])
+  expect(await booted.outbox.retired(surviving.deliveryId)).toMatchObject({
+    dispatch: { state: 'suppressed', suppression: { reason: 'operator-log-only' } },
+  })
   expect(await booted.outbox.retired(stopped.deliveryId)).toMatchObject({ dispatch: { state: 'suppressed' } })
   expect(booted.inboundJournal.get(input)).toMatchObject({
     phase: 'closed',
@@ -435,7 +460,10 @@ test('grouped stop suppresses every covered source while a different-parent part
     phase: 'closed',
     outcome: { kind: 'intentionally-suppressed', reason: 'user-stop' },
   })
-  expect(booted.inboundJournal.get(other)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
+  expect(booted.inboundJournal.get(other)).toMatchObject({
+    phase: 'closed',
+    outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+  })
 })
 
 test('stop during a known background freeze appends nothing and keeps admission; a repaired boot closes the group once', async () => {
@@ -485,7 +513,7 @@ test('stop during a known background freeze appends nothing and keeps admission;
   const journalBytes = await readFile(booted.inboundJournal.path)
   const childBytes = await readFile(childPath)
   const frozen = await dispatch(booted, {
-    sends: 0,
+    suppressions: 0,
     beforeWake: async (dispatcher) => {
       await expect(dispatcher.suppressParent(room, 'parent')).rejects.toThrow('frozen')
     },
@@ -501,16 +529,19 @@ test('stop during a known background freeze appends nothing and keeps admission;
   const repaired = await boot(dir, 'repaired')
   expect(await repaired.outbox.get(mixed.deliveryId)).toEqual(mixed)
   const { sent } = await dispatch(repaired, {
-    sends: 2,
+    suppressions: 2,
     beforeWake: (dispatcher) => dispatcher.suppressParent(room, 'parent'),
   })
-  expect(sent.map((s) => s.chat).sort()).toEqual(['legacy-room', 'room'])
+  expect(sent).toEqual([])
   expect(await repaired.outbox.retired(mixed.deliveryId)).toMatchObject({ dispatch: { state: 'suppressed' } })
   expect(repaired.inboundJournal.get(input)).toMatchObject({ phase: 'closed', outcome: { reason: 'user-stop' } })
   const stopped = (await repaired.obligations.get(child))!
   expect(stopped).toMatchObject({ phase: 'closed', outcome: { reason: 'user-stop' } })
   expect(stopped.applications.filter((r) => r.transitionId === stopped.outcome!.decisionId)).toHaveLength(1)
-  expect(repaired.inboundJournal.get(unrelated)).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered' } })
+  expect(repaired.inboundJournal.get(unrelated)).toMatchObject({
+    phase: 'closed',
+    outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only' },
+  })
 })
 
 const corruptions: Record<string, (row: Record<string, unknown>, transfer: RecoveryRecord) => void> = {
@@ -562,7 +593,7 @@ for (const [field, corrupt] of Object.entries(corruptions)) {
     expect(() => booted.obligations.assertAvailable()).toThrow('frozen')
     expect(await readFile(path, 'utf8')).toBe(bytes)
     expect(await booted.outbox.list()).toEqual(outboxBefore)
-    const { sent, errors } = await dispatch(booted, { sends: 0 })
+    const { sent, errors } = await dispatch(booted, { suppressions: 0 })
     expect(sent).toEqual([])
     expect(errors.length).toBeGreaterThan(0)
     expect(await booted.outbox.list()).toEqual(outboxBefore)
@@ -688,11 +719,14 @@ for (const boundary of [
     }
     const third = await boot(dir, 'third')
     expect(await third.outbox.list()).toEqual(records)
-    const { sent } = await dispatch(third, { sends: 1 })
-    expect(sent.map((s) => s.deliveryId)).toEqual([notice.deliveryId])
+    const { sent } = await dispatch(third, { suppressions: 1 })
+    expect(sent).toEqual([])
     for (const id of ids) {
       const row = third.inboundJournal.get(id) ?? (await third.obligations.get(id))
-      expect(row).toMatchObject({ phase: 'closed', outcome: { kind: 'delivered', deliveryId: notice.deliveryId } })
+      expect(row).toMatchObject({
+        phase: 'closed',
+        outcome: { kind: 'intentionally-suppressed', reason: 'operator-log-only', deliveryId: notice.deliveryId },
+      })
     }
   }, 30_000)
 }

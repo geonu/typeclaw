@@ -161,7 +161,7 @@ The agent lives in people's chats, and every runtime-authored error message ther
 
 The same bar applies to **system messages**: any runtime-authored notice about the agent's own state rather than the user's request, such as restarts, recovery or continuity status ("I restarted before I could confirm a reply"), queue or retry state, or other internal stats. These never qualify on their own. Send them to the operator log. Turns woken by a subagent or background completion, with no user message behind them, post no error or recovery notices at all. Only the main agent answering a user may error out.
 
-When a notice is warranted, say what happened and what the user can do, in plain words. Don't lead with ⚠️ or other alarm emoji, because the wording carries the meaning. The recovery-notice templates in `src/channels/continuity-types.ts` are frozen into persisted outbox payloads and still carry a historical ⚠️, so `recoveryNoticeDisplayText` strips it at send time. Never edit the template bytes.
+When a notice is warranted, say what happened and what the user can do, in plain words. Don't lead with ⚠️ or other alarm emoji, because the wording carries the meaning. Runtime system state is never a channel message: restart and live-turn-ended recovery records are closed as suppressed (`operator-log-only`) by `RecoveryDispatcher` and logged for the operator, never posted. The recovery-notice templates in `src/channels/continuity-types.ts` stay frozen into persisted outbox payloads; never edit the template bytes.
 
 ## Multi-language
 
