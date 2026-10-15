@@ -1117,6 +1117,78 @@ describe('startDaemon', () => {
     expect((list.result as ListResult).registrations.map((r) => r.containerName).sort()).toEqual(['good'])
   })
 
+  test('a restored registration whose broker start throws does not block other registrations or later RPCs', async () => {
+    // given: two persisted registrations; reviving the first one's broker throws
+    const alive = new Set(['bad', 'good'])
+    const recording: PortbrokerCallbacks = { start: async () => {}, stop: async () => {}, forwardedPorts: () => [] }
+    const d1 = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, portbroker: recording })
+    for (const name of ['bad', 'good']) {
+      await send({
+        kind: 'register',
+        containerName: name,
+        cwd: `/agent/${name}`,
+        wsHostPort: 1,
+        portForward: { allow: '*' },
+        brokerToken: `tok-${name}`,
+      })
+    }
+    await d1.stop()
+
+    // when: a fresh daemon restores them
+    const throwing: PortbrokerCallbacks = {
+      start: async (input) => {
+        if (input.containerName === 'bad') throw new Error('broker boom')
+      },
+      stop: async () => {},
+      forwardedPorts: () => [],
+    }
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, portbroker: throwing })
+
+    // then: the other registration is restored and gated RPCs still work
+    const status = await send({ kind: 'status', containerName: 'good' })
+    expect(status.ok).toBe(true)
+    expect((await send({ kind: 'register', containerName: 'fresh', cwd: '/agent/fresh' })).ok).toBe(true)
+  })
+
+  test('re-register without broker fields stops the old broker so its stale token cannot GC the registration', async () => {
+    // given: a registration with a broker on token T1
+    const startCalls: PortbrokerStartInput[] = []
+    const stopCalls: Array<{ name: string; reason: string }> = []
+    const portbroker: PortbrokerCallbacks = {
+      start: async (input) => {
+        startCalls.push(input)
+      },
+      stop: async (name, reason) => {
+        stopCalls.push({ name, reason })
+      },
+      forwardedPorts: () => [],
+    }
+    daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, portbroker })
+    await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      wsHostPort: 12345,
+      portForward: { allow: '*' },
+      brokerToken: 'T1',
+    })
+
+    // when: it re-registers without port forwarding, then the old broker reports fatal auth
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    expect(stopCalls).toEqual([{ name: 'coder', reason: 'deregistered' }])
+    startCalls[0]?.onFatalAuthFailure?.({ brokerToken: 'T1', reason: 'invalid token' })
+
+    // then: the live registration survives
+    await expectStable(() => !existsSync(registrationFilePath('coder')), {
+      durationMs: 60,
+      description: 'portless re-registration deleted by stale broker fatal callback',
+    })
+    const list = await send({ kind: 'list' })
+    expect(list.ok && (list.result as ListResult).registrations).toEqual([
+      { containerName: 'coder', cwd: '/agent/coder' },
+    ])
+  })
+
   test('boot-time restore revives portbroker for persisted registrations whose container is still alive', async () => {
     const startCalls: PortbrokerStartInput[] = []
     const portbroker: PortbrokerCallbacks = {

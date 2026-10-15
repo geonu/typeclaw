@@ -238,7 +238,14 @@ async function restorePersistedRegistrations(
       log({ kind: 'registration-skipped', containerName: expectedName, reason: 'container not running' })
       continue
     }
-    await apply(parsed)
+    // One registration whose revival throws (e.g. portbroker.start) must not
+    // abort the loop: restoreComplete would reject and every gated RPC would
+    // fail until the daemon is respawned.
+    try {
+      await apply(parsed)
+    } catch (error) {
+      log({ kind: 'registration-skipped', containerName: expectedName, reason: stringifyError(error) })
+    }
   }
 }
 
@@ -443,6 +450,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           void handleFatalAuthFailure(payload.containerName, brokerToken, reason)
         },
       })
+    } else if (opts.portbroker && brokerTokens.delete(payload.containerName)) {
+      // A re-register without broker fields must retire the previous broker;
+      // otherwise its stale token could later match a fatal-auth callback and
+      // tear down this live registration.
+      await withCleanupTimeout(opts.portbroker.stop(payload.containerName, 'deregistered'), cleanupStepTimeoutMs)
     }
     if (opts.kakaoRenewal) {
       opts.kakaoRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
