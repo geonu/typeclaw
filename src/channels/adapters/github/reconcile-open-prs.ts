@@ -48,6 +48,10 @@ export type ReconcileOpenPrsOptions = {
   // Omitted in tests that assert the raw replay decision.
   cooldownStore?: ReconcileCooldownStore
   cooldownMs?: number
+  // Under review.on 'opened', only PRs created at or after this instant (epoch
+  // ms) are replayed. Reconcile catches webhooks missed since the adapter was
+  // last alive; without a bound, adding a repo would review its whole backlog.
+  createdSince?: number
   // Also replay PRs where the bot's standing CHANGES_REQUESTED predates the
   // current head: a push follow-up a restart killed (or whose synchronize
   // delivery was lost) is never re-sent, so the block would hold until a human
@@ -179,7 +183,9 @@ async function replayPr(
   const repo = `${target.owner}/${target.repo}`
   let receipt: RouteReceipt
   try {
-    receipt = await options.route(buildSyntheticInbound(pr, target, kind, options.generateReviewRoundId ?? randomUUID))
+    receipt = await options.route(
+      buildSyntheticInbound(pr, target, kind, options.generateReviewRoundId ?? randomUUID, cooldownWindow(options)),
+    )
   } catch (err) {
     options.logger.warn(`[github] reconcile ${repo}: PR #${pr.number} replay failed: ${describeError(err)}`)
     await releaseReservation(options, repo, pr, reservation)
@@ -246,7 +252,19 @@ async function prReplayKind(input: {
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
-  return !pr.draft && !(await selfReviews()).reviewed ? 'review' : null
+  if (pr.draft) return null
+  // A PR reconcile already replayed stays eligible past the advancing bound: an
+  // interrupted replay gets no restart notice, so this pass is its retry path.
+  const owedReplay =
+    options.cooldownStore?.owesReplay(`${target.owner}/${target.repo}`, pr.id, (options.now ?? Date.now)()) === true
+  if (!owedReplay && createdBeforeReplayWindow(pr, options.createdSince)) return null
+  return (await selfReviews()).reviewed ? null : 'review'
+}
+
+function createdBeforeReplayWindow(pr: OpenPr, createdSince: number | undefined): boolean {
+  if (createdSince === undefined) return false
+  const createdAt = Date.parse(pr.createdAt)
+  return !Number.isNaN(createdAt) && createdAt < createdSince
 }
 
 async function isTeamReviewRequestedFromSelf(
@@ -262,11 +280,22 @@ async function isTeamReviewRequestedFromSelf(
   return false
 }
 
+// An interrupted reconcile replay gets no restart notice; its retry is the next
+// pass after the cooldown. Keying the identity by cooldown window lets that pass
+// admit afresh instead of deduping against the interrupted admission, while a
+// retry within the same window (e.g. after a rejected route) still dedupes.
+function cooldownWindow(options: ReconcileOpenPrsOptions): number | null {
+  if (options.cooldownStore === undefined) return null
+  const cooldownMs = options.cooldownMs ?? DEFAULT_RECONCILE_COOLDOWN_MS
+  return Math.floor((options.now ?? Date.now)() / cooldownMs)
+}
+
 function buildSyntheticInbound(
   pr: OpenPr,
   target: RepoTarget,
   kind: ReplayKind,
   generateReviewRoundId: () => string,
+  window: number | null,
 ): InboundMessage {
   const branchSegment = pr.headRef !== null && pr.baseRef !== null ? ` Branch: ${pr.headRef} → ${pr.baseRef}.` : ''
   const text =
@@ -279,10 +308,11 @@ function buildSyntheticInbound(
   // `pr-<n>-recheck-<sha>` ids: a duplicate of the very admission a restart
   // interrupted would be deduped instead of re-run. Repeated reconciles for the
   // same unchanged PR still dedupe against each other (same updatedAt).
+  const windowSuffix = window === null ? '' : `-w${window}`
   const externalMessageId =
     kind === 'rereview'
-      ? `pr-${pr.id}-reconcile-rereview-${pr.headSha}-${pr.updatedAt}`
-      : `pr-${pr.id}-reconcile-${pr.updatedAt}`
+      ? `pr-${pr.id}-reconcile-rereview-${pr.headSha}-${pr.updatedAt}${windowSuffix}`
+      : `pr-${pr.id}-reconcile-${pr.updatedAt}${windowSuffix}`
   return {
     adapter: 'github',
     workspace: `${target.owner}/${target.repo}`,
@@ -305,7 +335,10 @@ function buildSyntheticInbound(
           },
         }
       : {}),
-    eventKind: 'pull_request:reconcile',
+    // Held re-reviews only replay on boot, so unlike a fresh review their retry
+    // is not guaranteed by the periodic pass; a distinct kind keeps their
+    // restart notice behavior separate from the fresh-review replay's.
+    eventKind: kind === 'rereview' ? 'pull_request:reconcile:rereview' : 'pull_request:reconcile',
     revision: pr.updatedAt,
     authorId: String(pr.authorId),
     authorName: pr.authorLogin,
@@ -333,6 +366,7 @@ type OpenPr = {
   headSha: string | null
   baseRef: string | null
   updatedAt: string
+  createdAt: string
   requestedReviewerLogins: string[]
   requestedTeamSlugs: string[]
 }
@@ -452,6 +486,7 @@ type PrRow = {
   title?: unknown
   draft?: unknown
   updated_at?: unknown
+  created_at?: unknown
   user?: { login?: unknown; id?: unknown; type?: unknown }
   head?: { ref?: unknown; sha?: unknown }
   base?: { ref?: unknown }
@@ -478,6 +513,7 @@ function parsePrRow(row: PrRow): OpenPr | null {
     headSha: typeof row.head?.sha === 'string' ? row.head.sha : null,
     baseRef: typeof row.base?.ref === 'string' ? row.base.ref : null,
     updatedAt: typeof row.updated_at === 'string' ? row.updated_at : '',
+    createdAt: typeof row.created_at === 'string' ? row.created_at : '',
     requestedReviewerLogins: (row.requested_reviewers ?? []).flatMap((r) =>
       typeof r.login === 'string' ? [r.login] : [],
     ),

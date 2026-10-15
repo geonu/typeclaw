@@ -1817,6 +1817,12 @@ describe('createGithubAdapter lifecycle', () => {
           'not-redelivered',
         )
         expect(second.router.recoveryRedelivery?.(reviewNotice('pr:8'), ['pull_request:opened'])).toBe('redelivered')
+        // and an interrupted reconcile replay never gets a restart notice: nobody asked for it
+        expect(second.router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:reconcile'])).toBe('redelivered')
+        // but an interrupted held re-review, which only the boot pass retries, keeps its notice
+        expect(second.router.recoveryRedelivery?.(reviewNotice('pr:7'), ['pull_request:reconcile:rereview'])).toBe(
+          'not-redelivered',
+        )
         await second.stop()
         expect(await coolingDown(reconcileDir, 700)).toBe(true)
         expect(await coolingDown(reconcileDir, 800)).toBe(true)

@@ -21,6 +21,7 @@ import { findPermissionGaps } from './event-permissions'
 import { createGithubFetchAttachmentCallback } from './fetch-attachment'
 import { createGithubHistoryCallback } from './history'
 import { createGithubWebhookHandler, processVerifiedGithubDelivery, type GithubWebhookHandlerOptions } from './inbound'
+import { readGithubLastAlive, writeGithubLastAlive } from './last-alive'
 import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
@@ -176,6 +177,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     ...createGithubRecoveryCallbacks(auth, fetchImpl, () => (selfId !== null ? `github:${selfId}` : undefined)),
     redelivery: (record, eventKinds) => {
       if (!eventKinds.every((kind) => REVIEW_TRIGGER_EVENT_KINDS.has(kind))) return 'not-redelivered'
+      // A fresh-review reconcile replay is runtime-synthesized: nobody asked, so a restart notice
+      // would only announce system state. The next periodic pass after the cooldown retries it.
+      // Held re-reviews (`pull_request:reconcile:rereview`) replay only on boot, so they keep the
+      // normal notice path below.
+      if (eventKinds.every((kind) => kind === 'pull_request:reconcile')) return 'redelivered'
       if (reconcileReplayedPrs.has(prReplayKey(record.target.workspace, record.target.chat))) return 'redelivered'
       return firstReconcilePending ? 'pending' : 'not-redelivered'
     },
@@ -460,6 +466,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       const loadedReconcileCooldownStore =
         repos.length > 0 ? await loadReconcileCooldownStore(options.agentDir, logger) : null
       reconcileCooldownStore = loadedReconcileCooldownStore
+      const bootAt = Date.now()
+      // First boot has no marker: only PRs opened from now on qualify, never the backlog.
+      const createdSince =
+        loadedReconcileCooldownStore !== null ? ((await readGithubLastAlive(options.agentDir)) ?? bootAt) : bootAt
+      const markAlive = (): Promise<void> =>
+        writeGithubLastAlive(options.agentDir, Date.now()).catch((err: unknown) => {
+          logger.warn(`[github] last-alive marker write failed: ${describeError(err)}`)
+        })
+      if (loadedReconcileCooldownStore !== null) await markAlive()
       // Resolve review.on per call, not from the captured startup cfg: review.on
       // is live-reloadable, so a periodic tick must honor a change to `off`
       // (reconcileOpenPrs short-circuits on `off`) instead of scanning forever.
@@ -483,6 +498,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           isBotInTeam,
           fetchImpl,
           cooldownStore: store,
+          createdSince,
           isCancelled: () => reconcileGeneration !== lifecycleGeneration,
         }).catch((err: unknown) => {
           logger.warn(`[github] reconcile pass failed: ${describeError(err)}`)
@@ -501,10 +517,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         })
         const reconcileIntervalMs = options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS
         if (reconcileIntervalMs > 0) {
-          reconcileTimer = setIntervalFn(
-            () => void runReconcile(loadedReconcileCooldownStore, false),
-            reconcileIntervalMs,
-          )
+          reconcileTimer = setIntervalFn(() => {
+            void markAlive()
+            void runReconcile(loadedReconcileCooldownStore, false)
+          }, reconcileIntervalMs)
         }
       }
       // Periodically recover inbound deliveries that failed at the tunnel and
@@ -551,6 +567,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         reconcileTimer.clear()
         reconcileTimer = null
       }
+      if (reconcileCooldownStore !== null)
+        await writeGithubLastAlive(options.agentDir, Date.now()).catch((err: unknown) => {
+          logger.warn(`[github] last-alive marker write failed: ${describeError(err)}`)
+        })
       githubReviewChecks.detach(reviewCheckPublisher)
       options.router.unregisterOutbound('github', outbound)
       options.router.unregisterReaction('github', reaction)
@@ -742,6 +762,7 @@ const REVIEW_TRIGGER_EVENT_KINDS: ReadonlySet<string> = new Set([
   'pull_request:review_requested',
   'pull_request:synchronize:review-followup',
   'pull_request:reconcile',
+  'pull_request:reconcile:rereview',
 ])
 
 function prReplayKey(workspace: string, chat: string): string {

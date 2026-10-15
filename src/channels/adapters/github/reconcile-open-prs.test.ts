@@ -29,6 +29,7 @@ type PrFixture = {
   headRef?: string
   baseRef?: string
   updatedAt?: string
+  createdAt?: string
   requestedReviewers?: string[]
   requestedTeams?: string[]
   selfReviewed?: boolean
@@ -45,6 +46,7 @@ function prJson(pr: PrFixture): Record<string, unknown> {
     title: pr.title ?? `PR ${pr.number}`,
     draft: pr.draft ?? false,
     updated_at: pr.updatedAt ?? '2026-01-01T00:00:00Z',
+    ...(pr.createdAt !== undefined ? { created_at: pr.createdAt } : {}),
     user: { login: pr.authorLogin ?? 'alice', id: pr.authorId ?? 10, type: pr.authorType ?? 'User' },
     head: { ref: pr.headRef ?? 'feature', sha: pr.headSha ?? 'head-sha' },
     base: { ref: pr.baseRef ?? 'main' },
@@ -126,6 +128,23 @@ describe('reconcileOpenPrs', () => {
     const routed: InboundMessage[] = []
     await reconcileOpenPrs(baseOptions({ routed, fetchImpl: fakeGithub([{ number: 7, id: 700, draft: true }]) }))
     expect(routed).toHaveLength(0)
+  })
+
+  test("reviewOn 'opened' replays only PRs created since the adapter was last alive", async () => {
+    // given a PR opened before the last shutdown and one opened during downtime
+    const routed: InboundMessage[] = []
+    const prs = [
+      { number: 7, id: 700, createdAt: '2026-10-14T23:00:00Z' },
+      { number: 8, id: 800, createdAt: '2026-10-15T01:00:00Z' },
+    ]
+
+    // when reconcile runs bounded by the last-alive instant
+    await reconcileOpenPrs(
+      baseOptions({ routed, createdSince: Date.parse('2026-10-15T00:00:00Z'), fetchImpl: fakeGithub(prs) }),
+    )
+
+    // then only the downtime PR is replayed
+    expect(routed.map((m) => m.chat)).toEqual(['pr:8'])
   })
 
   test("reviewOn 'opened' skips a PR the bot already reviewed", async () => {
@@ -273,7 +292,7 @@ describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
     expect(routed).toHaveLength(1)
     expect(routed[0]?.chat).toBe('pr:7')
     expect(routed[0]?.thread).toBeNull()
-    expect(routed[0]?.eventKind).toBe('pull_request:reconcile')
+    expect(routed[0]?.eventKind).toBe('pull_request:reconcile:rereview')
     expect(routed[0]?.externalMessageId).toBe('pr-700-reconcile-rereview-new-head-2026-01-01T00:00:00Z')
     expect(routed[0]?.githubReviewRound).toEqual({
       kind: 'push',
@@ -283,6 +302,19 @@ describe('reconcileOpenPrs held CHANGES_REQUESTED', () => {
       headSha: 'new-head',
       carrierThread: null,
     })
+  })
+
+  test('replays a held re-review even when the PR predates the replay window', async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        includeHeldReviews: true,
+        createdSince: Date.parse('2026-10-15T00:00:00Z'),
+        fetchImpl: fakeGithub([held({ createdAt: '2021-05-01T00:00:00Z' })]),
+      }),
+    )
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
   })
 
   describe('formal verdict submission', () => {
@@ -486,6 +518,98 @@ describe('reconcileOpenPrs cooldown', () => {
         cooldownStore: await loadStore(),
         now: () => 1_000 + 60_000,
         fetchImpl: fakeGithub([{ number: 7, id: 700, updatedAt: '2026-02-02T00:00:00Z' }]),
+      }),
+    )
+    expect(routed).toHaveLength(0)
+  })
+
+  test('a retry after the cooldown uses a fresh identity so the router admits it instead of deduping', async () => {
+    // given a first replay admitted at t=1000
+    const routed: InboundMessage[] = []
+    const fetchImpl = fakeGithub([{ number: 7, id: 700 }])
+    await reconcileOpenPrs(baseOptions({ routed, cooldownStore: await loadStore(), now: () => 1_000, fetchImpl }))
+
+    // when the next pass runs after the cooldown on the unchanged PR
+    await reconcileOpenPrs(
+      baseOptions({ routed, cooldownStore: await loadStore(), now: () => 1_000 + WINDOW + 1, fetchImpl }),
+    )
+
+    // then both replays routed with distinct identities
+    expect(routed).toHaveLength(2)
+    expect(routed[0]?.externalMessageId).not.toBe(routed[1]?.externalMessageId)
+  })
+
+  test('retries an interrupted replay after the cooldown even once the last-alive bound has passed its creation', async () => {
+    // given a downtime PR replayed at t=1000, then a restart advanced the last-alive bound past it
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    const prs = [
+      { number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' },
+      { number: 8, id: 800, createdAt: '2026-10-15T00:00:00Z' },
+    ]
+    await seedMarker(700, 1_000)
+    const routed: InboundMessage[] = []
+
+    // when the periodic pass runs after the cooldown with the newer bound
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => 1_000 + WINDOW + 1,
+        fetchImpl: fakeGithub(prs),
+      }),
+    )
+
+    // then only the owed PR is retried; the never-replayed one stays excluded
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
+  test('a rejected post-cooldown retry keeps the owed replay so the next pass retries it', async () => {
+    // given an owed PR that predates the last-alive bound
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    const fetchImpl = fakeGithub([{ number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' }])
+    await seedMarker(700, 1_000)
+    const retryAt = 1_000 + WINDOW + 1
+
+    // when the post-cooldown retry is rejected by the router
+    await reconcileOpenPrs(
+      baseOptions({
+        routed: [],
+        route: async () => {
+          throw new Error('router down')
+        },
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => retryAt,
+        fetchImpl,
+      }),
+    )
+
+    // then a reloaded store still lets the next pass retry it
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => retryAt + 1,
+        fetchImpl,
+      }),
+    )
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
+  test('an owed replay first made more than seven days ago no longer bypasses the last-alive bound', async () => {
+    const createdAt = Date.parse('2026-10-15T00:00:00Z')
+    await seedMarker(700, 1_000)
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        cooldownStore: await loadStore(),
+        createdSince: createdAt + 1,
+        now: () => 1_000 + 8 * 24 * 60 * 60 * 1000,
+        fetchImpl: fakeGithub([{ number: 7, id: 700, createdAt: '2026-10-15T00:00:00Z' }]),
       }),
     )
     expect(routed).toHaveLength(0)
