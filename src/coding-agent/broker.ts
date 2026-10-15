@@ -219,7 +219,8 @@ export async function startCodingBroker(
               : 'upstream_unavailable',
         )
       }
-      const contentType = response.headers['content-type'] ?? ''
+      // The ChatGPT Codex backend streams SSE with no Content-Type header at all.
+      const contentType = response.headers['content-type'] ?? (provider === 'openai-codex' ? 'text/event-stream' : '')
       if (!/^(application\/json|text\/event-stream)(;|$)/i.test(contentType)) {
         response.destroy()
         return reject(res, 502, 'unsupported_response')
