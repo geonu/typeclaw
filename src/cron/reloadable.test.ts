@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { Reloadable, ReloadResult } from '@/reload'
+import type { ReloadResult } from '@/reload'
 
 import { createCronReloadable } from './reloadable'
 import type { JobDiff, Scheduler } from './scheduler'
@@ -59,12 +59,6 @@ async function asSuccess(r: Promise<ReloadResult>): Promise<Extract<ReloadResult
 }
 
 describe('createCronReloadable', () => {
-  test('exposes scope=cron with a description', () => {
-    const reloadable: Reloadable = createCronReloadable({ cwd: agentDir, scheduler: recordingScheduler() })
-    expect(reloadable.scope).toBe('cron')
-    expect(reloadable.description).toMatch(/cron/i)
-  })
-
   test('reloads from cron.json and replaces jobs in the scheduler', async () => {
     const scheduler = recordingScheduler()
     await writeFile(

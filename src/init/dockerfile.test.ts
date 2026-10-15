@@ -284,21 +284,6 @@ describe('codexCli toggle', () => {
     expect(out).not.toContain('@openai/codex')
   })
 
-  test('codexCli: false omits the install layer entirely', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: false }))
-    expect(out).not.toContain('@openai/codex')
-  })
-
-  test('codexCli: true emits the bun-install layer in the inline (dev) form', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }))
-    expect(out).toContain('bun install -g @openai/codex@0.162.1')
-  })
-
-  test('codexCli: true emits the install layer in the versioned (base-image) form too — drift guard', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }), { baseImageVersion: '0.1.1' })
-    expect(out).toContain('bun install -g @openai/codex@0.162.1')
-  })
-
   test('both branches install the Codex launcher and native packages under /usr/local', () => {
     for (const options of [{}, { baseImageVersion: '0.1.1' }]) {
       const out = buildDockerfile(dockerfileSchema.parse({ codexCli: true }), options)

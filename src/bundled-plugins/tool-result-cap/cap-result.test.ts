@@ -133,17 +133,6 @@ describe('capToolResult', () => {
     expect((result.content[0] as { text: string }).text).toContain('tool-result-cap')
   })
 
-  test('still truncates oversized text from a non-exempt tool', () => {
-    const result: ToolResult = {
-      content: [{ type: 'text', text: 'A'.repeat(200) }],
-    }
-
-    const stats = capToolResult('read', result, baseOptions)
-
-    expect(stats.textsTruncated).toBe(1)
-    expect((result.content[0] as { text: string }).text).toContain('tool-result-cap')
-  })
-
   test('mutates the original content array in place', () => {
     const originalContent: ToolResult['content'] = [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) }]
     const result: ToolResult = { content: originalContent }

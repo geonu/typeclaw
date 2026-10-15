@@ -15,14 +15,4 @@ describe('forward request bus', () => {
 
     expect(events).toEqual([{ targetPort: 4848, hostCandidates: [4848, 4849], reason: 'agent-browser-dashboard' }])
   })
-
-  test('__reset clears subscribers', () => {
-    const events: unknown[] = []
-    subscribeForwardRequest((event) => events.push(event))
-    __resetForwardRequestBus()
-
-    publishForwardRequest({ targetPort: 4848, hostCandidates: [4848] })
-
-    expect(events).toEqual([])
-  })
 })

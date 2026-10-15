@@ -39,15 +39,6 @@ describe('ReloadRegistry.register', () => {
 
     expect(() => reg.register(okReloadable('cron'))).toThrow(/already registered/)
   })
-
-  test('preserves registration order', () => {
-    const reg = new ReloadRegistry()
-    reg.register(okReloadable('a'))
-    reg.register(okReloadable('b'))
-    reg.register(okReloadable('c'))
-
-    expect(reg.list().map((i) => i.scope)).toEqual(['a', 'b', 'c'])
-  })
 })
 
 describe('ReloadRegistry.has / get', () => {

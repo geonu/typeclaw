@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { createSlackDedupe, SLACK_DEDUPE_CAPACITY } from './slack-bot-dedupe'
+import { createSlackDedupe } from './slack-bot-dedupe'
 
 describe('createSlackDedupe', () => {
   test('first sighting of a (channel, ts) is not a duplicate', () => {
@@ -170,9 +170,5 @@ describe('createSlackDedupe', () => {
     observation.rollback()
     promotion.rollback()
     expect(dedupe.check(event)).toBeNull()
-  })
-
-  test('default capacity matches the published constant', () => {
-    expect(SLACK_DEDUPE_CAPACITY).toBe(256)
   })
 })

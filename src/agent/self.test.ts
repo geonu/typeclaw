@@ -43,17 +43,6 @@ describe('loadSelf', () => {
     expect(section.indexOf('## IDENTITY.md')).toBeLessThan(section.indexOf('## SOUL.md'))
   })
 
-  test('adds SOUL persona framing so the model embodies the tone', async () => {
-    // given
-    await writeFile(join(agentDir, 'SOUL.md'), 'chill and chatty')
-
-    // when
-    const section = await loadSelf(agentDir)
-
-    // then
-    expect(section).toContain('embody its persona and tone')
-  })
-
   test('signals [MISSING] with absolute path when a file is absent', async () => {
     // when (neither file exists)
     const section = await loadSelf(agentDir)

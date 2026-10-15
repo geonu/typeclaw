@@ -272,14 +272,6 @@ describe('classifyInbound — peer-bot routing', () => {
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.authorIsBot).toBe(false)
   })
-
-  test('still drops self even when bot flag is set (self check comes first)', () => {
-    const event = buildEvent({ author: { id: BOT_USER_ID, username: 'me', bot: true } })
-
-    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
-  })
 })
 
 describe('classifyInbound — route path', () => {

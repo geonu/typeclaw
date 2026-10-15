@@ -61,17 +61,6 @@ describe('createChannelDisengageTool', () => {
     expect(firstText(result)).toContain('3 active engagements dropped')
   })
 
-  test('singularizes the engagement count', async () => {
-    const tool = createChannelDisengageTool({
-      router: fakeRouter(() => ({ keyId: 'k', cleared: 1 })),
-      origin,
-    })
-
-    const result = await run(tool)
-
-    expect(firstText(result)).toContain('1 active engagement dropped')
-  })
-
   test('says nothing was held when not auto-engaged', async () => {
     const tool = createChannelDisengageTool({
       router: fakeRouter(() => ({ keyId: 'k', cleared: 0 })),

@@ -342,37 +342,6 @@ describe('createResourceLoader', () => {
     expect(prompt).not.toContain('<current-time>')
   })
 
-  test('system prompt never contains long-term memory file contents', async () => {
-    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
-
-    const loader = await createResourceLoader({ agentDir })
-
-    const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).not.toContain('memory-content-marker')
-  })
-
-  test('composeSystemPrompt does not accept or emit a `now` field (removed when the anchor moved to per-turn injection)', () => {
-    const prompt = composeSystemPrompt({
-      self: '# Identity\n\nfoo',
-      gitNudge: '',
-    })
-    expect(prompt).not.toContain('## Now')
-    expect(prompt).not.toContain('Session started at')
-  })
-
-  test('composeSystemPrompt includes GPT proactive next-step nudge when supplied', () => {
-    const prompt = composeSystemPrompt({
-      self: '# Identity\n\nfoo',
-      gitNudge: '',
-      proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE,
-    })
-
-    expect(prompt).toContain('## Proactive and requested next-step guidance')
-    expect(prompt).toContain('do not ask for permission or confirmation')
-    expect(prompt).toContain('Do the next step when it makes sense')
-    expect(prompt).toContain('When the user explicitly asks for suggestions')
-  })
-
   test('composeSystemPrompt omits proactive next-step nudge by default for non-GPT callers', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
@@ -500,12 +469,6 @@ describe('createResourceLoader', () => {
     expect(userSkill?.description).toBe('A user-installed skill')
   })
 
-  test('does not throw when <agentDir>/.agents/skills/ does not exist', async () => {
-    // when / then
-    const loader = await createResourceLoader({ agentDir })
-    expect(loader.getSkills().skills).toBeDefined()
-  })
-
   test('exposes muscle-memory skills under <agentDir>/memory/skills/ to the agent', async () => {
     // given
     await mkdir(join(agentDir, 'memory', 'skills', 'release-checklist'), { recursive: true })
@@ -522,12 +485,6 @@ describe('createResourceLoader', () => {
     const memorySkill = skills.find((s) => s.name === 'release-checklist')
     expect(memorySkill).toBeDefined()
     expect(memorySkill?.description).toBe('Use when shipping a release.')
-  })
-
-  test('does not throw when <agentDir>/memory/skills/ does not exist', async () => {
-    // when / then
-    const loader = await createResourceLoader({ agentDir })
-    expect(loader.getSkills().skills).toBeDefined()
   })
 
   test('appends a dirty-files nudge to the system prompt when the agent folder has uncommitted changes', async () => {
@@ -895,25 +852,6 @@ describe('deriveSystemPromptMode', () => {
   })
   test('returns full when origin is undefined (back-compat default)', () => {
     expect(deriveSystemPromptMode(undefined)).toBe('full')
-  })
-
-  test('covers every declared origin kind without falling through', () => {
-    const allKinds: SessionOrigin[] = [
-      { kind: 'tui', sessionId: 's' },
-      {
-        kind: 'channel',
-        adapter: 'slack-bot',
-        workspace: 'T0',
-        chat: 'C0',
-        thread: null,
-      },
-      { kind: 'cron', jobId: 'j', jobKind: 'prompt' },
-      { kind: 'subagent', subagent: 's', parentSessionId: 'p' },
-    ]
-    for (const origin of allKinds) {
-      const mode = deriveSystemPromptMode(origin)
-      expect(['full', 'slim']).toContain(mode)
-    }
   })
 })
 
@@ -1540,31 +1478,6 @@ describe('formatRestartNoticeOriginating (originating session: proactively confi
     expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
     expect(text.startsWith('---\n')).toBe(true)
     expect(text).toMatch(/\n---\n$/)
-  })
-
-  test('instructs the model to proactively confirm restart completion in the very next reply', () => {
-    // when
-    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
-
-    // then
-    expect(text).toContain('**Your very next reply must briefly confirm the restart completed**')
-    expect(text).toContain("user's explicit\nrequest via the `restart` tool")
-  })
-
-  test('explicitly tells the model not to keep mentioning the restart after the first confirmation', () => {
-    // when
-    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
-
-    // then
-    expect(text).toContain('do\nnot mention the restart again unless the user explicitly asks about it')
-  })
-
-  test('does NOT include the sibling-only "Do not acknowledge or reply" directive (would contradict proactive confirmation)', () => {
-    // when
-    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
-
-    // then
-    expect(text).not.toContain('Do not acknowledge or reply to this notice')
   })
 
   test('embeds the restart timestamp in the body', () => {

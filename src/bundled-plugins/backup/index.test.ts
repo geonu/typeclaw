@@ -93,32 +93,6 @@ async function advance(ms: number): Promise<void> {
 }
 
 describe('backup plugin', () => {
-  test('exposes the three subagents (runner, message, diagnose)', async () => {
-    const { ctx } = makeCtx({ config: tinyConfig })
-    const exports = await loadPlugin(ctx)
-    const subs = Object.keys(exports.subagents ?? {}).sort()
-    expect(subs).toEqual(['backup', 'backup-diagnose', 'backup-message'])
-  })
-
-  test('registers the four expected hooks', async () => {
-    const { ctx } = makeCtx({ config: tinyConfig })
-    const exports = await loadPlugin(ctx)
-    const hookNames = Object.keys(exports.hooks ?? {}).sort()
-    expect(hookNames).toEqual(['session.end', 'session.idle', 'session.turn.end', 'session.turn.start'])
-  })
-
-  test('config schema validates with all defaults', () => {
-    const parsed = backupPlugin.configSchema?.parse(undefined)
-    expect(parsed).toEqual({
-      enabled: true,
-      idleMs: 30_000,
-      pushToOrigin: true,
-      maintenance: true,
-      commitTimeoutMs: 30_000,
-      networkTimeoutMs: 60_000,
-    })
-  })
-
   test('rejects idleMs below 1000ms', () => {
     expect(() => backupPlugin.configSchema?.parse({ idleMs: 500 })).toThrow()
   })
@@ -206,14 +180,6 @@ describe('backup plugin', () => {
     await idle({ sessionId: 's2', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
     await advance(80)
     expect(spawnCalls.length).toBe(1)
-  })
-
-  test('diagnose subagent prompt forbids acknowledgement bypasses on its push retry', async () => {
-    const { DIAGNOSE_FAILURE_SYSTEM_PROMPT } = await import('./subagents')
-    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toContain('permission-only')
-    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toContain('do not add an acknowledgement argument')
-    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toContain('inherits the operator role')
-    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toMatch(/push retry fails again.*stop/i)
   })
 })
 

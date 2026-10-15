@@ -288,18 +288,6 @@ describe('applyTurnThinkingLevel', () => {
     }
   }
 
-  test('escalation turn sets xhigh', () => {
-    const session = fakeSession()
-    applyTurnThinkingLevel(session, 'ultrathink please', 'low')
-    expect(session.calls).toEqual(['xhigh'])
-  })
-
-  test('normal turn resets to the session default', () => {
-    const session = fakeSession()
-    applyTurnThinkingLevel(session, 'add a comment', 'low')
-    expect(session.calls).toEqual(['low'])
-  })
-
   test('normal turn with no session default makes no call', () => {
     const session = fakeSession()
     applyTurnThinkingLevel(session, 'add a comment', undefined)

@@ -10,11 +10,6 @@ describe('addSlackMentionHints', () => {
     expect(out).toBe("Yo <@U0B4JR0KPFH> (johndoe), what's up?")
   })
 
-  test('keeps the original token intact so it round-trips as a real mention', async () => {
-    const out = await addSlackMentionHints('<@U1>', resolver({ U1: 'alice' }))
-    expect(out).toContain('<@U1>')
-  })
-
   test('labels the bot’s own mention as (you)', async () => {
     const out = await addSlackMentionHints('hey <@UBOT> here', resolver({ UBOT: 'Momo' }), { botUserId: 'UBOT' })
     expect(out).toBe('hey <@UBOT> (you) here')

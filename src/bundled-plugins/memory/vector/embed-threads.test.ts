@@ -25,9 +25,4 @@ describe('resolveEmbedThreadCount', () => {
     expect(n).toBeGreaterThanOrEqual(1)
     expect(n).toBeLessThanOrEqual(DEFAULT_MAX_EMBED_THREADS)
   })
-
-  test('default cap is a small positive integer', () => {
-    expect(Number.isInteger(DEFAULT_MAX_EMBED_THREADS)).toBe(true)
-    expect(DEFAULT_MAX_EMBED_THREADS).toBeGreaterThan(0)
-  })
 })

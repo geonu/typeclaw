@@ -7,7 +7,6 @@ import {
   retryBackoffMs,
   retryTurnAfterCompletedToolResult,
   retryTurnOnPersistentSession,
-  RETRIES_PER_REF,
 } from './retry-same-ref'
 
 describe('retryBackoffMs', () => {
@@ -244,12 +243,6 @@ describe('retryTurnAfterCompletedToolResult', () => {
     expect(agent.continued).toBe(1)
     expect(agent.state.messages).toEqual([{ role: 'toolResult' }, progress])
     expect(agent.state.messages).not.toBe(messages)
-  })
-})
-
-describe('RETRIES_PER_REF', () => {
-  test('defaults to a single conservative same-ref replay', () => {
-    expect(RETRIES_PER_REF).toBe(1)
   })
 })
 

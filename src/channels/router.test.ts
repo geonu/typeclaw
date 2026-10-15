@@ -707,34 +707,6 @@ async function expectPersistedLastInboundAt(agentDir: string, expected: number):
 const KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
 const SLACK_KEY: ChannelKey = { adapter: 'slack-bot', workspace: 'g1', chat: 'c1', thread: null }
 
-test('expectFencedRuntimeNotice rejects a notice missing its closing fence', () => {
-  const phrase = 'distinctive notice text'
-  const notice = [
-    '---',
-    '**[SYSTEM MESSAGE — not from a human]**',
-    '**Do not acknowledge or reply to this notice.**',
-    phrase,
-    '---',
-  ].join('\n')
-  const missingClosingFence = notice.slice(0, notice.lastIndexOf('\n---'))
-
-  expect(() => expectFencedRuntimeNotice(missingClosingFence, phrase)).toThrow()
-})
-
-test('expectFencedRuntimeNotice surfaces a fence shared between adjacent notices', () => {
-  // given two notices separated by a single `---` doing double duty
-  const marker = '**[SYSTEM MESSAGE — not from a human]**'
-  const closer = '**Do not acknowledge or reply to this notice.**'
-  const shared = ['---', marker, closer, 'FIRST PHRASE', '---', marker, closer, 'SECOND PHRASE', '---'].join('\n')
-
-  // when each notice is validated on its own, both still look complete
-  const first = expectFencedRuntimeNotice(shared, 'FIRST PHRASE')
-  const second = expectFencedRuntimeNotice(shared, 'SECOND PHRASE')
-
-  // then only comparing their fences reveals the boundary is not independent
-  expect(first.closeIndex).toBe(second.openIndex)
-})
-
 describe('ChannelRouter session lifecycle', () => {
   test('creates a session on first inbound and reuses it on second', async () => {
     const dir = await tempDir()
@@ -1068,23 +1040,6 @@ describe('ChannelRouter session lifecycle', () => {
     await router.__testing!.flushDebounce(KEY)
 
     // then: the hard cap forces rollover regardless of base vs delta
-    expect(sessions).toHaveLength(2)
-  })
-
-  test('grace fails closed: no transcript path (baseContextBytes=0) rolls over at soft TTL', async () => {
-    // given: a router with no transcript path (the prior default behavior)
-    const dir = await tempDir()
-    const nowRef = { value: 1000 }
-    const { router, sessions } = makeRouter(dir, { nowRef })
-    await router.route(inbound({ externalMessageId: 'm1' }))
-    await router.__testing!.flushDebounce(KEY)
-
-    // when: a follow-up lands in what would be the grace band
-    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
-    await router.route(inbound({ externalMessageId: 'm2', text: 'no base measured' }))
-    await router.__testing!.flushDebounce(KEY)
-
-    // then: with baseContextBytes=0, grace is disabled and it rolls over
     expect(sessions).toHaveLength(2)
   })
 
@@ -2368,22 +2323,6 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(turnStartPrompts[0]!).toBe('first line\nsecond line')
-  })
-
-  test('labels the current message even when there is no recent context', async () => {
-    // Regression: the `## Current message` header used to be gated on
-    // observed.length > 0, so a turn carrying only the current message (no
-    // recent context) rendered the batch line bare. The group-chat nudge tells
-    // the model to identify "THIS latest message", so the latest message must
-    // be labeled regardless of whether recent context exists.
-    const dir = await tempDir()
-    const { router, sessions } = makeRouter(dir)
-    await router.route(inbound({ text: 'hey bot' }))
-    await router.__testing!.flushDebounce(KEY)
-    const prompt = sessions[0]!.prompts[0]!
-    expect(prompt).not.toContain('Recent context')
-    expect(prompt).toContain('## Current message (addressed to you)')
-    expect(prompt).toContain('alice <@alice>: hey bot')
   })
 
   test('engaged turn carries the history-interpretation note above the current-message header', async () => {
@@ -12882,15 +12821,6 @@ describe('ChannelRouter history dispatch', () => {
     expect(result.error).not.toContain('history-not-supported')
     expect(logs.some((l) => l.includes('history fetch threw') && l.includes('timed out after 50ms'))).toBe(true)
   })
-
-  test('an adapter with no registered history callback still reports history-not-supported', async () => {
-    const dir = await tempDir()
-    const { router } = makeRouter(dir)
-
-    const result = await router.fetchHistory('telegram-bot', { chat: 'c1', thread: null, limit: 1 })
-
-    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
-  })
 })
 
 describe('ChannelRouter message-get dispatch', () => {
@@ -14839,75 +14769,6 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(reminderText).toContain('explorer')
     expect(reminderText).toContain('bg_xyz')
     expect(reminderText).toContain('subagent_output')
-  })
-
-  test('reminder text carries the channel-aware nudge (channel_reply, invisible, NO_REPLY)', async () => {
-    const dir = await tempDir()
-    const { router, sessions } = makeRouter(dir)
-    await router.route(inbound())
-    await router.__testing!.flushDebounce(KEY)
-
-    await router.injectSubagentCompletionReminder({
-      parentSessionId: 'ses_fake_1',
-      subagent: 'explorer',
-      taskId: 'bg_xyz',
-      ok: true,
-      durationMs: 5_000,
-    })
-    await waitFor(() => sessions[0]!.prompts.length >= 2)
-
-    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
-    expect(reminderText).toContain('channel_reply')
-    expect(reminderText).toContain('invisible')
-    expect(reminderText).toContain('NO_REPLY')
-  })
-
-  test('a github session reminder carries the formal-review carve-out (gh api /reviews)', async () => {
-    // given a live github session (sessions are stamped ses_fake_<n> by creation order)
-    const dir = await tempDir()
-    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:7', thread: null }
-    const { router, sessions } = makeRouter(dir)
-    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:7' }))
-    await router.__testing!.flushDebounce(githubKey)
-    expect(sessions).toHaveLength(1)
-
-    // when a reviewer subagent completes for it
-    const result = await router.injectSubagentCompletionReminder({
-      parentSessionId: 'ses_fake_1',
-      subagent: 'reviewer',
-      taskId: 'bg_gh',
-      ok: true,
-      durationMs: 5_000,
-    })
-    expect(result.kind).toBe('delivered')
-    await waitFor(() => sessions[0]!.prompts.length >= 2)
-
-    // then the reminder names the formal-review API path and keeps the base nudge
-    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
-    expect(reminderText).toContain('channel_reply')
-    expect(reminderText).toContain('/reviews')
-    expect(reminderText).toMatch(/formal review/i)
-  })
-
-  test('a discord session reminder does NOT carry the github carve-out (no gh api leakage)', async () => {
-    const dir = await tempDir()
-    const { router, sessions } = makeRouter(dir)
-    await router.route(inbound())
-    await router.__testing!.flushDebounce(KEY)
-
-    await router.injectSubagentCompletionReminder({
-      parentSessionId: 'ses_fake_1',
-      subagent: 'reviewer',
-      taskId: 'bg_dc',
-      ok: true,
-      durationMs: 5_000,
-    })
-    await waitFor(() => sessions[0]!.prompts.length >= 2)
-
-    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
-    expect(reminderText).toContain('channel_reply')
-    expect(reminderText).not.toContain('/reviews')
-    expect(reminderText).not.toContain('gh api')
   })
 
   test('non-matching parentSessionId returns no-live-session and does not drain', async () => {

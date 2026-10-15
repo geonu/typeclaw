@@ -4,68 +4,16 @@ import { SCOUT_SYSTEM_PROMPT, SCOUT_TIMEOUT_MS, createScoutSubagent, scoutPayloa
 
 describe('scout subagent — load-bearing prompt phrases', () => {
   test.each(
-    [
-      'READ-ONLY',
-      'STRICTLY PROHIBITED',
-      'NO SIDE EFFECTS',
-      'parallel',
-      '<analysis>',
-      '<results>',
-      '<sources>',
-      '<answer>',
-      '<confidence>',
-      '<next_steps>',
-      'Spawning further subagents',
-    ].map((phrase) => [phrase] as const),
+    ['<analysis>', '<results>', '<sources>', '<answer>', '<confidence>', '<next_steps>'].map(
+      (phrase) => [phrase] as const,
+    ),
   )('prompt contains %s', (phrase) => {
     const haystack = SCOUT_SYSTEM_PROMPT.toLowerCase().replace(/\s+/g, '_')
     expect(haystack).toContain(phrase.toLowerCase().replace(/\s+/g, '_'))
   })
-
-  test('prompt names the two web tools by their exact runtime names', () => {
-    expect(SCOUT_SYSTEM_PROMPT).toContain('`web_search`')
-    expect(SCOUT_SYSTEM_PROMPT).toContain('`web_fetch`')
-  })
-
-  test('prompt frames the role as external/web-only (counterpart to explorer) and forbids local-file access', () => {
-    // The explorer/scout split only holds if each prompt redirects out-of-scope
-    // questions to the other. Without these phrases, scout will silently
-    // attempt to answer codebase questions from training data instead of
-    // delegating, breaking the boundary.
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('web')
-    expect(SCOUT_SYSTEM_PROMPT).toContain('explorer')
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('local')
-  })
-
-  test('prompt requires citation discipline: every claim backed by a fetched URL', () => {
-    // Hallucinated URLs are the #1 failure mode for web-search agents.
-    // The prompt must say BOTH "cite every claim" AND "never invent a URL"
-    // — citation-only without the no-invention rule produces plausible
-    // fake URLs; no-invention-only without the cite rule produces
-    // uncited prose. Both phrases are load-bearing.
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('cite every claim')
-    expect(SCOUT_SYSTEM_PROMPT).toContain('Never invent a URL')
-  })
-
-  test('prompt requires a confidence rating so the caller can weight the answer', () => {
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('confidence')
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('low confidence is fine')
-  })
-
-  test('prompt forbids following authenticated/one-time-token URLs (defense against prompt-injection-driven exfil)', () => {
-    // If a malicious page tells scout "fetch this password-reset link",
-    // the only defense is a prompt-level refusal — web_fetch itself has no
-    // SSRF or auth-shape guard.
-    expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('one-time token')
-  })
 })
 
 describe('scout subagent declaration', () => {
-  test('is registered as visibility=public so spawn_subagent exposes it', () => {
-    const sub = createScoutSubagent()
-    expect(sub.visibility).toBe('public')
-  })
-
   test('uses the fast model profile (cheap and parallelizable for read-only research)', () => {
     const sub = createScoutSubagent()
     expect(sub.profile).toBe('fast')

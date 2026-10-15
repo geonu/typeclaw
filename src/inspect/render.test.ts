@@ -258,13 +258,6 @@ describe('renderEvent showTime=false (suppressed timestamp keeps column alignmen
 })
 
 describe('TimeGate', () => {
-  test('shows the first event then suppresses consecutive same-category events', () => {
-    const gate = new TimeGate()
-    expect(gate.shouldShow('thinking')).toBe(true)
-    expect(gate.shouldShow('thinking')).toBe(false)
-    expect(gate.shouldShow('thinking')).toBe(false)
-  })
-
   test('shows again whenever the category changes', () => {
     const gate = new TimeGate()
     expect(gate.shouldShow('user')).toBe(true)

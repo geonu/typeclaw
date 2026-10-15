@@ -4,15 +4,6 @@ import path from 'node:path'
 import { styled } from './style-text'
 
 describe('styled', () => {
-  test('emits ANSI escapes', () => {
-    expect(styled('green', 'x')).toBe('\u001b[32mx\u001b[39m')
-  })
-
-  test('accepts the array form of the format argument', () => {
-    expect(styled(['bold', 'red'], 'x')).toContain('\u001b[1m')
-    expect(styled(['bold', 'red'], 'x')).toContain('\u001b[31m')
-  })
-
   test('leaves the wrapped text intact', () => {
     expect(styled('dim', '사당동 27°C')).toContain('사당동 27°C')
   })

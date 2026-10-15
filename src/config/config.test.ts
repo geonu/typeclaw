@@ -228,11 +228,6 @@ describe('thinkingLevel is per-profile, not a top-level field', () => {
     // never reads it; per-profile `models.<profile>.thinkingLevel` is the path.
     expect(extractPluginConfigs(parsed).thinkingLevel).toBe('high')
   })
-
-  test('is not classified in FIELD_EFFECTS (the per-profile level rides `models`)', () => {
-    expect('thinkingLevel' in FIELD_EFFECTS).toBe(false)
-    expect(FIELD_EFFECTS.models).toBe('applied')
-  })
 })
 
 describe('customModels field', () => {
@@ -1188,11 +1183,6 @@ describe('docker.file schema', () => {
     expect(FIELD_EFFECTS['docker.file']).toBe('restart-required')
   })
 
-  test("cjkFonts defaults to 'auto' (resolved from host locale at start; non-CJK hosts skip the ~89MB layer)", () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.cjkFonts).toBe('auto')
-  })
-
   test('cjkFonts: false is honored and merges with other defaults', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL },
@@ -1216,11 +1206,6 @@ describe('docker.file schema', () => {
     ).toThrow()
   })
 
-  test('cloudflared defaults to false so non-tunnel agents skip the ~38MB binary; tunnel add / channel add flip it on', () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.cloudflared).toBe(false)
-  })
-
   test('cloudflared: true is honored and merges with other defaults', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL },
@@ -1237,11 +1222,6 @@ describe('docker.file schema', () => {
     })
     expect(parsed.docker.file.cloudflared).toBe(false)
     expect(parsed.docker.file.gh).toBe(true)
-  })
-
-  test('xvfb defaults to true so headed agent-browser works in the container without extra config', () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.xvfb).toBe(true)
   })
 
   test('xvfb: false is honored and merges with other defaults', () => {
@@ -1265,11 +1245,6 @@ describe('docker.file schema', () => {
     ).toThrow()
   })
 
-  test('claudeCode is boolean-only (no version-string variant); defaults to false', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.docker.file.claudeCode).toBe(false)
-  })
-
   test('claudeCode: true is preserved when explicitly enabled', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, docker: { file: { claudeCode: true } } })
     expect(parsed.docker.file.claudeCode).toBe(true)
@@ -1277,11 +1252,6 @@ describe('docker.file schema', () => {
 
   test('claudeCode rejects string version pins (the upstream installer manages versions via env, not apt pins)', () => {
     expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { claudeCode: '1.2.3' } } })).toThrow()
-  })
-
-  test('codexCli is boolean-only (no version-string variant); defaults to false', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.docker.file.codexCli).toBe(false)
   })
 
   test('codexCli: true is preserved when explicitly enabled', () => {

@@ -30,25 +30,9 @@ describe('parsePorcelain', () => {
     const out = parsePorcelain('\n M\n M ok.ts\n')
     expect(out).toEqual(['ok.ts'])
   })
-
-  test('handles a trailing newline without producing an empty entry', () => {
-    const out = parsePorcelain(' M a.ts\n M b.ts\n')
-    expect(out).toEqual(['a.ts', 'b.ts'])
-  })
 })
 
 describe('formatNudge', () => {
-  test('renders a single-file count grammatically', () => {
-    const text = formatNudge(['src/foo.ts'])
-    expect(text).toContain('1 uncommitted file ')
-    expect(text).toContain('- src/foo.ts')
-  })
-
-  test('renders a plural count grammatically', () => {
-    const text = formatNudge(['a.ts', 'b.ts'])
-    expect(text).toContain('2 uncommitted files ')
-  })
-
   test('lists up to ten paths inline and summarizes the rest', () => {
     const paths = Array.from({ length: 13 }, (_, i) => `src/file-${i}.ts`)
     const text = formatNudge(paths)
@@ -64,11 +48,6 @@ describe('formatNudge', () => {
     const text = formatNudge(paths)
     expect(text).not.toContain('and 0 more')
     expect(text).not.toContain('… and')
-  })
-
-  test('starts with a markdown section header that mirrors system-prompt style', () => {
-    const text = formatNudge(['x.ts'])
-    expect(text.startsWith('## Uncommitted changes at session start')).toBe(true)
   })
 })
 

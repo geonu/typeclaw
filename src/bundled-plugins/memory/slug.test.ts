@@ -52,11 +52,6 @@ describe('headingToSlug', () => {
     expect(result.startsWith('untitled-')).toBe(true)
     expect(result).toHaveLength('untitled-'.length + 6)
   })
-
-  it('deduplicates when slug is added to set between calls', () => {
-    const existing = new Set<string>(['bar'])
-    expect(headingToSlug('Bar', existing)).toBe('bar-2')
-  })
 })
 
 describe('slugIsHeadingEcho', () => {

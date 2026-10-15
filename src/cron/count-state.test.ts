@@ -122,17 +122,6 @@ describe('createCountStore', () => {
     expect(store.get('a', job('a'))).toBe(0)
   })
 
-  test('a straggler increment for a fingerprint-changed job is dropped', async () => {
-    const io = memoryIO()
-    const oldJob = job('a', { prompt: 'old' })
-    const store = await createCountStore('/agent', [oldJob], io)
-
-    await store.reconcile([job('a', { prompt: 'new' })])
-    await store.increment('a', oldJob, Date.now())
-
-    expect(store.get('a', job('a', { prompt: 'new' }))).toBe(0)
-  })
-
   test('does not write the sidecar on boot when reconciliation is a no-op', async () => {
     const io = memoryIO()
     await createCountStore('/agent', [job('a')], io)

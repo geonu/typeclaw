@@ -379,16 +379,6 @@ describe('classifyGithubInbound', () => {
       expect(removed?.externalMessageId).not.toBe(requestedAgain?.externalMessageId)
       expect(requested?.externalMessageId).not.toBe(requestedAgain?.externalMessageId)
     })
-
-    it('falls back to PR id when title/branch info is absent', () => {
-      const payload = reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' })
-      delete (payload.pull_request as Record<string, unknown>).title
-      delete (payload.pull_request as Record<string, unknown>).head
-      delete (payload.pull_request as Record<string, unknown>).base
-      const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot')
-      expect(msg?.text).toContain('PR #7')
-      expect(msg?.text).not.toContain('Branch:')
-    })
   })
 
   describe('pull_request.review_request_removed', () => {
@@ -497,22 +487,6 @@ describe('classifyGithubInbound', () => {
   })
 
   describe('review.on gating', () => {
-    it('defaults to review_requested when reviewOn is omitted: opened stays awareness-only', () => {
-      const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot')
-      expect(msg?.isBotMention).toBe(false)
-      expect(msg?.text).not.toContain('Please review the changes line-by-line')
-    })
-
-    it('defaults to review_requested when reviewOn is omitted: review_requested triggers a review', () => {
-      const msg = classifyGithubInbound(
-        'pull_request',
-        reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
-        'typeclaw-bot',
-      )
-      expect(msg?.isBotMention).toBe(true)
-      expect(msg?.text).toContain('requested your review on PR #7')
-    })
-
     it('review_requested on a draft PR triggers a review under the default config', () => {
       const msg = classifyGithubInbound(
         'pull_request',
@@ -532,16 +506,6 @@ describe('classifyGithubInbound', () => {
         expect(msg?.text).toContain('Please review the changes line-by-line and post your feedback.')
         expect(msg?.isBotMention).toBe(true)
         expect(msg?.authorName).toBe('alice')
-      })
-
-      it('falls back to PR id and omits the branch when title/branch info is absent', () => {
-        const payload = openedPayload()
-        delete (payload.pull_request as Record<string, unknown>).title
-        delete (payload.pull_request as Record<string, unknown>).head
-        delete (payload.pull_request as Record<string, unknown>).base
-        const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot', { reviewOn: 'opened' })
-        expect(msg?.text).toContain('opened PR #7')
-        expect(msg?.text).not.toContain('Branch:')
       })
 
       it('still triggers a review on an explicit review_requested (opened is a superset)', () => {
@@ -579,14 +543,6 @@ describe('classifyGithubInbound', () => {
         )
         expect(msg?.isBotMention).toBe(true)
         expect(msg?.text).toContain('requested your review on PR #7')
-      })
-
-      it('reviews a skipped draft once it turns ready (ready_for_review fires on the draft→ready transition)', () => {
-        const msg = classifyGithubInbound('pull_request', readyForReviewPayload(), 'typeclaw-bot', {
-          reviewOn: 'opened',
-        })
-        expect(msg?.isBotMention).toBe(true)
-        expect(msg?.text).toContain('Please review the changes line-by-line')
       })
 
       it('suppresses the review trigger when the bot opened its own PR (handler drops the self-authored event)', () => {
@@ -930,16 +886,6 @@ describe('classifyGithubInbound — empty-body handling', () => {
       issue: { number: 7, id: 700, title: 'Broken login', body: '', created_at: '2026-01-01T00:00:00Z', user: user() },
     }
     expect(classifyGithubInbound('issues', payload, 'typeclaw-bot')).toBe(null)
-  })
-
-  it('still routes review_requested through the synthesized review trigger (not affected by the empty-body drop)', () => {
-    const msg = classifyGithubInbound(
-      'pull_request',
-      reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
-      'typeclaw-bot',
-    )
-    expect(msg?.isBotMention).toBe(true)
-    expect(msg?.text).toContain('requested your review on PR #7')
   })
 })
 

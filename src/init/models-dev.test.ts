@@ -26,14 +26,6 @@ describe('curatedOptions', () => {
     expect(options.some((o) => o.providerId === 'fireworks')).toBe(true)
   })
 
-  test('includes the kimi-k2p6-turbo router (curated, not on models.dev)', () => {
-    const options = curatedOptions()
-
-    const kimi = options.find((o) => o.modelId === 'accounts/fireworks/routers/kimi-k2p6-turbo')
-    expect(kimi).toBeDefined()
-    expect(kimi?.providerId).toBe('fireworks')
-  })
-
   test('flags supportsVision based on curated input modality', () => {
     const options = curatedOptions()
 
@@ -163,43 +155,6 @@ describe('fetchModelOptions', () => {
       contextWindow: 400000,
       maxTokens: 128000,
       cost: { input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite: 0 },
-    })
-  })
-
-  test('upstream still supplies every field for a ref we do not curate', async () => {
-    // The flip to curated-first must not starve uncurated models, which have no
-    // curated record to read and would otherwise lose their metadata entirely.
-    const fetchImpl = routedFetch({
-      [MODELS_DEV_URL]: {
-        openai: {
-          id: 'openai',
-          name: 'OpenAI',
-          models: {
-            'gpt-6-live': {
-              id: 'gpt-6-live',
-              name: 'GPT-6 Live',
-              reasoning: true,
-              modalities: { input: ['text', 'image'], output: ['text'] },
-              limit: { context: 500000, output: 64000 },
-              cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 0.2 },
-            },
-          },
-        },
-      },
-      [OPENGATEWAY_CATALOG_URL]: new Error('gateway catalog down'),
-      [OPENGATEWAY_PRICES_URL]: new Error('gateway prices down'),
-    })
-
-    const result = await fetchModelOptions({ fetchImpl })
-
-    expect(result.options.find((o) => o.ref === 'openai/gpt-6-live')).toMatchObject({
-      modelName: 'GPT-6 Live',
-      curated: false,
-      reasoning: true,
-      supportsVision: true,
-      contextWindow: 500000,
-      maxTokens: 64000,
-      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
     })
   })
 

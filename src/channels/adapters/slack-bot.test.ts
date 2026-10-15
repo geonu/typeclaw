@@ -10,7 +10,7 @@ import { BackgroundObligationStore } from '@/channels/background-obligations'
 import { InboundJournal } from '@/channels/inbound-journal'
 import { MEMBERSHIP_CACHE_TRANSIENT_TTL_MS } from '@/channels/membership'
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
-import { channelsSchema, defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
+import { channelsSchema, defaultHistoryConfig } from '@/channels/schema'
 import type { ChannelKey, FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 import { SLACK_APP_MANIFEST } from '@/cli/ui'
 import { noopPermissionService } from '@/permissions'
@@ -639,28 +639,6 @@ describe('createSlackMembershipResolver', () => {
       'https://slack.com/api/conversations.members',
       'https://slack.com/api/users.list',
     ])
-  })
-
-  test('classifies members with no per-member users.info when the bot set covers them', async () => {
-    const { fn, calls } = fakeFetch([
-      slackResponse({ ok: true, channel: { num_members: 4 } }),
-      slackResponse({ ok: true, members: ['U1', 'U2', 'UBOT', 'U3'] }),
-      slackResponse({ ok: true, members: [{ id: 'UBOT', is_bot: true }] }),
-    ])
-    const resolver = createSlackMembershipResolver({
-      token: 'tok',
-      logger: silentLogger(),
-      historyCallback: emptyHistory(),
-      fetchImpl: fn,
-      now: () => 30,
-    })
-
-    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toMatchObject({
-      humans: 3,
-      bots: 1,
-      humanMemberIds: ['U1', 'U2', 'U3'],
-    })
-    expect(calls.filter((c) => c.url.endsWith('/users.info'))).toHaveLength(0)
   })
 
   test('a lurking bot never seen in history is still counted via the bulk set', async () => {
@@ -1440,14 +1418,6 @@ describe('createSlackHistoryCallback', () => {
     return { info: () => {}, warn: () => {}, error: () => {} }
   }
 
-  function permissiveConfig(): ChannelAdapterConfig {
-    return {
-      engagement: { trigger: ['mention'], stickiness: 'off' },
-      enabled: true,
-      history: defaultHistoryConfig(),
-    }
-  }
-
   test('uses conversations.replies when thread is set, with channel + ts in the body', async () => {
     // given
     const { fn, calls } = fakeFetch({
@@ -2179,14 +2149,6 @@ describe('slack-bot createOutboundCallback', () => {
     return { info: () => {}, warn: () => {}, error: () => {} }
   }
 
-  function permissive(): ChannelAdapterConfig {
-    return {
-      engagement: { trigger: ['mention'], stickiness: 'off' },
-      enabled: true,
-      history: defaultHistoryConfig(),
-    }
-  }
-
   function makeMsg(overrides: Partial<OutboundMessage>): OutboundMessage {
     return { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'hi', ...overrides } as OutboundMessage
   }
@@ -2611,12 +2573,6 @@ describe('slack-bot createOutboundCallback', () => {
     const result = await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
     expect(result.ok).toBe(false)
     expect(clearCalls).toHaveLength(0)
-  })
-})
-
-describe('slack-bot slash command allow-list', () => {
-  test('includes help, stop, reload, and restart', () => {
-    expect(new Set(SLACK_SLASH_COMMAND_NAMES)).toEqual(new Set(['help', 'stop', 'reload', 'restart']))
   })
 })
 

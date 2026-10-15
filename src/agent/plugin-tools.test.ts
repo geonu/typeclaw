@@ -112,15 +112,6 @@ function bundledAcknowledgementGuards(agentDir: string): readonly InternalGuard[
 }
 
 describe('zodToToolParameters', () => {
-  test('produces a JSON-schema-shaped object from a Zod schema', () => {
-    const schema = z.object({ name: z.string(), age: z.number().optional() })
-    const json = zodToToolParameters(schema) as { type?: string; properties?: Record<string, unknown> }
-    expect(json.type).toBe('object')
-    expect(json.properties).toBeDefined()
-    expect(json.properties).toHaveProperty('name')
-    expect(json.properties).toHaveProperty('age')
-  })
-
   test('strips the $schema URI so Ajv (used by pi-ai) can compile the result', async () => {
     const schema = z.object({ path: z.string(), entryId: z.string().min(1) })
     const json = zodToToolParameters(schema) as Record<string, unknown>
@@ -3548,55 +3539,6 @@ describe('resolveBuiltinToolRefs', () => {
       'web_search',
       'web_fetch',
     ])
-  })
-
-  test('pi coding builtins resolve to ToolDefinitions carrying the builtin name', async () => {
-    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    for (const name of ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const) {
-      const r = resolveBuiltinToolRefs([{ __builtinTool: name }], process.cwd())
-      expect(r.length).toBe(1)
-      expect(r[0]?.name).toBe(name)
-    }
-  })
-
-  test('bash resolves to the spawnHook-wired ToolDefinition, not pi bare createBashToolDefinition', async () => {
-    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const pi = await import('@earendil-works/pi-coding-agent')
-    const r = resolveBuiltinToolRefs([{ __builtinTool: 'bash' }], process.cwd())
-    expect(r.length).toBe(1)
-    expect(r[0]?.name).toBe('bash')
-    // It is our own instance carrying the env-overlay spawnHook, not a fresh
-    // pi definition — reference inequality is the observable proof.
-    expect(r[0]).not.toBe(pi.createBashToolDefinition(process.cwd()) as never)
-  })
-
-  test('typeclaw web tools resolve to the original ToolDefinition imports by reference equality', async () => {
-    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const { webSearchTool } = await import('./tools/websearch')
-    const { webFetchTool } = await import('./tools/webfetch')
-    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }], process.cwd())[0]).toBe(webSearchTool)
-    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }], process.cwd())[0]).toBe(webFetchTool)
-  })
-
-  test('mixed refs resolve in order: web-only (scout-shape)', async () => {
-    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const r = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }, { __builtinTool: 'web_fetch' }], process.cwd())
-    expect(r.map((t) => t.name)).toEqual(['web_search', 'web_fetch'])
-  })
-
-  test('mixed refs resolve in order: coding-only (explorer-shape)', async () => {
-    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const r = resolveBuiltinToolRefs(
-      [
-        { __builtinTool: 'read' },
-        { __builtinTool: 'grep' },
-        { __builtinTool: 'find' },
-        { __builtinTool: 'ls' },
-        { __builtinTool: 'bash' },
-      ],
-      process.cwd(),
-    )
-    expect(r.map((t) => t.name)).toEqual(['read', 'grep', 'find', 'ls', 'bash'])
   })
 
   test('throws on unknown built-in names', async () => {

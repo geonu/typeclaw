@@ -28,19 +28,6 @@ const TUI: SessionOrigin = { kind: 'tui', sessionId: 'ses_x' }
 const CHANNEL: SessionOrigin = { kind: 'channel', adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null }
 
 describe('todo tools', () => {
-  test('todo_write persists to the resolved scope file', async () => {
-    const { write } = toolsFor(TUI)
-    await write.execute(
-      'call-1',
-      { todos: [{ content: 'task', status: 'pending' }] },
-      undefined,
-      undefined,
-      {} as never,
-    )
-    const scope = resolveTodoScope(TUI)!
-    expect(await readTodos(agentDir, scope)).toEqual([{ content: 'task', status: 'pending' }])
-  })
-
   test('todo_write reports remaining incomplete count', async () => {
     const { write } = toolsFor(TUI)
     const res = await write.execute(

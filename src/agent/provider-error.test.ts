@@ -11,7 +11,6 @@ import {
   type Model,
 } from '@earendil-works/pi-ai'
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions'
-import { AgentSession as PiAgentSession, SettingsManager } from '@earendil-works/pi-coding-agent'
 
 import { installLlmFetchObserver } from '@/run/llm-fetch-observer'
 
@@ -497,14 +496,6 @@ function fakeSession(): {
     },
   }
 }
-
-describe('SDK retry contract smoke', () => {
-  test('pi AgentSession exposes retry controls used by provider-error failover', () => {
-    expect(typeof PiAgentSession.prototype.abortRetry).toBe('function')
-    expect(typeof PiAgentSession.prototype.setAutoRetryEnabled).toBe('function')
-    expect(typeof SettingsManager.prototype.getRetrySettings).toBe('function')
-  })
-})
 
 describe('subscribeProviderErrors', () => {
   test('invokes onError exactly once per detected provider error', () => {

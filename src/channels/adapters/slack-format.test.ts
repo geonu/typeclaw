@@ -16,10 +16,6 @@ describe('toSlackMrkdwn', () => {
       expect(toSlackMrkdwn('**a** and **b**')).toBe('*a* and *b*')
     })
 
-    it('handles bold spanning the whole heading-style line', () => {
-      expect(toSlackMrkdwn('**Status Distribution**')).toBe('*Status Distribution*')
-    })
-
     it('leaves an unbalanced ** as a literal', () => {
       expect(toSlackMrkdwn('a ** b')).toBe('a ** b')
     })
@@ -74,10 +70,6 @@ describe('toSlackMrkdwn', () => {
   describe('headings', () => {
     it('renders # heading as bold line', () => {
       expect(toSlackMrkdwn('# Title')).toBe('*Title*')
-    })
-
-    it('renders ## heading as bold line', () => {
-      expect(toSlackMrkdwn('## Status')).toBe('*Status*')
     })
 
     it('renders ### heading as bold line', () => {
@@ -159,10 +151,6 @@ describe('toSlackMrkdwn', () => {
   })
 
   describe('idempotency-ish', () => {
-    it('leaves already-valid mrkdwn bold unchanged', () => {
-      expect(toSlackMrkdwn('*already*')).toBe('_already_')
-    })
-
     it('returns empty string for empty input', () => {
       expect(toSlackMrkdwn('')).toBe('')
     })

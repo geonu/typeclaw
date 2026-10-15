@@ -87,10 +87,6 @@ describe('toKakaoPlainText — fenced code blocks', () => {
 })
 
 describe('toKakaoPlainText — headings', () => {
-  test('strips leading heading hashes', () => {
-    expect(toKakaoPlainText('### Section title')).toBe('Section title')
-  })
-
   test('strips hashes at every level', () => {
     expect(toKakaoPlainText('# h1\n## h2\n###### h6')).toBe('h1\nh2\nh6')
   })

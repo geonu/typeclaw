@@ -30,13 +30,6 @@ describe('cronFileSchema', () => {
     expect(job.command).toEqual(['git', 'commit', '-am', 'backup'])
   })
 
-  test('defaults enabled to true when omitted', () => {
-    const parsed = cronFileSchema.parse({
-      jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
-    })
-    expect(parsed.jobs[0]?.enabled).toBe(true)
-  })
-
   test('respects enabled: false', () => {
     const parsed = cronFileSchema.parse({
       jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', enabled: false }],

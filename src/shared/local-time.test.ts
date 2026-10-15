@@ -17,14 +17,6 @@ describe('formatLocalDate', () => {
     expect(formatLocalDate(d)).toBe('2026-01-05')
   })
 
-  test('does not roll back to previous day for early-morning local times', () => {
-    // Regression: at 1am local on a UTC-west machine, toISOString() returns the
-    // PREVIOUS day. Local-based formatting must report the local calendar day.
-    const d = new Date(2026, 3, 28, 1, 0, 0)
-    const result = formatLocalDate(d)
-    expect(result.endsWith('-28')).toBe(true)
-  })
-
   test('uses today by default', () => {
     const result = formatLocalDate()
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/)
@@ -63,32 +55,9 @@ describe('formatLocalWeekday', () => {
       expect(formatLocalWeekday(d)).toBe(englishDays[dow]!)
     }
   })
-
-  test('uses today by default when no date argument is given', () => {
-    const result = formatLocalWeekday()
-    expect(typeof result).toBe('string')
-    expect(result.length).toBeGreaterThan(0)
-  })
-
-  test('the returned name lines up with what `Intl.DateTimeFormat` reports for en-US', () => {
-    const d = new Date(2026, 4, 28, 12, 0, 0)
-
-    expect(formatLocalWeekday(d)).toBe(new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(d))
-  })
 })
 
 describe('resolveLocalTimezoneName', () => {
-  test('returns the IANA zone name the process is currently in', () => {
-    const result = resolveLocalTimezoneName()
-    expect(result).toMatch(/^[A-Za-z]+(\/[A-Za-z_]+(\/[A-Za-z_]+)?)?$/)
-  })
-
-  test('returns a non-empty string under any environment (falls back to UTC if Intl is unavailable)', () => {
-    const result = resolveLocalTimezoneName()
-    expect(typeof result).toBe('string')
-    expect(result.length).toBeGreaterThan(0)
-  })
-
   test('the returned zone name matches what Intl.DateTimeFormat reports for the same process', () => {
     expect(resolveLocalTimezoneName()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
   })

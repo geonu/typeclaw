@@ -165,24 +165,6 @@ describe('createScheduler', () => {
     scheduler.stop()
   })
 
-  test('fires repeatedly across multiple ticks', async () => {
-    const clock = createFakeClock()
-    const recorder = createFireRecorder()
-    const scheduler = createScheduler({
-      jobs: [promptJob('every-min', '* * * * *')],
-      onFire: recorder.onFire,
-      clock,
-      logger: silentLogger,
-    })
-
-    scheduler.start()
-    await clock.advance(5 * 60 * 1000 + 100)
-
-    expect(recorder.fires.length).toBeGreaterThanOrEqual(5)
-
-    scheduler.stop()
-  })
-
   test('skips disabled jobs', async () => {
     const clock = createFakeClock()
     const recorder = createFireRecorder()

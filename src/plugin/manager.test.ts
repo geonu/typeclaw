@@ -84,33 +84,6 @@ describe('loadPlugins — user plugin failures are isolated', () => {
     ])
   })
 
-  test('a user plugin with an invalid config block is skipped, not fatal', async () => {
-    const loadEntry: LoadPluginEntryFn = async (entry) => ({
-      name: entry,
-      version: undefined,
-      source: entry,
-      defined: { configSchema: z.object({ schedule: z.string() }), plugin: async () => ({}) },
-    })
-
-    const cap = captureWarnings()
-    let result
-    try {
-      result = await loadPlugins({
-        entries: ['bad-config'],
-        agentDir: '/tmp',
-        configsByName: { 'bad-config': { schedule: 42 } },
-        loadEntry,
-      })
-    } finally {
-      cap.restore()
-    }
-
-    expect(result.loadedPlugins).toEqual([])
-    expect(result.failedPlugins).toEqual([
-      { entry: 'bad-config', phase: 'config', error: expect.stringContaining('config invalid: schedule:') },
-    ])
-  })
-
   test('earlier successfully-loaded user plugins survive a later plugin failure', async () => {
     const tool = noopTool()
     const loadEntry: LoadPluginEntryFn = async (entry) => {

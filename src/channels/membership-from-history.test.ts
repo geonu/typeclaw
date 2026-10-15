@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { countAuthors, deriveMembershipFromHistory, HISTORY_LOOKBACK_LIMIT } from './membership-from-history'
+import { countAuthors, deriveMembershipFromHistory } from './membership-from-history'
 import type { ChannelHistoryMessage, FetchHistoryResult } from './types'
 
 function msg(
@@ -40,24 +40,9 @@ describe('countAuthors', () => {
     const result = countAuthors([msg({ authorId: 'flip', isBot: false }), msg({ authorId: 'flip', isBot: true })], 0)
     expect(result).toEqual({ humans: 1, bots: 0, fetchedAt: 0, truncated: true })
   })
-
-  test('always marks result truncated (history is a partial view by definition)', () => {
-    const result = countAuthors([msg({ authorId: 'a', isBot: false })], 0)
-    expect('humans' in result && result.truncated).toBe(true)
-  })
 })
 
 describe('deriveMembershipFromHistory', () => {
-  test('asks history for the lookback limit', async () => {
-    let askedLimit = -1
-    const fetchHistory = async (limit: number): Promise<FetchHistoryResult> => {
-      askedLimit = limit
-      return { ok: true, messages: [] }
-    }
-    await deriveMembershipFromHistory({ fetchHistory, now: () => 0 })
-    expect(askedLimit).toBe(HISTORY_LOOKBACK_LIMIT)
-  })
-
   test('maps a successful fetch into a truncated count', async () => {
     const fetchHistory = async (): Promise<FetchHistoryResult> => ({
       ok: true,

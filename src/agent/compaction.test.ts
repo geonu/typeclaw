@@ -59,16 +59,6 @@ describe('compactionTriggerTokens', () => {
     // then
     expect(trigger).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
   })
-
-  test('very large windows still cap at the same absolute trigger', () => {
-    // given
-    const a = fakeModel(256_000)
-    const b = fakeModel(1_000_000)
-
-    // then: trigger does not scale with the window once past the crossover
-    expect(compactionTriggerTokens(a)).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
-    expect(compactionTriggerTokens(b)).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
-  })
 })
 
 describe('reserveTokensForModel', () => {

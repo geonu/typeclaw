@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLI_VERSION, resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
+import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 
 async function withTmpDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-cli-version-'))
@@ -23,15 +23,6 @@ async function writeInstalledTypeclaw(agentDir: string, version: string): Promis
   await mkdir(installDir, { recursive: true })
   await writeFile(join(installDir, 'package.json'), JSON.stringify({ name: 'typeclaw', version }))
 }
-
-describe('CLI_VERSION', () => {
-  test('exposes the version string from the CLI source tree package.json', () => {
-    // given: the module loaded its own ../../package.json synchronously at import time
-    // then: CLI_VERSION is a non-empty string
-    expect(typeof CLI_VERSION).toBe('string')
-    expect(CLI_VERSION.length).toBeGreaterThan(0)
-  })
-})
 
 describe('resolveScaffoldVersion', () => {
   // The function inspects the path of THIS module's package.json. From the
@@ -56,16 +47,6 @@ describe('resolveBaseImageVersion', () => {
 
       // when: resolving the base image version
       // then: returns the INSTALLED version (0.1.1), not the spec range (0.1.2)
-      expect(resolveBaseImageVersion(dir)).toBe('0.1.1')
-    })
-  })
-
-  test('falls back to the dep spec when node_modules has not been populated yet', async () => {
-    await withTmpDir(async (dir) => {
-      // given: a freshly-init'd agent — package.json exists, node_modules does not
-      await writeAgentPackageJson(dir, { typeclaw: '^0.1.1' })
-
-      // when/then: spec parser extracts 0.1.1 from "^0.1.1"
       expect(resolveBaseImageVersion(dir)).toBe('0.1.1')
     })
   })

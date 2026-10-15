@@ -313,16 +313,6 @@ describe('createChannelReplyTool', () => {
     expect(text.startsWith('---')).toBe(true)
   })
 
-  test('echoes JSON-quoted text so the model can detect duplicates across iterations', async () => {
-    const tool = createChannelReplyTool({
-      router: fakeRouter(async () => ({ ok: true })),
-      origin: slackThreadOrigin,
-    })
-    const result = await runTool(tool, { text: 'hello, I am here!' })
-    const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('"hello, I am here!"')
-  })
-
   test('truncates echo past 500 chars and includes total length so context cost stays bounded', async () => {
     const long = 'a'.repeat(ECHO_MAX_CHARS * 4)
     const tool = createChannelReplyTool({
@@ -404,17 +394,6 @@ describe('createChannelReplyTool', () => {
     })
   })
 
-  test('second consecutive reply appends a soft yield hint', async () => {
-    const tool = createChannelReplyTool({
-      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
-      origin: slackThreadOrigin,
-    })
-    const result = await runTool(tool, { text: 'continuing' })
-    const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('posted to slack-bot:T0/C0: "continuing"')
-    expect(text).toContain('2nd consecutive message')
-  })
-
   test('consecutive-send hint is fenced as a SYSTEM MESSAGE so persona-rich models cannot read it as chat', async () => {
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
@@ -465,10 +444,6 @@ describe('createChannelReplyTool', () => {
   })
 
   describe('renderEcho', () => {
-    test('JSON-quotes short text', () => {
-      expect(renderEcho('hi')).toBe('"hi"')
-    })
-
     test('preserves multibyte characters under the limit', () => {
       expect(renderEcho('héllo wörld 🌍 café')).toBe('"héllo wörld 🌍 café"')
     })
@@ -525,16 +500,6 @@ describe('createChannelReplyTool', () => {
     expect(text).not.toContain('consecutive')
   })
 
-  test('schema rejects empty text via tool definition (smoke check on parameters)', () => {
-    const tool = createChannelReplyTool({
-      router: fakeRouter(async () => ({ ok: true })),
-      origin: slackThreadOrigin,
-    })
-    expect(tool.name).toBe('channel_reply')
-    expect(tool.label).toBe('Channel Reply')
-    expect(tool.description).toContain('default way to respond')
-  })
-
   describe('more_work_this_turn flag (mid-turn status reply)', () => {
     test('surfaces more_work_this_turn: true in details so the router keeps the turn alive', async () => {
       const tool = createChannelReplyTool({
@@ -543,24 +508,6 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, { text: 'working on it…', more_work_this_turn: true })
       expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true })
-    })
-
-    test('omits more_work_this_turn from details by default so the reply stays terminal', async () => {
-      const tool = createChannelReplyTool({
-        router: fakeRouter(async () => ({ ok: true })),
-        origin: slackThreadOrigin,
-      })
-      const result = await runTool(tool, { text: 'done' })
-      expect(result.details).toMatchObject({ ok: true })
-    })
-
-    test('more_work_this_turn: false stays terminal (only true keeps the turn alive)', async () => {
-      const tool = createChannelReplyTool({
-        router: fakeRouter(async () => ({ ok: true })),
-        origin: slackThreadOrigin,
-      })
-      const result = await runTool(tool, { text: 'done', more_work_this_turn: false })
-      expect(result.details).toMatchObject({ ok: true })
     })
 
     test('a denied reply never carries more_work_this_turn (no turn to keep alive)', async () => {

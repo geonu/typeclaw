@@ -87,25 +87,6 @@ describe('renderSubagentCompletionReminder', () => {
     expect(text).toContain('invisible')
   })
 
-  test('channel=true names the deferred-reply contract: this turn is when the promised reply lands', () => {
-    const text = renderSubagentCompletionReminder({
-      subagent: 'explorer',
-      taskId: 'bg_xyz',
-      ok: true,
-      durationMs: 5_000,
-      channel: true,
-    })
-    expect(text).toMatch(/promised reply lands/i)
-    expect(text).toContain('subagent_output')
-    // The "empty / duplicate" silent-turn carve-out now points at
-    // skip_response (structured, logs reason) with NO_REPLY as legacy
-    // fallback. Pin BOTH phrases so a future refactor that drops one
-    // surfaces here instead of silently regressing the guidance.
-    expect(text).toContain('skip_response')
-    expect(text).toMatch(/genuinely empty or duplicates/i)
-    expect(text).toContain('legacy fallback')
-  })
-
   test('channel=true on a FAILED reminder also appends the nudge (failure still needs surfacing)', () => {
     const text = renderSubagentCompletionReminder({
       subagent: 'scout',

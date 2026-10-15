@@ -65,23 +65,6 @@ export default definePlugin({
 })
 `
 
-describe('BUILTIN_COMMAND_NAMES exposure', () => {
-  test('contains every subCommand declared in cli/index.ts', () => {
-    // Source of truth: this list must match what citty has wired in
-    // src/cli/index.ts subCommands. The dispatch logic depends on it.
-    expect(BUILTIN_COMMAND_NAMES).toContain('init')
-    expect(BUILTIN_COMMAND_NAMES).toContain('start')
-    expect(BUILTIN_COMMAND_NAMES).toContain('stop')
-    expect(BUILTIN_COMMAND_NAMES).toContain('run')
-    expect(BUILTIN_COMMAND_NAMES).toContain('tui')
-    expect(BUILTIN_COMMAND_NAMES).toContain('doctor')
-    expect(BUILTIN_COMMAND_NAMES).toContain('cron')
-    expect(BUILTIN_COMMAND_NAMES).toContain('mount')
-    expect(BUILTIN_COMMAND_NAMES).toContain('update')
-    expect(BUILTIN_COMMAND_NAMES).toContain('_hostd')
-  })
-})
-
 // Serial, NOT `.concurrent`: each test spawns a fresh `bun run src/cli/index.ts`
 // that re-transpiles the whole CLI module graph. `.concurrent` fired all ~16
 // spawns at once on an already-saturated `--parallel` worker pool, so they

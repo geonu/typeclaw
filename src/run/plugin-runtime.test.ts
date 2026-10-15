@@ -58,24 +58,6 @@ describe('createPluginRuntime', () => {
     expect(prev).toBe(initial)
   })
 
-  test('multiple consumers reading get() after swap all see the new state', () => {
-    // given
-    const initial = makeState()
-    const next = makeState({ hasAnyPluginContent: true })
-    const runtime = createPluginRuntime(initial)
-    const readBefore = runtime.get()
-
-    // when
-    runtime.swap(next)
-    const readA = runtime.get()
-    const readB = runtime.get()
-
-    // then
-    expect(readBefore).toBe(initial)
-    expect(readA).toBe(next)
-    expect(readB).toBe(next)
-  })
-
   test('trackPendingDisposal then drainPendingDisposal returns items in order', async () => {
     // given
     const runtime = createPluginRuntime(makeState())

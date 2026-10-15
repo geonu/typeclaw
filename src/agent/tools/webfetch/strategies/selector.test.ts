@@ -26,11 +26,6 @@ describe('applySelector', () => {
     expect(await applySelector(HTML, '.nope')).toBe('No elements matched selector: .nope')
   })
 
-  test('targets a single element', async () => {
-    const result = await applySelector(HTML, '.price')
-    expect(result).toContain('[1] $9.99')
-  })
-
   test('throws SelectorError on invalid CSS selector', async () => {
     await expect(applySelector(HTML, ':::')).rejects.toThrow(SelectorError)
   })

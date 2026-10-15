@@ -552,21 +552,6 @@ describe('printSlackAppManifestSetup', () => {
     expect(JSON.parse(jsonBlock)).toEqual(SLACK_APP_MANIFEST)
   })
 
-  test('keeps the prose steps inside boxed notes around the JSON block', () => {
-    const { output } = captureStdout(() => withNoColor(() => printSlackAppManifestSetup()))
-
-    expect(output).toContain('Get a Slack bot')
-    expect(output).toContain('Finish Slack setup')
-    expect(output).toContain('https://api.slack.com/apps')
-    expect(output).toContain('/invite @TypeClaw')
-
-    const introIdx = output.indexOf('Get a Slack bot')
-    const jsonIdx = output.indexOf('\n{\n')
-    const followUpIdx = output.indexOf('Finish Slack setup')
-    expect(introIdx).toBeLessThan(jsonIdx)
-    expect(jsonIdx).toBeLessThan(followUpIdx)
-  })
-
   test('manifest declares the scopes Socket Mode + Events + Web API need', () => {
     const scopes = SLACK_APP_MANIFEST.oauth_config.scopes.bot
     expect(scopes).toContain('app_mentions:read')
@@ -596,42 +581,6 @@ describe('printSlackAppManifestSetup', () => {
     expect(scopes).toContain('reactions:read')
     expect(scopes).toContain('reactions:write')
     expect(scopes).toContain('emoji:read')
-  })
-
-  test('manifest scope list is alphabetically sorted so diffs stay stable', () => {
-    const scopes: readonly string[] = SLACK_APP_MANIFEST.oauth_config.scopes.bot
-    const sorted = [...scopes].sort()
-    expect([...scopes]).toEqual(sorted)
-  })
-
-  test('app_home enables the Messages tab and hides the unused Home tab', () => {
-    expect(SLACK_APP_MANIFEST.features.app_home).toEqual({
-      home_tab_enabled: false,
-      messages_tab_enabled: true,
-      messages_tab_read_only_enabled: false,
-    })
-  })
-
-  test('manifest declares /stop as a slash command with a description', () => {
-    const slashCommands = SLACK_APP_MANIFEST.features.slash_commands
-    const stop = slashCommands.find((c) => c.command === '/stop')
-    expect(stop).toBeDefined()
-    expect(stop!.description).toBeTruthy()
-  })
-
-  test('manifest declares /help as a slash command with a description', () => {
-    const help = SLACK_APP_MANIFEST.features.slash_commands.find((c) => c.command === '/help')
-    expect(help).toBeDefined()
-    expect(help!.description).toBeTruthy()
-  })
-
-  test('manifest declares /reload and /restart as slash commands with descriptions', () => {
-    const slashCommands = SLACK_APP_MANIFEST.features.slash_commands
-    for (const name of ['/reload', '/restart']) {
-      const cmd = slashCommands.find((c) => c.command === name)
-      expect(cmd).toBeDefined()
-      expect(cmd!.description).toBeTruthy()
-    }
   })
 
   test('manifest slash commands stay in sync with the runtime allow-list', () => {

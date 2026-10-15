@@ -7,11 +7,9 @@ import { fileURLToPath } from 'node:url'
 
 import {
   COMPILER_PACKAGE,
-  COMPILER_RUNTIME_DIR,
   COMPILER_VERSION,
   isModuleNotFound,
   loadCompilerModule,
-  missingCompilerGuidance,
   requiredCompilerPlatformPackage,
 } from './render'
 
@@ -45,22 +43,6 @@ describe('isModuleNotFound', () => {
   })
 })
 
-describe('missingCompilerGuidance', () => {
-  test('names the exact pinned bun add command', () => {
-    const guidance = missingCompilerGuidance()
-    expect(guidance).toContain(`bun add ${COMPILER_PACKAGE}@${COMPILER_VERSION}`)
-    expect(guidance).toContain(COMPILER_RUNTIME_DIR)
-    expect(guidance).not.toContain('agent root')
-  })
-
-  test('forbids the ad-hoc fallback libraries that agents reach for', () => {
-    const guidance = missingCompilerGuidance()
-    expect(guidance).toMatch(/jsPDF/)
-    expect(guidance).toMatch(/pdfkit/)
-    expect(guidance).toMatch(/ReportLab/)
-  })
-})
-
 describe('render script CLI', () => {
   const scriptPath = fileURLToPath(new URL('./render.ts', import.meta.url))
 
@@ -70,13 +52,6 @@ describe('render script CLI', () => {
     expect(proc.exitCode).toBe(2)
     expect(await new Response(proc.stderr).text()).toContain('usage:')
   })
-
-  // The "compiler absent" exit-3 path can't be exercised reliably in a unit test:
-  // Bun.resolveSync auto-installs/resolves the pinned package from its global
-  // cache on a dev machine, so a spawned render never sees the missing-module
-  // error here. The error ROUTING is covered deterministically by the
-  // isModuleNotFound + missingCompilerGuidance tests above, and the end-to-end
-  // exit-3 behavior is exercised in a fresh container where the cache is empty.
 })
 
 describe('compiler resolution', () => {

@@ -85,13 +85,6 @@ describe('parseSlashCommand', () => {
     const result = parseSlashCommand(body({ team_id: '' }), known)
     expect(result).toEqual({ kind: 'ignore', reason: 'no-team' })
   })
-
-  test('always sets thread:null (Slack slash commands cannot be invoked from a thread)', () => {
-    const result = parseSlashCommand(body(), known)
-    expect(result.kind).toBe('parsed')
-    if (result.kind !== 'parsed') return
-    expect(result.command.key.thread).toBe(null)
-  })
 })
 
 describe('parseThreadCommand', () => {

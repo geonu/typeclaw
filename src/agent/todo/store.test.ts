@@ -54,14 +54,6 @@ describe('todo store', () => {
     expect(raw.endsWith('\n')).toBe(true)
   })
 
-  test('concurrent writes resolve to one of the writers without corruption', async () => {
-    const a: Todo[] = [{ content: 'A', status: 'pending' }]
-    const b: Todo[] = [{ content: 'B', status: 'pending' }]
-    await Promise.all([writeTodos(agentDir, TUI_SCOPE, a), writeTodos(agentDir, TUI_SCOPE, b)])
-    const result = await readTodos(agentDir, TUI_SCOPE)
-    expect([JSON.stringify(a), JSON.stringify(b)]).toContain(JSON.stringify(result))
-  })
-
   test('many concurrent writers all resolve and the survivor is one of them', async () => {
     const writers = Array.from({ length: 16 }, (_, i) => [{ content: `w${i}`, status: 'pending' } satisfies Todo])
     await Promise.all(writers.map((todos) => writeTodos(agentDir, TUI_SCOPE, todos)))

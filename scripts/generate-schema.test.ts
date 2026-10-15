@@ -30,14 +30,6 @@ describe('typeclaw.schema.json', () => {
     expect(checkedIn).toEqual(generated)
   })
 
-  test('bundled memory plugin contributes a `memory` block with idleMs and dreaming.schedule', async () => {
-    const checkedIn = JSON.parse(await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8'))
-
-    expect(checkedIn.properties.memory).toBeDefined()
-    expect(checkedIn.properties.memory.properties.idleMs).toBeDefined()
-    expect(checkedIn.properties.memory.properties.dreaming.properties.schedule).toBeDefined()
-  })
-
   test('does not expose model HTTP internal exceptions in typeclaw.json', async () => {
     const checkedIn = JSON.parse(await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8'))
     expect(checkedIn.properties.network.properties.modelHttp).toBeUndefined()

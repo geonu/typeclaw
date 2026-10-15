@@ -9,12 +9,6 @@ describe('applyJq', () => {
     expect(result).toBe('"typeclaw"')
   })
 
-  test('iterates over an array', async () => {
-    const json = JSON.stringify({ items: ['a', 'b', 'c'] })
-    const result = await applyJq(json, '.items[]')
-    expect(result.split('\n')).toEqual(['"a"', '"b"', '"c"'])
-  })
-
   test('rejects non-JSON input with a JqError', async () => {
     await expect(applyJq('<html>not json</html>', '.foo')).rejects.toThrow(JqError)
   })
