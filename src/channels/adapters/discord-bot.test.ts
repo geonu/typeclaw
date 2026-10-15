@@ -53,14 +53,17 @@ describe('discord-bot lifecycle', () => {
     expect(adapter.isConnected()).toBe(false)
     await adapter.start()
     expect(adapter.isConnected()).toBe(true)
+    expect(router.catchUps).toBe(1)
     expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1' })
 
     listener.emit('disconnected', 'transport closed')
     expect(adapter.isConnected()).toBe(false)
+    expect(router.disconnects).toBe(1)
     expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1' })
 
     listener.emit('connected', connectedInfo())
     expect(adapter.isConnected()).toBe(true)
+    expect(router.catchUps).toBe(2)
 
     listener.emit('error', new Error('temporary gateway transport error'))
     expect(adapter.isConnected()).toBe(true)
@@ -164,13 +167,17 @@ describe('discord-bot provenance enrichment', () => {
     const listener = fakeBotListener()
     const logs: string[] = []
     const resolved: unknown[] = []
+    const finished = Promise.withResolvers<void>()
     const adapter = createDiscordBotAdapter({
       agentDir: '/agent',
       router: noopRouter(),
       configRef: () => provenanceConfig,
       token: 'test-token',
       logger: {
-        info: (message) => logs.push(`info:${message}`),
+        info: (message) => {
+          logs.push(`info:${message}`)
+          finished.resolve()
+        },
         warn: (message) => logs.push(`warn:${message}`),
         error: (message) => logs.push(`error:${message}`),
       },
@@ -194,7 +201,7 @@ describe('discord-bot provenance enrichment', () => {
     })
 
     await adapter.start()
-    await Bun.sleep(0)
+    await finished.promise
 
     expect(resolved).toEqual([
       {
@@ -219,12 +226,20 @@ describe('discord-bot provenance enrichment', () => {
   test('historical enrichment failure never fails adapter startup', async () => {
     const listener = fakeBotListener()
     const warns: string[] = []
+    const finished = Promise.withResolvers<void>()
     const adapter = createDiscordBotAdapter({
       agentDir: '/agent',
       router: noopRouter(),
       configRef: () => provenanceConfig,
       token: 'test-token',
-      logger: { info: () => {}, warn: (message) => warns.push(message), error: () => {} },
+      logger: {
+        info: () => {},
+        warn: (message) => {
+          warns.push(message)
+          finished.resolve()
+        },
+        error: () => {},
+      },
       createClient: () => ({ login: async () => {} }) as unknown as DiscordBotClient,
       createListener: () => listener as unknown as DiscordBotListener,
       enrichHistoricalProvenance: async () => {
@@ -233,7 +248,7 @@ describe('discord-bot provenance enrichment', () => {
     })
 
     await expect(adapter.start()).resolves.toBeUndefined()
-    await Bun.sleep(0)
+    await finished.promise
     expect(warns).toContain('[discord-bot] historical provenance enrichment failed: maintenance unavailable')
   })
 
@@ -2189,9 +2204,11 @@ describe('createInteractionHandler', () => {
     const tick = (): number => ++clock
 
     const fetchCalls: CapturedCall[] = []
+    const ackSent = Promise.withResolvers<void>()
     const fetchImpl = (async (url: string, init: RequestInit) => {
       fetchCalls.push({ url, init })
       events.push({ at: tick(), kind: 'ack-sent' })
+      ackSent.resolve()
       return new Response('', { status: 204 })
     }) as unknown as typeof fetch
 
@@ -2217,10 +2234,8 @@ describe('createInteractionHandler', () => {
     })
 
     const handlerDone = handler(interaction())
-    // Wait long enough for router.executeCommand and ack to complete, but
-    // hold formatChannelTag back. If the ack-first ordering is correct, the
-    // ack already fired before we release the tag.
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    // Observe the exact ack event while holding channel-tag resolution back.
+    await ackSent.promise
     expect(fetchCalls).toHaveLength(1)
     expect(events.map((e) => e.kind)).toEqual(['router-call', 'ack-sent'])
 
@@ -2264,6 +2279,8 @@ class FakeDiscordBotListener {
 class FakeDiscordBotRouter {
   readonly registered: string[] = []
   readonly unregistered: string[] = []
+  catchUps = 0
+  disconnects = 0
   selfIdentity: ((workspace: string) => { id: string; username?: string } | null) | null = null
   readonly value = {
     route: async () => ({ kind: 'observed' as const }),
@@ -2291,6 +2308,15 @@ class FakeDiscordBotRouter {
     },
     unregisterSelfIdentity: () => this.unregistered.push('selfIdentity'),
     registerHistory: () => this.registered.push('history'),
+    registerMissedInbound: () => this.registered.push('missedInbound'),
+    unregisterMissedInbound: () => this.unregistered.push('missedInbound'),
+    catchUp: async () => {
+      this.catchUps++
+    },
+    disconnectCatchUp: () => {
+      this.disconnects++
+    },
+    catchUpTargets: async () => [],
     unregisterHistory: () => this.unregistered.push('history'),
     registerMessageGet: () => this.registered.push('messageGet'),
     unregisterMessageGet: () => this.unregistered.push('messageGet'),

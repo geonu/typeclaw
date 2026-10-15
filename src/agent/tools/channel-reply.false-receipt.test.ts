@@ -14,6 +14,11 @@ afterEach(() => resetReviewTurn(SESSION))
 function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: true })): ChannelRouter {
   return {
     route: async () => ({ kind: 'observed' }),
+    registerMissedInbound: () => {},
+    unregisterMissedInbound: () => {},
+    catchUp: async () => {},
+    disconnectCatchUp: () => {},
+    catchUpTargets: async () => [],
     acceptBackgroundResponse: async () => {
       throw new Error('Unexpected background admission')
     },

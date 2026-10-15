@@ -661,6 +661,40 @@ function inboundForSelf(userId: string, over: Partial<InboundMessage> = {}): Inb
   }
 }
 
+test('catch-up reuses durable live admission and leaves ambient chatter observed', async () => {
+  // Given an already admitted live message and a bot-only ambient conversation.
+  const agentDir = await tempDir()
+  const nowRef = { value: FIXED_INBOUND_TS + 1000 }
+  const { router } = makeRouter(agentDir, { nowRef })
+  const seen = inbound({ externalMessageId: 'live-before-catchup' })
+  const chatter = inbound({
+    chat: 'ambient',
+    externalMessageId: 'ambient-message',
+    text: '확인했어요',
+    authorIsBot: true,
+    isBotMention: false,
+  })
+  try {
+    const admitted = await router.route(seen)
+    expect(admitted.kind).toBe('accepted')
+    router.registerMissedInbound('discord-bot', async () => [
+      { message: { ...seen, ts: nowRef.value }, latestTs: nowRef.value },
+      { message: { ...chatter, ts: nowRef.value }, latestTs: nowRef.value },
+    ])
+    // When a boot pass lists both as missed.
+    await router.catchUp('discord-bot')
+    expect(router.liveCount()).toBe(2)
+    // Then admission is the original durable identity, and chatter stays observe.
+    const duplicate = await router.route(seen)
+    expect(duplicate.kind).toBe('duplicate')
+    if (admitted.kind === 'accepted' && duplicate.kind === 'duplicate') expect(duplicate.inputId).toBe(admitted.inputId)
+    expect((await router.route(chatter)).kind).toBe('observed')
+  } finally {
+    await router.stop()
+    await rm(agentDir, { recursive: true, force: true })
+  }
+})
+
 // Returns the notice's own fence offsets so a caller rendering two notices can
 // assert they are disjoint. Without that, a single `---` shared between adjacent
 // notices satisfies both as closer and opener, and each looks complete on its

@@ -6,6 +6,36 @@ icon: MessagesSquare
 
 `src/channels/router.ts` decides, for every admitted inbound message, whether the agent wakes up and replies. The decision logic lives in `src/channels/engagement.ts` (`decideEngagement`); the router wires it to the prompt queue, the context buffer, and the inbound broadcast. This page documents the runtime concept — the operator-facing config knobs (`trigger`, `stickiness`, `alias`) are in the [channel-adapters reference](/docs/reference/channel-adapters) and the `typeclaw-config` skill.
 
+## Missed inbound catch-up
+
+In the container stage, `src/channels/catch-up.ts` provides optional
+`registerMissedInbound` / `catchUp` router capabilities. Slack bot and Discord bot
+run a pass after their socket connects, both at boot and on reconnect. A heartbeat
+persists per-adapter liveness under `/agent/channels/<adapter>-catch-up-last-alive.json`;
+it never polls chat history. Disconnection pauses that heartbeat. A first boot
+without a watermark starts at the current time rather than replaying a backlog.
+
+Chat replay is bounded to 15 minutes (`CHAT_CATCH_UP_MAX_AGE_MS`). A candidate is
+also skipped if any later post exists in its conversation or thread, including
+the agent's own replies. Candidates retain live classification and account/message
+identity and enter the same `route()` path: durable inbound admission deduplicates
+processed requests, and the normal engagement decision can still choose observe.
+Live observation receipts are retained in memory for the replay window. Catch-up
+and its drops/errors produce operator logs only, never channel notices or special
+replay prompts.
+
+Slack scans one joined-conversation list page and watched session/thread scopes;
+Discord scans previously watched session scopes (including DMs and thread channels),
+not every readable guild channel. Each pass has a 20-history-call budget and reads
+at most 100 messages per scope. Incomplete Slack reply pages are skipped because
+they cannot establish whether the thread moved on. Unwatched old threads, list
+pages beyond the first, and conversations beyond the budget are not exhaustively
+backfilled. User-account Slack/Discord adapters do not register this capability.
+
+GitHub uses the shared last-alive store, with a read fallback to the legacy
+`github-last-alive.json`. Its PR-state reconcile remains separate: no chat age cap,
+the existing durable per-PR cooldown, and its own 30-minute timer for webhook gaps.
+
 ## The four-way decision
 
 Every inbound that survives the `channel.respond` permission gate is tagged with one of four decisions. The router publishes the tag on a `channel-inbound` broadcast event (`publishInbound`, `router.ts`); `typeclaw inspect` renders it as a colored `[...]` prefix (`src/inspect/render.ts`).

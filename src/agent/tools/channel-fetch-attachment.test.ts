@@ -30,6 +30,11 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
   const attachments = options.attachments ?? []
   return {
     route: async () => ({ kind: 'observed' }),
+    registerMissedInbound: () => {},
+    unregisterMissedInbound: () => {},
+    catchUp: async () => {},
+    disconnectCatchUp: () => {},
+    catchUpTargets: async () => [],
     acceptBackgroundResponse: async () => {
       throw new Error('Unexpected background admission')
     },
