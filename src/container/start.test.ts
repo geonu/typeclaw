@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
@@ -140,6 +140,7 @@ type ScaffoldedConfig = {
   }
   logs?: { retentionDays?: number }
   memory?: Record<string, unknown>
+  githubCli?: { importHostAuth?: boolean }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -153,6 +154,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
     ...(overrides.logs ? { logs: overrides.logs } : {}),
     ...(overrides.memory ? { memory: overrides.memory } : {}),
+    ...(overrides.githubCli ? { githubCli: overrides.githubCli } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -1812,6 +1814,7 @@ describe('start (composition)', () => {
   test('holds the operation lock from inspection through migration, launch, and verification', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
     const legacy = join(root, 'workspace', '.agent-messenger')
     const canonical = join(root, 'workspace', '.config', 'agent-messenger')
     await mkdir(legacy, { recursive: true })
@@ -2119,6 +2122,7 @@ describe('start (composition)', () => {
   test('warns and continues without replacing persisted GitHub CLI credentials when refresh fails', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
     const persisted = '{"version":2,"githubCli":{"hosts":"existing-good-store"}}\n'
     await writeFile(join(root, 'secrets.json'), persisted)
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
@@ -2152,6 +2156,7 @@ describe('start (composition)', () => {
   test('stays silent when a GitHub CLI refresh fails for an agent that never had a persisted store', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
     await writeFile(join(root, 'secrets.json'), '{"version":2,"channels":{}}\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
@@ -2182,6 +2187,7 @@ describe('start (composition)', () => {
   test('warns when a GitHub CLI refresh fails and secrets.json cannot be read at all', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
     await writeFile(join(root, 'secrets.json'), 'not json\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     const warnings: string[] = []
@@ -2206,6 +2212,7 @@ describe('start (composition)', () => {
   test('returns warnings instead of writing them while a parent renderer owns the terminal', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
     await writeFile(join(root, 'secrets.json'), '{"version":2,"githubCli":{"hosts":"existing-good-store"}}\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
@@ -2246,6 +2253,7 @@ describe('start (composition)', () => {
         { name: 'writable', path: writableMount },
         { name: 'readonly', path: readOnlyMount, readOnly: true },
       ],
+      githubCli: { importHostAuth: true },
     })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     let deniedRoots: readonly string[] | undefined
@@ -2267,6 +2275,103 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     expect(deniedRoots).toEqual([realpathSync(root), writableMount])
     expect(deniedRoots).not.toContain(readOnlyMount)
+  })
+
+  test('does not copy the host GitHub CLI login and removes a previously persisted store without opt-in', async () => {
+    // given: a store persisted by an earlier start, plus an unrelated credential slice
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(
+      join(root, 'secrets.json'),
+      '{"version":2,"githubCli":{"hosts":"github.com:\\n  user: operator\\n"},"mcp":{"keep":{"accessToken":"x"}}}\n',
+    )
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    let provisionCalls = 0
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      provisionGithubCliStore: () => {
+        provisionCalls += 1
+        return { ok: true }
+      },
+    })
+
+    // then
+    expect(result.ok).toBe(true)
+    expect(calls.some((call) => call.args[0] === 'run')).toBe(true)
+    expect(provisionCalls).toBe(0)
+    const persisted = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as Record<string, unknown>
+    expect(persisted['githubCli']).toBeUndefined()
+    expect(persisted['mcp']).toEqual({ keep: { accessToken: 'x' } })
+  })
+
+  // Directory permissions are how this forces the removal to fail; Windows and root ignore them.
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses to launch without opt-in when a persisted GitHub CLI store cannot be removed',
+    async () => {
+      // given: a persisted operator store beside an unrelated secret, and an agent dir that rejects the rewrite
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      const persisted =
+        '{"version":2,"githubCli":{"hosts":"github.com:\\n  user: operator\\n"},"mcp":{"keep":{"accessToken":"x"}}}\n'
+      await writeFile(join(root, 'secrets.json'), persisted)
+      const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+      await chmod(root, 0o555)
+
+      // when
+      let result: Awaited<ReturnType<typeof start>>
+      try {
+        result = await start({
+          cwd: root,
+          preferredHostPort: 8973,
+          exec,
+          allocatePort: deterministicAllocator,
+          ensureDeps: noEnsureDeps,
+          autoUpgrade: noAutoUpgrade,
+          ...bypassVerify,
+          provisionGithubCliStore: () => ({ ok: true }),
+        })
+      } finally {
+        await chmod(root, 0o755)
+      }
+
+      // then
+      expect(result).toEqual({ ok: false, reason: expect.stringContaining('githubCli') })
+      expect(calls.some((call) => call.args[0] === 'run')).toBe(false)
+      expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(persisted)
+    },
+  )
+
+  test('copies the host GitHub CLI login when the agent opts in', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { githubCli: { importHostAuth: true } })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    let provisionCalls = 0
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      provisionGithubCliStore: () => {
+        provisionCalls += 1
+        return { ok: true }
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(provisionCalls).toBe(1)
   })
 
   test('provisions embedding models on every fresh start', async () => {

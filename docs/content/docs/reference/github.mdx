@@ -79,7 +79,15 @@ Authenticated network Git (`clone`, `fetch`, `pull`, `push`, `ls-remote`) runs i
 
 Credential precedence for `git push` is GitHub App, then an authoritative PAT declared in the agent `.env`, then the trusted GitHub CLI store. The store fallback can fund a standalone configured-remote push from a repository at any accessible path, including `workspace`, mounts, nested repositories, and the session `/tmp`; no mount-specific or `typeclaw.json` authorization is required.
 
-On the host, select the account with `gh auth login --hostname github.com`. The next real `typeclaw start` or `typeclaw restart` automatically captures that account while ignoring ambient GitHub token variables, asks `gh auth login --with-token` to generate an isolated `hosts.yml`, and persists only that generated artifact in masked `secrets.json`. A `typeclaw start` that finds the container already running is a no-op and does not refresh credentials. On container boot TypeClaw reconstructs `/home/agent/.config/gh/hosts.yml`; the store remains hidden from model bash and non-bash tools and the operator's full GitHub CLI configuration is never copied. If refresh fails, TypeClaw keeps the previously persisted store and prints recovery guidance.
+The store is **opt-in per agent**, because the host `gh` login is the operator's identity, not the agent's. Without opt-in, `typeclaw start` never copies it and removes any `githubCli` entry an earlier start left in `secrets.json`. To opt in:
+
+```json
+{
+  "githubCli": { "importHostAuth": true }
+}
+```
+
+On the host, select the account with `gh auth login --hostname github.com`. With opt-in enabled, the next real `typeclaw start` or `typeclaw restart` automatically captures that account while ignoring ambient GitHub token variables, asks `gh auth login --with-token` to generate an isolated `hosts.yml`, and persists only that generated artifact in masked `secrets.json`. A `typeclaw start` that finds the container already running is a no-op and does not refresh credentials. On container boot TypeClaw reconstructs `/home/agent/.config/gh/hosts.yml`; the store remains hidden from model bash and non-bash tools and the operator's full GitHub CLI configuration is never copied. If refresh fails, TypeClaw keeps the previously persisted store and prints recovery guidance.
 
 The store fallback still requires one configured remote with exactly one GitHub push destination. Explicit-URL pushes, `--set-upstream`, multiple push URLs, reads, and incomplete repository/refspec evidence do not use it; GitHub App or an authorized declared PAT may support broader push shapes.
 

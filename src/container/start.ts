@@ -380,8 +380,18 @@ async function runStart({
       }
     }
 
-    const githubCliDeniedRoots = resolveGithubCliDeniedRoots(cwd, await loadTypeclawConfig(cwd))
-    const githubCliWarning = await refreshGithubCliStore(cwd, githubCliDeniedRoots, provisionGithubCliStoreForAgent)
+    const githubCliConfig = await loadTypeclawConfig(cwd)
+    if (!githubCliConfig.githubCli.importHostAuth) {
+      const removalFailure = removeGithubCliStore(cwd)
+      if (removalFailure !== null) return { ok: false, reason: removalFailure }
+    }
+    const githubCliWarning = githubCliConfig.githubCli.importHostAuth
+      ? await refreshGithubCliStore(
+          cwd,
+          resolveGithubCliDeniedRoots(cwd, githubCliConfig),
+          provisionGithubCliStoreForAgent,
+        )
+      : null
     if (githubCliWarning !== null) {
       if (streamOutput) process.stderr.write(githubCliWarning)
       else onWarning?.(githubCliWarning.trim())
@@ -853,6 +863,22 @@ async function refreshGithubCliStore(
     'Keeping the previously persisted credential store. Run `gh auth login --hostname github.com` on the host, ' +
     'then restart TypeClaw.\n'
   )
+}
+
+// Without opt-in, a store persisted by an earlier start (when copying was
+// unconditional) still carries the operator's identity. The container exports
+// whatever store secrets.json holds, so a failed removal must stop the launch
+// rather than run the agent as the operator.
+function removeGithubCliStore(agentDir: string): string | null {
+  try {
+    new SecretsBackend(join(agentDir, 'secrets.json')).removeGithubCliSync()
+    return null
+  } catch {
+    return (
+      'Could not remove the host GitHub CLI credential from secrets.json (githubCli.importHostAuth is off). ' +
+      'Delete the `githubCli` entry from secrets.json by hand, or fix the file if it is malformed, then run typeclaw start again.'
+    )
+  }
 }
 
 // An unreadable or malformed secrets.json cannot prove the store is absent, so
