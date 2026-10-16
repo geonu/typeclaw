@@ -80,7 +80,7 @@ The flow:
    gh pr checkout <N> --repo owner/repo
    ```
 
-   After the operator confirms the checkout, make the minimal fixes and commit them locally with `typeclaw-git` hygiene. Pushing is **not** host-stage only when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`, then the trusted GitHub CLI store. A configured GitHub remote can use the store fallback from any accessible repository path. The store accepts one configured destination and does not accept explicit-URL or `--set-upstream` pushes.
+   After the operator confirms the checkout, make the minimal fixes and commit them locally with `typeclaw-git` hygiene. Pushing is **not** host-stage only when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`. The trusted GitHub CLI store is never a push credential: it funds `gh` work only.
 
    ```sh
    git -C <checkout> push origin <branch>
@@ -313,13 +313,13 @@ gh issue create --repo owner/repo --title 'Bug: ...' --body '...'
 
 ```
 
-For a pull request from any accessible project checkout, push the head branch yourself when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`, then the trusted GitHub CLI store. The store can fund a configured GitHub remote from `workspace`, mounts, nested repositories, or `/tmp`; it requires one configured destination and does not accept explicit-URL or `--set-upstream` pushes. Name the checkout, remote, and branch explicitly:
+For a pull request from any accessible project checkout, push the head branch yourself when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`. The trusted GitHub CLI store is never a push credential: it funds `gh` work only. Name the checkout, remote, and branch explicitly:
 
 ```sh
 git -C <checkout> push <remote> <branch>
 ```
 
-If the trusted store is unavailable, ask the operator to run `gh auth login --hostname github.com` on the host. The next real `typeclaw start` or `typeclaw restart` refreshes the stored account automatically; a start that finds the container already running does not.
+If a push is refused for missing credentials, ask the operator for GitHub App auth under `channels.github` or a `GH_TOKEN` in the agent `.env` — never a host `gh` login, which does not fund pushes. If brokered `gh` itself is unauthenticated, the operator enables `githubCli.importHostAuth` and runs `gh auth login --hostname github.com` on the host; the next real `typeclaw start` or `typeclaw restart` refreshes the stored account automatically, and a start that finds the container already running does not.
 
 Then open the PR yourself with every field explicit and inline: `gh pr create --repo owner/repo --title 'Fix: ...' --body '...' --head my-branch --base main` (add `--draft` if wanted). `--repo`, `--head`, `--base`, `--title` and `--body` are all required; `--fill`, `--body-file`, `--template`, `--editor`, `--web` and `--attach` are refused because they read local files or open an editor/browser while the credential is live. Without `--head`, gh would interrogate the checkout and offer to push, so always name the already-pushed branch.
 

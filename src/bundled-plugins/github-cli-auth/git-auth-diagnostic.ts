@@ -86,7 +86,7 @@ export async function appendGitAuthDiagnostic(options: {
     }
   }
   advice +=
-    ' Operator: fix or remove the mismatched credential in secrets.json (githubCli hosts for the CLI store, github for the repo token), re-authenticate the intended host gh account if needed, then run typeclaw restart.'
+    ' Operator: fix or remove the mismatched credential (github in secrets.json for the repo token, GH_TOKEN in the agent .env for the declared PAT), then run typeclaw restart. The host gh login never funds git push.'
   // Do not trust lookup output to be secret-free, even when provided by /user.
   for (const credential of [...options.credentials, ...(options.ghCredential ? [options.ghCredential] : [])]) {
     advice = advice.replaceAll(credential.token, '[redacted]')

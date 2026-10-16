@@ -430,7 +430,7 @@ async function startAgentRuntime(
   })
   if (githubCliExport.action === 'failed') {
     console.warn(
-      '[run] trusted GitHub CLI store unavailable; store-backed GitHub pushes will not authenticate. ' +
+      '[run] trusted GitHub CLI store unavailable; brokered `gh` commands will not authenticate. ' +
         'On the host, run `gh auth login --hostname github.com`, then run a real `typeclaw restart`.',
     )
   }

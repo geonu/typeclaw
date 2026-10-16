@@ -46,7 +46,6 @@ import {
 } from '@/plugin'
 import { buildSandboxedCommand, sessionTmpDir } from '@/sandbox'
 
-import { planGithubStorePush, setGhTokenCommandRunnerForTests } from './gh-store'
 import { resetGitAskPassHelperForTests } from './git-askpass'
 import { setGitAuthLoginResolverForTests } from './git-auth-diagnostic'
 import githubCliAuthPlugin from './index'
@@ -1444,8 +1443,8 @@ describe('github-cli-auth plugin — git path', () => {
     // The operator remedy, plus the two blocked retries the reason must steer off.
     expect(reason).toContain('channels.github')
     expect(reason).toContain('gh auth setup-git')
-    expect(reason).toContain('gh auth login --hostname github.com')
-    expect(reason).toContain('typeclaw start')
+    expect(reason).toContain('GH_TOKEN')
+    expect(reason).toContain('githubCli.importHostAuth')
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
     expect(resolverCalled).toBe(false)
   })
@@ -1722,986 +1721,6 @@ describe('github-cli-auth plugin — git path', () => {
 
     expect(result).toBeUndefined()
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-  })
-})
-
-describe.skipIf(process.platform === 'win32')('github-cli-auth plugin — trusted gh store push path', () => {
-  const authKeys = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST'] as const
-  let agentDir: string
-  let fakeBin: string
-  let observedFile: string
-  let askpassPath: string
-  let originalPath: string | undefined
-  let originalAuthEnv: Partial<Record<(typeof authKeys)[number], string>>
-
-  const gitEnv = (event: ToolBeforeEvent): Record<string, string> =>
-    (event.args[TYPECLAW_INTERNAL_BASH_ENV] ?? {}) as Record<string, string>
-
-  const runDeferredPreparation = async (event: ToolBeforeEvent): Promise<DeferredBashPreparationResult> => {
-    const prepare = event.args[TYPECLAW_INTERNAL_BASH_PREPARE]
-    if (typeof prepare !== 'function') throw new Error('missing deferred bash preparation')
-    const prepared = await (prepare as () => Promise<DeferredBashPreparationResult>)()
-    event.args.command = prepared.command
-    event.args[TYPECLAW_INTERNAL_BASH_ENV] = { ...gitEnv(event), ...prepared.env }
-    return prepared
-  }
-
-  const runGit = (cwd: string, args: string[]): void => {
-    const result = spawnSync('git', args, {
-      cwd,
-      env: { ...process.env, GIT_MASTER: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    if (result.status !== 0) throw new Error('failed to prepare test repository')
-  }
-
-  const seedBranch = (path: string, branch: string, message = 'test'): string => {
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Alice',
-      GIT_AUTHOR_EMAIL: 'alice@example.com',
-      GIT_COMMITTER_NAME: 'Alice',
-      GIT_COMMITTER_EMAIL: 'alice@example.com',
-    }
-    const tree = spawnSync('git', ['mktree'], {
-      cwd: path,
-      input: '',
-      encoding: 'utf8',
-      env: { ...env, GIT_MASTER: '1' },
-    })
-    if (tree.status !== 0) throw new Error('failed to create test tree')
-    const commit = spawnSync('git', ['commit-tree', tree.stdout.trim(), '-m', message], {
-      cwd: path,
-      encoding: 'utf8',
-      env: { ...env, GIT_MASTER: '1' },
-    })
-    if (commit.status !== 0) throw new Error('failed to create test commit')
-    const oid = commit.stdout.trim()
-    runGit(path, ['update-ref', `refs/heads/${branch}`, oid])
-    runGit(path, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`])
-    return oid
-  }
-
-  const seedChildCommit = (path: string, branch: string, parent: string, message = 'child'): string => {
-    const env = {
-      ...process.env,
-      GIT_MASTER: '1',
-      GIT_AUTHOR_NAME: 'Alice',
-      GIT_AUTHOR_EMAIL: 'alice@example.com',
-      GIT_COMMITTER_NAME: 'Alice',
-      GIT_COMMITTER_EMAIL: 'alice@example.com',
-    }
-    const tree = spawnSync('git', ['mktree'], { cwd: path, input: '', encoding: 'utf8', env })
-    if (tree.status !== 0) throw new Error('failed to create test tree')
-    const commit = spawnSync('git', ['commit-tree', tree.stdout.trim(), '-p', parent, '-m', message], {
-      cwd: path,
-      encoding: 'utf8',
-      env,
-    })
-    if (commit.status !== 0) throw new Error('failed to create child test commit')
-    const oid = commit.stdout.trim()
-    runGit(path, ['update-ref', `refs/heads/${branch}`, oid])
-    runGit(path, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`])
-    return oid
-  }
-
-  const initRepo = (path: string, remote = 'https://github.com/example/project.git', bare = false): void => {
-    mkdirSync(path, { recursive: true })
-    runGit(path, bare ? ['init', '--bare', '-q'] : ['init', '-q'])
-    runGit(path, ['remote', 'add', 'origin', remote])
-  }
-
-  const initSha256Repo = (path: string, remote = 'https://github.com/example/project.git'): void => {
-    mkdirSync(path, { recursive: true })
-    runGit(path, ['init', '--object-format=sha256', '-q'])
-    runGit(path, ['remote', 'add', 'origin', remote])
-  }
-
-  const sourceRepo = (): string => join(agentDir, 'mounts', 'source')
-  const storeEvent = (
-    command = 'git -C mounts/source push origin topic',
-    sessionId = 'store-session',
-  ): ToolBeforeEvent => ({
-    tool: 'bash',
-    sessionId,
-    callId: 'store-call',
-    args: { command },
-  })
-  const observed = (): string => readFileSync(observedFile, 'utf8')
-  const storeWasInvoked = (): boolean => {
-    try {
-      readFileSync(observedFile)
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-      throw error
-    }
-  }
-
-  beforeEach(() => {
-    agentDir = mkdtempSync(join(tmpdir(), 'tc-gh-store-hook-'))
-    fakeBin = join(agentDir, 'bin')
-    observedFile = join(agentDir, 'gh-observed')
-    askpassPath = join(agentDir, 'typeclaw-git-askpass')
-    mkdirSync(fakeBin)
-    writeFileSync(
-      join(fakeBin, 'gh'),
-      `#!/bin/sh
-{
-  printf 'args=%s\\n' "$*"
-  printf 'GH_CONFIG_DIR=%s\\n' "$GH_CONFIG_DIR"
-  printf 'GH_TOKEN=%s\\n' "\${GH_TOKEN+x}"
-  printf 'GITHUB_TOKEN=%s\\n' "\${GITHUB_TOKEN+x}"
-  printf 'GH_ENTERPRISE_TOKEN=%s\\n' "\${GH_ENTERPRISE_TOKEN+x}"
-  printf 'GITHUB_ENTERPRISE_TOKEN=%s\\n' "\${GITHUB_ENTERPRISE_TOKEN+x}"
-  printf 'GH_HOST=%s\\n' "\${GH_HOST+x}"
-} > "$TYPECLAW_TEST_GH_OBSERVED"
-case "$TYPECLAW_TEST_GH_MODE" in
-  missing) exit 0 ;;
-  failing) printf '%s\\n' "$TYPECLAW_TEST_GH_TOKEN"; exit 7 ;;
-  multiline) printf 'first\\nsecond\\n'; exit 0 ;;
-  nul) printf 'bad\\000value'; exit 0 ;;
-  oversized) i=0; while [ "$i" -lt 20000 ]; do printf x; i=$((i + 1)); done; exit 0 ;;
-  *) printf '%s\\n' "$TYPECLAW_TEST_GH_TOKEN" ;;
-esac
-`,
-    )
-    chmodSync(join(fakeBin, 'gh'), 0o755)
-    initRepo(sourceRepo())
-    seedBranch(sourceRepo(), 'topic')
-
-    originalPath = process.env.PATH
-    originalAuthEnv = {}
-    for (const key of authKeys) {
-      if (process.env[key] !== undefined) originalAuthEnv[key] = process.env[key]
-      delete process.env[key]
-    }
-    process.env.PATH = `${fakeBin}:${originalPath ?? ''}`
-    process.env.TYPECLAW_TEST_GH_OBSERVED = observedFile
-    process.env.TYPECLAW_TEST_GH_TOKEN = 'store_secret_value'
-    delete process.env.TYPECLAW_TEST_GH_MODE
-    setGhTokenCommandRunnerForTests(async ({ cmd, env }) => {
-      const presence = (key: string): string => (env[key] === undefined ? '' : 'x')
-      writeFileSync(
-        observedFile,
-        `args=${cmd.slice(1).join(' ')}\n` +
-          `GH_CONFIG_DIR=${env.GH_CONFIG_DIR ?? ''}\n` +
-          `GH_TOKEN=${presence('GH_TOKEN')}\n` +
-          `GITHUB_TOKEN=${presence('GITHUB_TOKEN')}\n` +
-          `GH_ENTERPRISE_TOKEN=${presence('GH_ENTERPRISE_TOKEN')}\n` +
-          `GITHUB_ENTERPRISE_TOKEN=${presence('GITHUB_ENTERPRISE_TOKEN')}\n` +
-          `GH_HOST=${presence('GH_HOST')}\n`,
-      )
-      const mode = process.env.TYPECLAW_TEST_GH_MODE
-      if (mode === 'missing') return { exitCode: 0, stdout: '' }
-      if (mode === 'failing') return { exitCode: 7, stdout: process.env.TYPECLAW_TEST_GH_TOKEN ?? '' }
-      if (mode === 'multiline') return { exitCode: 0, stdout: 'first\nsecond\n' }
-      if (mode === 'nul') return { exitCode: 0, stdout: 'bad\0value' }
-      if (mode === 'oversized') return { exitCode: 0, stdout: 'x'.repeat(20_000) }
-      return { exitCode: 0, stdout: `${process.env.TYPECLAW_TEST_GH_TOKEN ?? ''}\n` }
-    })
-    process.env.TYPECLAW_GIT_ASKPASS_PATH = askpassPath
-    resetGitAskPassHelperForTests()
-  })
-
-  afterEach(() => {
-    if (originalPath === undefined) delete process.env.PATH
-    else process.env.PATH = originalPath
-    for (const key of authKeys) {
-      const value = originalAuthEnv[key]
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-    delete process.env.TYPECLAW_TEST_GH_OBSERVED
-    delete process.env.TYPECLAW_TEST_GH_TOKEN
-    delete process.env.TYPECLAW_TEST_GH_MODE
-    setGhTokenCommandRunnerForTests(undefined)
-    setGitAuthLoginResolverForTests(undefined)
-    delete process.env.TYPECLAW_GIT_ASKPASS_PATH
-    resetGitAskPassHelperForTests()
-    rmSync(agentDir, { recursive: true, force: true })
-  })
-
-  test('configured push resolves the trusted store with isolated env and repository-bound askpass', async () => {
-    for (const key of authKeys) process.env[key] = 'ambient_value'
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent()
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toBeUndefined()
-    expect(observed()).toBe(
-      'args=auth token --hostname github.com\n' +
-        'GH_CONFIG_DIR=/home/agent/.config/gh\n' +
-        'GH_TOKEN=\n' +
-        'GITHUB_TOKEN=\n' +
-        'GH_ENTERPRISE_TOKEN=\n' +
-        'GITHUB_ENTERPRISE_TOKEN=\n' +
-        'GH_HOST=\n',
-    )
-    const env = gitEnv(event)
-    expect(env.TYPECLAW_GIT_TOKEN).toBe('store_secret_value')
-    expect(env.TYPECLAW_GIT_EXPECTED_REPO).toBe('example/project')
-    expect(env.GIT_ASKPASS).toBe(askpassPath)
-    expect(Object.entries(env).filter(([, value]) => value.includes('store_secret_value'))).toEqual([
-      ['TYPECLAW_GIT_TOKEN', 'store_secret_value'],
-    ])
-    expect(String(event.args.command)).not.toContain('store_secret_value')
-    expect(event.args.command).toBe('git -C mounts/source push origin topic')
-    expect(typeof event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBe('function')
-    expect(JSON.stringify(result) ?? '').not.toContain('store_secret_value')
-    expect(event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV]).toEqual(expect.arrayContaining([...authKeys]))
-  })
-
-  test('tool.after diagnoses the selected store account and the different gh repo account', async () => {
-    process.env.GH_TOKEN = 'ghp_repo_secret'
-    setGitAuthLoginResolverForTests(async (token) =>
-      token === 'store_secret_value' ? 'store-account' : 'repo-account',
-    )
-    const { before, after } = await hooksFor(unavailableResolver, false, {
-      agentDir,
-      permissions: privilegedPermissions,
-    })
-    const event = storeEvent()
-    expect(await before(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const result = {
-      content: [{ type: 'text' as const, text: 'remote: Permission to example/project denied to store-account.' }],
-      details: { error: 'Command exited with code 128' },
-    }
-
-    await after({ tool: 'bash', sessionId: event.sessionId, callId: event.callId, result }, { ...hookCtx, agentDir })
-
-    const output = JSON.stringify(result)
-    expect(output).toContain('githubCli')
-    expect(output).toContain('login: store-account')
-    expect(output).toContain('login: repo-account')
-    expect(output).not.toContain('store_secret_value')
-    expect(output).not.toContain('ghp_repo_secret')
-  })
-
-  test('rewrites a default push through a clean bare repository with hostile source config excluded', async () => {
-    const source = sourceRepo()
-    const oid = seedBranch(source, 'main')
-    const marker = join(agentDir, 'credential-helper-ran')
-    const include = join(agentDir, 'hostile.gitconfig')
-    writeFileSync(
-      include,
-      '[http]\n\tproxy = http://included.invalid:8080\n[credential]\n\thelper = !touch ' + marker + '\n',
-    )
-    runGit(source, ['config', 'http.proxy', 'http://local.invalid:8080'])
-    runGit(source, ['config', 'http.sslVerify', 'false'])
-    runGit(source, ['config', 'credential.helper', `!touch ${marker}`])
-    runGit(source, ['config', 'core.askPass', join(agentDir, 'hostile-askpass')])
-    runGit(source, ['config', 'url.file:///tmp/exfil/.insteadOf', 'git@github.com:'])
-    runGit(source, ['config', 'include.path', include])
-    runGit(source, ['config', 'includeIf.gitdir:/**.path', include])
-    runGit(source, ['config', 'branch.main.remote', 'origin'])
-    runGit(source, ['config', 'branch.main.merge', 'refs/heads/main'])
-    const sessionId = `store-clean-${randomUUID()}`
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push', sessionId)
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-    const command = String(event.args.command)
-    expect(command).toMatch(
-      /^\/usr\/bin\/git --git-dir \/tmp\/typeclaw-gh-store-push-[A-Za-z0-9]+ push https:\/\/github\.com\/example\/project\.git refs\/heads\/main:refs\/heads\/main$/,
-    )
-    const env = gitEnv(event)
-    expect(env.GIT_DIR).toMatch(/^\/tmp\/typeclaw-gh-store-push-/)
-    expect(env.GIT_ALTERNATE_OBJECT_DIRECTORIES).toBe(realpathSync(join(source, '.git', 'objects')))
-    expect(env.GIT_CONFIG_GLOBAL).toBe('/dev/null')
-    expect(env.GIT_CONFIG_SYSTEM).toBe('/dev/null')
-    expect(env.GIT_CONFIG_NOSYSTEM).toBe('1')
-    expect(env.GIT_CONFIG_PARAMETERS).toBe('')
-    expect(env.GIT_ALLOW_PROTOCOL).toBe('https')
-
-    const configResult = spawnSync('/usr/bin/git', ['config', '--show-origin', '--list'], {
-      cwd: agentDir,
-      encoding: 'utf8',
-      env: { ...process.env, ...env, TYPECLAW_GIT_TOKEN: 'test-token' },
-    })
-    expect(configResult.status).toBe(0)
-    expect(configResult.stdout).not.toContain(source)
-    expect(configResult.stdout).not.toContain(include)
-    expect(configResult.stdout).not.toContain('local.invalid')
-    expect(configResult.stdout).not.toContain('included.invalid')
-    expect(configResult.stdout).not.toContain('file:///tmp/exfil')
-    expect(configResult.stdout).toContain('command line:\thttp.followredirects=false')
-    expect(configResult.stdout).toContain('command line:\thttp.sslverify=true')
-    expect(configResult.stdout).toContain('command line:\thttp.proxy=')
-    expect(configResult.stdout).toContain('command line:\tcredential.helper=')
-    expect(configResult.stdout).toContain(`command line:\tcore.askpass=${askpassPath}`)
-
-    const credentialResult = spawnSync('/usr/bin/git', ['credential', 'fill'], {
-      cwd: agentDir,
-      encoding: 'utf8',
-      input: 'protocol=https\nhost=github.com\npath=example/project.git\n\n',
-      env: { ...process.env, ...env, TYPECLAW_GIT_TOKEN: 'test-token' },
-    })
-    expect(credentialResult.status).toBe(0)
-    expect(existsSync(marker)).toBe(false)
-
-    expect(prepared.mount).toMatchObject({ type: 'ro-bind', dest: env.GIT_DIR })
-    expect(prepared.mount.source.startsWith(sessionTmpDir(sessionId))).toBe(false)
-    const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-    const cleanHead = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', 'refs/heads/main'], {
-      encoding: 'utf8',
-      env: { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES: env.GIT_ALTERNATE_OBJECT_DIRECTORIES },
-    })
-    expect(cleanHead.status).toBe(0)
-    expect(cleanHead.stdout.trim()).toBe(oid)
-    await prepared.cleanup()
-    expect(existsSync(backingDir)).toBe(false)
-  })
-
-  test('implicit simple push without complete upstream metadata blocks before store resolution', async () => {
-    seedBranch(sourceRepo(), 'main')
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push')
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-    expect(event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBeUndefined()
-  })
-
-  test.each([
-    { name: 'remote mismatch', remote: 'upstream', merge: 'refs/heads/main', mode: 'simple' },
-    { name: 'branch-name mismatch', remote: 'origin', merge: 'refs/heads/review', mode: 'simple' },
-    { name: 'upstream remote mismatch', remote: 'upstream', merge: 'refs/heads/review', mode: 'upstream' },
-  ])('implicit $name blocks before store resolution', async ({ remote, merge, mode }) => {
-    seedBranch(sourceRepo(), 'main')
-    runGit(sourceRepo(), ['config', 'push.default', mode])
-    runGit(sourceRepo(), ['config', 'remote.pushDefault', 'origin'])
-    runGit(sourceRepo(), ['config', 'branch.main.remote', remote])
-    runGit(sourceRepo(), ['config', 'branch.main.merge', merge])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push')
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-  })
-
-  test('push.default=current reconstructs the current branch without upstream metadata', async () => {
-    seedBranch(sourceRepo(), 'main')
-    runGit(sourceRepo(), ['config', 'push.default', 'current'])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push')
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-
-    expect(prepared.command).toContain('refs/heads/main:refs/heads/main')
-    await prepared.cleanup()
-  })
-
-  test('preserves an explicit refspec in the clean transport', async () => {
-    const oid = seedBranch(sourceRepo(), 'topic')
-    const sessionId = `store-refspec-${randomUUID()}`
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic:refs/heads/review', sessionId)
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-
-    expect(String(event.args.command)).toMatch(
-      /push https:\/\/github\.com\/example\/project\.git refs\/heads\/topic:refs\/heads\/review$/,
-    )
-    const env = gitEnv(event)
-    const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-    const ref = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', 'refs/heads/topic'], {
-      encoding: 'utf8',
-      env: { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES: env.GIT_ALTERNATE_OBJECT_DIRECTORIES },
-    })
-    expect(ref.status).toBe(0)
-    expect(ref.stdout.trim()).toBe(oid)
-    await prepared.cleanup()
-  })
-
-  test('refuses preparation when a source ref changes after authorization', async () => {
-    seedBranch(sourceRepo(), 'topic')
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic')
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-
-    const replacement = seedBranch(sourceRepo(), 'replacement', 'replacement')
-    runGit(sourceRepo(), ['update-ref', 'refs/heads/topic', replacement])
-
-    await expect(runDeferredPreparation(event)).rejects.toThrow()
-  })
-
-  test('refuses preparation when the configured push destination changes after authorization', async () => {
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent()
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-
-    runGit(sourceRepo(), ['remote', 'set-url', '--push', 'origin', 'https://github.com/example/other.git'])
-
-    await expect(runDeferredPreparation(event)).rejects.toThrow()
-  })
-
-  test('refuses preparation when configured push refspecs change after authorization', async () => {
-    seedBranch(sourceRepo(), 'topic')
-    seedBranch(sourceRepo(), 'replacement')
-    runGit(sourceRepo(), ['config', 'remote.origin.push', 'topic:refs/heads/topic'])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin')
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-
-    runGit(sourceRepo(), ['config', '--replace-all', 'remote.origin.push', 'replacement:refs/heads/topic'])
-
-    await expect(runDeferredPreparation(event)).rejects.toThrow()
-  })
-
-  test('preserves a shallow boundary so a missing parent is not traversed by the clean transport', async () => {
-    const source = sourceRepo()
-    const parent = seedBranch(source, 'topic', 'parent')
-    const child = seedChildCommit(source, 'topic', parent)
-    const shallowPath = join(source, '.git', 'shallow')
-    writeFileSync(shallowPath, `${child}\n`)
-    rmSync(join(source, '.git', 'objects', parent.slice(0, 2), parent.slice(2)))
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic')
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-    const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-    const env = {
-      ...process.env,
-      GIT_MASTER: '1',
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: realpathSync(join(source, '.git', 'objects')),
-    }
-    const traversal = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-list', 'refs/heads/topic'], {
-      encoding: 'utf8',
-      env,
-    })
-
-    expect(readFileSync(join(backingDir, 'shallow'), 'utf8')).toBe(`${child}\n`)
-    expect(traversal.status).toBe(0)
-    expect(traversal.stdout.trim()).toBe(child)
-    await prepared.cleanup()
-  })
-
-  test('refuses preparation when shallow metadata changes after authorization', async () => {
-    const source = sourceRepo()
-    const child = seedBranch(source, 'topic')
-    const shallowPath = join(source, '.git', 'shallow')
-    writeFileSync(shallowPath, `${child}\n`)
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic')
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-
-    writeFileSync(shallowPath, `${'0'.repeat(child.length)}\n`)
-
-    await expect(runDeferredPreparation(event)).rejects.toThrow()
-  })
-
-  test.each(['malformed', 'symlinked'] as const)(
-    'rejects %s shallow metadata before store resolution',
-    async (kind) => {
-      const source = sourceRepo()
-      const child = seedBranch(source, 'topic')
-      const shallowPath = join(source, '.git', 'shallow')
-      if (kind === 'malformed') {
-        writeFileSync(shallowPath, 'not-an-object-id\n')
-      } else {
-        const outside = join(agentDir, 'outside-shallow')
-        writeFileSync(outside, `${child}\n`)
-        symlinkSync(outside, shallowPath)
-      }
-      const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-      const event = storeEvent('git -C mounts/source push origin topic')
-
-      expect(await hook(event, { ...hookCtx, agentDir })).toMatchObject({ block: true })
-      expect(storeWasInvoked()).toBe(false)
-      expect(event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBeUndefined()
-    },
-  )
-
-  test('resolves an unqualified tag source without assuming refs/heads', async () => {
-    const oid = seedBranch(sourceRepo(), 'topic')
-    runGit(sourceRepo(), ['update-ref', 'refs/tags/release', oid])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin release')
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-
-    expect(prepared.command).toContain('refs/tags/release:refs/tags/release')
-    await prepared.cleanup()
-  })
-
-  test('infers an unqualified tag destination in the tag namespace', async () => {
-    const oid = seedBranch(sourceRepo(), 'topic')
-    runGit(sourceRepo(), ['update-ref', 'refs/tags/release', oid])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin release:newrelease')
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-
-    expect(prepared.command).toContain('refs/tags/release:refs/tags/newrelease')
-    await prepared.cleanup()
-  })
-
-  test('allows a qualified deletion and refuses an unqualified deletion before store resolution', async () => {
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const qualified = storeEvent('git -C mounts/source push origin :refs/heads/obsolete')
-
-    expect(await hook(qualified, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(qualified)
-    expect(prepared.command).toContain(':refs/heads/obsolete')
-    await prepared.cleanup()
-
-    rmSync(observedFile, { force: true })
-    const unqualified = storeEvent('git -C mounts/source push origin :obsolete')
-    expect(await hook(unqualified, { ...hookCtx, agentDir })).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-  })
-
-  test('refuses an ambiguous unqualified source before store resolution', async () => {
-    const oid = seedBranch(sourceRepo(), 'release')
-    runGit(sourceRepo(), ['update-ref', 'refs/tags/release', oid])
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin release')
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-  })
-
-  test('resolves a linked worktree through its canonical common object directory', async () => {
-    rmSync(sourceRepo(), { recursive: true, force: true })
-    const commonRepo = join(agentDir, 'mounts', 'common')
-    initRepo(commonRepo)
-    const oid = seedBranch(commonRepo, 'topic')
-    runGit(commonRepo, ['worktree', 'add', '--detach', sourceRepo(), 'topic'])
-    const sessionId = `store-worktree-${randomUUID()}`
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic', sessionId)
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-
-    const env = gitEnv(event)
-    expect(env.GIT_ALTERNATE_OBJECT_DIRECTORIES).toBe(realpathSync(join(commonRepo, '.git', 'objects')))
-    const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-    const ref = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', 'refs/heads/topic'], {
-      encoding: 'utf8',
-      env: { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES: env.GIT_ALTERNATE_OBJECT_DIRECTORIES },
-    })
-    expect(ref.status).toBe(0)
-    expect(ref.stdout.trim()).toBe(oid)
-    await prepared.cleanup()
-  })
-
-  test('an unresolvable push source fails closed before resolving the store', async () => {
-    const sessionId = `store-missing-${randomUUID()}`
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin missing', sessionId)
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-    expect(
-      existsSync(sessionTmpDir(sessionId)) ? readdirSync(sessionTmpDir(sessionId), { recursive: true }) : [],
-    ).toEqual([])
-    rmSync(sessionTmpDir(sessionId), { recursive: true, force: true })
-  })
-
-  test('App and authoritative declared PAT paths win without invoking the store', async () => {
-    const appHook = await hookFor(tokenResolver('app_scoped_token'), true, { agentDir })
-    const appEvent = storeEvent()
-    expect(await appHook(appEvent, { ...hookCtx, agentDir })).toBeUndefined()
-    expect(gitEnv(appEvent).TYPECLAW_GIT_TOKEN).toBe('app_scoped_token')
-    expect(storeWasInvoked()).toBe(false)
-
-    writeFileSync(join(agentDir, '.env'), 'GH_TOKEN=ghp_declared_value\n')
-    process.env.GH_TOKEN = 'ghp_declared_value'
-    const patHook = await hookFor(tokenResolver('unused_app_token'), false, {
-      agentDir,
-      permissions: privilegedPermissions,
-    })
-    const patEvent = storeEvent()
-    expect(await patHook(patEvent, { ...hookCtx, agentDir })).toBeUndefined()
-    expect(gitEnv(patEvent).TYPECLAW_GIT_TOKEN).toBe('ghp_declared_value')
-    expect(storeWasInvoked()).toBe(false)
-  })
-
-  test('an invalid declared token blocks without invoking or disclosing the store', async () => {
-    writeFileSync(join(agentDir, '.env'), 'GH_TOKEN=invalid_declared_value\n')
-    process.env.GH_TOKEN = 'invalid_declared_value'
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent()
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-    expect(JSON.stringify(result)).not.toContain('invalid_declared_value')
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-  })
-
-  test('a declared PAT denied to the role blocks without falling through to the store', async () => {
-    writeFileSync(join(agentDir, '.env'), 'GH_TOKEN=ghp_declared_denied\n')
-    process.env.GH_TOKEN = 'ghp_declared_denied'
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent()
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(result).toMatchObject({ block: true })
-    expect(storeWasInvoked()).toBe(false)
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-  })
-
-  test('configured remotes are eligible across repository locations and remote names', async () => {
-    const nested = join(sourceRepo(), 'nested')
-    initRepo(nested)
-    seedBranch(nested, 'topic')
-    const subdirectory = join(sourceRepo(), 'subdirectory')
-    mkdirSync(subdirectory)
-    const workspace = join(agentDir, 'workspace', 'repo')
-    initRepo(workspace)
-    seedBranch(workspace, 'topic')
-    const tmpSessionId = `store-tmp-${process.pid}-${randomUUID()}`
-    const tmpBacking = join(sessionTmpDir(tmpSessionId), 'repo')
-    initRepo(tmpBacking)
-    seedBranch(tmpBacking, 'topic')
-    runGit(sourceRepo(), ['remote', 'add', 'upstream', 'https://github.com/example/project.git'])
-
-    const cases: Array<{
-      name: string
-      command: string
-      sessionId?: string
-    }> = [
-      {
-        name: 'mount path',
-        command: 'git -C mounts/source push origin topic',
-      },
-      { name: 'repository subdirectory', command: 'git -C mounts/source/subdirectory push origin topic' },
-      { name: 'nested repository', command: 'git -C mounts/source/nested push origin topic' },
-      { name: 'workspace repository', command: 'git -C workspace/repo push origin topic' },
-      {
-        name: 'model-facing tmp session repository',
-        command: 'git -C /tmp/repo push origin topic',
-        sessionId: tmpSessionId,
-      },
-      {
-        name: 'non-origin configured remote',
-        command: 'git -C mounts/source push upstream topic',
-      },
-    ]
-
-    try {
-      for (const item of cases) {
-        rmSync(observedFile, { force: true })
-        const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-        const event = storeEvent(item.command, item.sessionId)
-        const result = await hook(event, { ...hookCtx, agentDir })
-        expect(result, item.name).toBeUndefined()
-        expect(storeWasInvoked(), item.name).toBe(true)
-        const prepared = await runDeferredPreparation(event)
-        expect(prepared.command, item.name).toContain('push https://github.com/example/project.git')
-        expect(prepared.command, item.name).not.toContain('store_secret_value')
-        expect(JSON.stringify(result) ?? '', item.name).not.toContain('store_secret_value')
-        await prepared.cleanup()
-      }
-    } finally {
-      rmSync(sessionTmpDir(tmpSessionId), { recursive: true, force: true })
-    }
-  })
-
-  test('uses the sandbox-visible object path for a repository under the session /tmp bind', async () => {
-    const sessionId = `store-tmp-objects-${process.pid}-${randomUUID()}`
-    const sessionTmp = sessionTmpDir(sessionId)
-    const source = join(sessionTmp, 'repo')
-    initRepo(source)
-    const oid = seedBranch(source, 'topic')
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C /tmp/repo push origin topic', sessionId)
-
-    try {
-      expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-      const prepared = await runDeferredPreparation(event)
-      const env = gitEnv(event)
-
-      expect(env.GIT_ALTERNATE_OBJECT_DIRECTORIES).toBe('/tmp/repo/.git/objects')
-      const sandboxed = buildSandboxedCommand(prepared.command, {
-        mounts: [{ type: 'bind', source: sessionTmp, dest: '/tmp' }, prepared.mount],
-        env: { set: prepared.env },
-      })
-      const alternateIndex = sandboxed.argv.indexOf('GIT_ALTERNATE_OBJECT_DIRECTORIES')
-      expect(sandboxed.argv.slice(alternateIndex - 1, alternateIndex + 2)).toEqual([
-        '--setenv',
-        'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-        '/tmp/repo/.git/objects',
-      ])
-      const sessionMountIndex = sandboxed.argv.indexOf(sessionTmp)
-      expect(sandboxed.argv.slice(sessionMountIndex - 1, sessionMountIndex + 2)).toEqual(['--bind', sessionTmp, '/tmp'])
-
-      const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-      const ref = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', 'refs/heads/topic'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GIT_MASTER: '1',
-          GIT_ALTERNATE_OBJECT_DIRECTORIES: realpathSync(join(source, '.git', 'objects')),
-        },
-      })
-      expect(ref.status).toBe(0)
-      expect(ref.stdout.trim()).toBe(oid)
-      await prepared.cleanup()
-    } finally {
-      rmSync(sessionTmp, { recursive: true, force: true })
-    }
-  })
-
-  test('accepts Linux-style physical provenance without remapping the session backing path twice', async () => {
-    const sessionId = `store-linux-provenance-${process.pid}-${randomUUID()}`
-    const source = join(sessionTmpDir(sessionId), 'repo')
-    initRepo(source)
-    seedBranch(source, 'topic')
-
-    try {
-      const plan = await planGithubStorePush(
-        {
-          kind: 'inject',
-          repoSlug: 'example/project',
-          access: 'write',
-          pushProvenance: {
-            kind: 'configured-remote',
-            remote: 'origin',
-            pushUrls: ['https://github.com/example/project.git'],
-            repoSlugs: ['example/project'],
-            worktreeTopLevel: source,
-            sourceCwd: '/tmp/repo',
-            refspecs: ['topic'],
-            setUpstream: false,
-            complete: true,
-          },
-        },
-        { agentDir, sessionId, askpassPath },
-      )
-
-      expect(plan).not.toBeNull()
-      expect(plan?.worktreeRoot.path).toBe(realpathSync(source))
-      expect(plan?.sourceCwdSandboxPath).toBe('/tmp/repo')
-      expect(plan?.objectsSandboxPath).toBe('/tmp/repo/.git/objects')
-    } finally {
-      rmSync(sessionTmpDir(sessionId), { recursive: true, force: true })
-    }
-  })
-
-  test('rejects a virtual /tmp repository symlink that escapes the physical session root', async () => {
-    const sessionId = `store-tmp-symlink-${process.pid}-${randomUUID()}`
-    const sessionTmp = sessionTmpDir(sessionId)
-    const outside = join(agentDir, 'outside-session-repo')
-    initRepo(outside)
-    seedBranch(outside, 'topic')
-    mkdirSync(sessionTmp, { recursive: true })
-    symlinkSync(outside, join(sessionTmp, 'repo'))
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C /tmp/repo push origin topic', sessionId)
-
-    try {
-      expect(await hook(event, { ...hookCtx, agentDir })).toMatchObject({ block: true })
-      expect(storeWasInvoked()).toBe(false)
-      expect(event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBeUndefined()
-    } finally {
-      rmSync(sessionTmp, { recursive: true, force: true })
-    }
-  })
-
-  test('rejects a session id that escapes the shared session root', async () => {
-    const escapedName = `typeclaw-escaped-${process.pid}-${randomUUID()}`
-    const sessionId = `../../tmp/${escapedName}`
-    const escapedRoot = join('/tmp', escapedName)
-    const source = join(escapedRoot, 'repo')
-    initRepo(source)
-    seedBranch(source, 'topic')
-
-    try {
-      const plan = await planGithubStorePush(
-        {
-          kind: 'inject',
-          repoSlug: 'example/project',
-          access: 'write',
-          pushProvenance: {
-            kind: 'configured-remote',
-            remote: 'origin',
-            pushUrls: ['https://github.com/example/project.git'],
-            repoSlugs: ['example/project'],
-            worktreeTopLevel: source,
-            sourceCwd: '/tmp/repo',
-            refspecs: ['topic'],
-            setUpstream: false,
-            complete: true,
-          },
-        },
-        { agentDir, sessionId, askpassPath },
-      )
-
-      expect(plan).toBeNull()
-    } finally {
-      rmSync(escapedRoot, { recursive: true, force: true })
-    }
-  })
-
-  test('preserves SHA-256 object format in the reconstructed bare repository', async () => {
-    rmSync(sourceRepo(), { recursive: true, force: true })
-    initSha256Repo(sourceRepo())
-    const oid = seedBranch(sourceRepo(), 'topic')
-    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const event = storeEvent('git -C mounts/source push origin topic')
-
-    expect(await hook(event, { ...hookCtx, agentDir })).toBeUndefined()
-    const prepared = await runDeferredPreparation(event)
-    const backingDir = prepared.mount.type === 'ro-bind' ? prepared.mount.source : ''
-    const format = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', '--show-object-format'], {
-      encoding: 'utf8',
-      env: { ...process.env, GIT_MASTER: '1' },
-    })
-    const ref = spawnSync('/usr/bin/git', ['--git-dir', backingDir, 'rev-parse', 'refs/heads/topic'], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        GIT_MASTER: '1',
-        GIT_ALTERNATE_OBJECT_DIRECTORIES: realpathSync(join(sourceRepo(), '.git', 'objects')),
-      },
-    })
-
-    expect(format.status).toBe(0)
-    expect(format.stdout.trim()).toBe('sha256')
-    expect(ref.status).toBe(0)
-    expect(ref.stdout.trim()).toBe(oid)
-    await prepared.cleanup()
-  })
-
-  test('explicit URLs, reads, set-upstream pushes, and incomplete provenance never invoke the store', async () => {
-    const bare = join(agentDir, 'mounts', 'bare')
-    initRepo(bare, 'https://github.com/example/project.git', true)
-    const cases = [
-      { name: 'explicit URL', command: 'git push https://github.com/example/project.git topic' },
-      { name: 'read operation', command: 'git -C mounts/source fetch origin' },
-      { name: 'set upstream', command: 'git -C mounts/source push -u origin topic' },
-      { name: 'incomplete top-level', command: 'git -C mounts/bare push origin topic' },
-    ]
-
-    for (const item of cases) {
-      rmSync(observedFile, { force: true })
-      const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-      const event = storeEvent(item.command)
-      const result = await hook(event, { ...hookCtx, agentDir })
-      expect(storeWasInvoked(), item.name).toBe(false)
-      expect(event.args[TYPECLAW_INTERNAL_BASH_PREPARE], item.name).toBeUndefined()
-      expect(JSON.stringify(event.args), item.name).not.toContain('store_secret_value')
-      expect(JSON.stringify(result) ?? '', item.name).not.toContain('store_secret_value')
-    }
-  })
-
-  test('multiple push URLs use App tokens per repository, one PAT for all repositories, and reject the store', async () => {
-    runGit(sourceRepo(), ['remote', 'set-url', '--add', '--push', 'origin', 'https://github.com/example/project.git'])
-    runGit(sourceRepo(), ['remote', 'set-url', '--add', '--push', 'origin', 'https://github.com/example/other.git'])
-    const resolved: string[] = []
-    const appHook = await hookFor(
-      async (repo) => {
-        resolved.push(repo)
-        return { kind: 'token', token: repo.endsWith('/project') ? 'app_project_secret' : 'app_other_secret' }
-      },
-      true,
-      { agentDir },
-    )
-    const appEvent = storeEvent()
-
-    const appResult = await appHook(appEvent, { ...hookCtx, agentDir })
-
-    expect(appResult).toBeUndefined()
-    expect(resolved).toEqual(['example/project', 'example/other'])
-    expect(gitEnv(appEvent).TYPECLAW_GIT_CREDENTIALS).toContain('example/project\tapp_project_secret')
-    expect(gitEnv(appEvent).TYPECLAW_GIT_CREDENTIALS).toContain('example/other\tapp_other_secret')
-    expect(String(appEvent.args.command)).not.toContain('app_project_secret')
-    expect(JSON.stringify(appResult) ?? '').not.toContain('app_other_secret')
-    expect(storeWasInvoked()).toBe(false)
-
-    writeFileSync(join(agentDir, '.env'), 'GH_TOKEN=ghp_declared_multi\n')
-    process.env.GH_TOKEN = 'ghp_declared_multi'
-    const patHook = await hookFor(tokenResolver('unused_app_token'), false, {
-      agentDir,
-      permissions: privilegedPermissions,
-    })
-    const patEvent = storeEvent()
-    const patResult = await patHook(patEvent, { ...hookCtx, agentDir })
-
-    expect(patResult).toBeUndefined()
-    expect(gitEnv(patEvent).TYPECLAW_GIT_CREDENTIALS).toContain('example/project\tghp_declared_multi')
-    expect(gitEnv(patEvent).TYPECLAW_GIT_CREDENTIALS).toContain('example/other\tghp_declared_multi')
-    expect(String(patEvent.args.command)).not.toContain('ghp_declared_multi')
-    expect(JSON.stringify(patResult) ?? '').not.toContain('ghp_declared_multi')
-    expect(storeWasInvoked()).toBe(false)
-
-    rmSync(join(agentDir, '.env'), { force: true })
-    delete process.env.GH_TOKEN
-    const storeHook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-    const storeEventWithMultiplePushUrls = storeEvent()
-    const storeResult = await storeHook(storeEventWithMultiplePushUrls, { ...hookCtx, agentDir })
-
-    expect(storeResult).toMatchObject({ block: true })
-    if (storeResult !== undefined && 'reason' in storeResult) expect(storeResult.reason).toContain('credential store')
-    expect(storeWasInvoked()).toBe(false)
-    expect(storeEventWithMultiplePushUrls.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-  })
-
-  test('multi-repository App resolution fails atomically when any destination is unavailable', async () => {
-    runGit(sourceRepo(), ['remote', 'set-url', '--add', '--push', 'origin', 'https://github.com/example/project.git'])
-    runGit(sourceRepo(), ['remote', 'set-url', '--add', '--push', 'origin', 'https://github.com/example/other.git'])
-    const resolved: string[] = []
-    const hook = await hookFor(
-      async (repo) => {
-        resolved.push(repo)
-        return repo === 'example/project'
-          ? { kind: 'token', token: 'partial_secret' }
-          : { kind: 'unavailable', reason: 'down' }
-      },
-      true,
-      { agentDir },
-    )
-    const event = storeEvent()
-
-    const result = await hook(event, { ...hookCtx, agentDir })
-
-    expect(resolved).toEqual(['example/project', 'example/other'])
-    expect(result).toMatchObject({ block: true, reason: 'down' })
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
-    expect(JSON.stringify(result)).not.toContain('partial_secret')
-    expect(String(event.args.command)).not.toContain('partial_secret')
-    expect(storeWasInvoked()).toBe(false)
-  })
-
-  test('missing, failing, and malformed store output blocks without disclosure', async () => {
-    for (const mode of ['missing', 'failing', 'multiline', 'nul', 'oversized']) {
-      rmSync(observedFile, { force: true })
-      process.env.TYPECLAW_TEST_GH_MODE = mode
-      const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
-      const event = storeEvent()
-
-      const result = await hook(event, { ...hookCtx, agentDir })
-
-      expect(result, mode).toMatchObject({ block: true })
-      expect(storeWasInvoked(), mode).toBe(true)
-      expect(JSON.stringify(result), mode).not.toContain('store_secret_value')
-      expect(JSON.stringify(event.args), mode).not.toContain('store_secret_value')
-      expect(event.args[TYPECLAW_INTERNAL_BASH_ENV], mode).toBeUndefined()
-    }
   })
 })
 
@@ -3102,5 +2121,108 @@ describe('github-cli-auth plugin — git in the sandbox /tmp bind', () => {
 
     expect(result).toBeUndefined()
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+})
+
+// The removed fallback resolved its token by running `gh` at an absolute path with the
+// runtime-home GH_CONFIG_DIR, so there is no longer a subprocess boundary a test could
+// intercept: the module that owned it is gone. What stays checkable is the guarantee
+// itself (a push with no App token and no declared PAT is refused, and nothing reaches
+// git) plus the dependency that would have to come back first.
+describe.skipIf(process.platform === 'win32')('github-cli-auth plugin — host gh store never funds a push', () => {
+  const authKeys = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST'] as const
+  let agentDir: string
+  let askpassPath: string
+  let originalAuthEnv: Partial<Record<(typeof authKeys)[number], string>>
+
+  const runGit = (cwd: string, args: string[]): void => {
+    const result = spawnSync('git', args, {
+      cwd,
+      env: { ...process.env, GIT_MASTER: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    if (result.status !== 0) throw new Error('failed to prepare test repository')
+  }
+
+  const seedBranch = (path: string, branch: string): void => {
+    const env = {
+      ...process.env,
+      GIT_MASTER: '1',
+      GIT_AUTHOR_NAME: 'Alice',
+      GIT_AUTHOR_EMAIL: 'alice@example.com',
+      GIT_COMMITTER_NAME: 'Alice',
+      GIT_COMMITTER_EMAIL: 'alice@example.com',
+    }
+    const tree = spawnSync('git', ['mktree'], { cwd: path, input: '', encoding: 'utf8', env })
+    if (tree.status !== 0) throw new Error('failed to create test tree')
+    const commit = spawnSync('git', ['commit-tree', tree.stdout.trim(), '-m', 'test'], {
+      cwd: path,
+      encoding: 'utf8',
+      env,
+    })
+    if (commit.status !== 0) throw new Error('failed to create test commit')
+    runGit(path, ['update-ref', 'refs/heads/' + branch, commit.stdout.trim()])
+    runGit(path, ['symbolic-ref', 'HEAD', 'refs/heads/' + branch])
+  }
+
+  const sourceRepo = (): string => join(agentDir, 'mounts', 'source')
+
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), 'tc-gh-store-nopush-'))
+    askpassPath = join(agentDir, 'typeclaw-git-askpass')
+    // An opted-in agent: the operator's login really is persisted for this agent.
+    writeFileSync(
+      join(agentDir, 'secrets.json'),
+      JSON.stringify({ version: 2, githubCli: { hosts: 'github.com:\n    oauth_token: store_secret_value\n' } }),
+    )
+    mkdirSync(sourceRepo(), { recursive: true })
+    runGit(sourceRepo(), ['init', '-q'])
+    runGit(sourceRepo(), ['remote', 'add', 'origin', 'https://github.com/example/project.git'])
+    seedBranch(sourceRepo(), 'topic')
+    originalAuthEnv = {}
+    for (const key of authKeys) {
+      if (process.env[key] !== undefined) originalAuthEnv[key] = process.env[key]
+      delete process.env[key]
+    }
+    process.env.TYPECLAW_GIT_ASKPASS_PATH = askpassPath
+    resetGitAskPassHelperForTests()
+  })
+
+  afterEach(() => {
+    for (const key of authKeys) {
+      const value = originalAuthEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    delete process.env.TYPECLAW_GIT_ASKPASS_PATH
+    resetGitAskPassHelperForTests()
+    rmSync(agentDir, { recursive: true, force: true })
+  })
+
+  test('a configured-remote push is refused while the host login sits in secrets.json', async () => {
+    const hook = await hookFor(tokenResolver('unused_app_token'), false, { agentDir })
+    const event: ToolBeforeEvent = {
+      tool: 'bash',
+      sessionId: 'store-session',
+      callId: 'store-call',
+      args: { command: 'git -C mounts/source push origin topic' },
+    }
+
+    const result = await hook(event, { ...hookCtx, agentDir })
+
+    expect(result).toMatchObject({ block: true })
+    expect((result as { reason: string }).reason).toContain('githubCli.importHostAuth')
+    expect(JSON.stringify(result)).not.toContain('store_secret_value')
+    expect(JSON.stringify(event.args)).not.toContain('store_secret_value')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBeUndefined()
+  })
+
+  test('the broker keeps no GitHub CLI store dependency a push could reach', () => {
+    const source = readFileSync(join(import.meta.dir, 'index.ts'), 'utf8')
+
+    expect(source).not.toContain('gh-store')
+    expect(source).not.toContain('GithubCliStoreToken')
+    expect(existsSync(join(import.meta.dir, 'gh-store.ts'))).toBe(false)
   })
 })

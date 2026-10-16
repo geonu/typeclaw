@@ -121,8 +121,8 @@ Bound the loop so it can't spin as badly as the inline version would have. Tell 
 TypeClaw has two GitHub credential sources, and you cannot see either one (`secrets.json` is masked from your tools):
 
 - **Per-repo GitHub token** (`secrets.json#channels.github` / the GitHub channel's PAT or App). The `github-cli-auth` plugin injects it into bare `gh` commands for repos it covers.
-- **GitHub CLI store** (`secrets.json#githubCli`, a copy of an operator's `gh` login). Eligible brokered `git push` to a configured GitHub remote over HTTPS can authenticate from it (fetch and clone never use it).
+- **GitHub CLI store** (`secrets.json#githubCli`, a copy of an operator's `gh` login, present only when `githubCli.importHostAuth` is on). It authenticates brokered `gh` commands only — `git push`, fetch, and clone never use it.
 
 These can belong to different GitHub accounts. A green `gh auth status` or a working `gh api` call proves nothing about the account `git push` uses. When a brokered git command fails on auth, TypeClaw appends a note to the result naming the credential source it used and that account's login. Read it before retrying.
 
-Do not try to fix this from inside the session. Don't rewrite the remote URL, embed a token, run `gh auth login`, or edit git credential config: the broker owns these credentials, and you can't read or change them. Report the mismatch to the operator, naming both accounts and the target repo, and tell them how to recover: correct or remove the mismatched entry in `secrets.json` (often a `githubCli` block copied from their personal `gh` login), then run `typeclaw restart`.
+Do not try to fix this from inside the session. Don't rewrite the remote URL, embed a token, run `gh auth login`, or edit git credential config: the broker owns these credentials, and you can't read or change them. Report the mismatch to the operator, naming both accounts and the target repo, and tell them how to recover: correct or remove the mismatched push credential (`channels.github` in `secrets.json`, or the declared `GH_TOKEN` in `.env`), then run `typeclaw restart`.
