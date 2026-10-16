@@ -291,6 +291,17 @@ export const gitSchema = z
 
 export type GitConfig = z.infer<typeof gitSchema>
 
+// Off by default: the host operator's `gh` login is the operator's identity, not
+// the agent's. Copying it unconditionally handed every agent on a shared host the
+// operator's personal GitHub token, so an agent only receives it on explicit opt-in.
+const githubCliObjectSchema = z.object({
+  importHostAuth: z.boolean().default(false),
+})
+
+export const githubCliSchema = githubCliObjectSchema.default(() => githubCliObjectSchema.parse({}))
+
+export type GithubCliConfig = z.infer<typeof githubCliSchema>
+
 export const DEFAULT_LOG_RETENTION_DAYS = 14
 export const MAX_LOG_RETENTION_DAYS = 3650
 
@@ -807,6 +818,7 @@ export const configSchema = z
     sandbox: sandboxSchema,
     docker: dockerSchema,
     git: gitSchema,
+    githubCli: githubCliSchema,
     logs: logsSchema,
     roles: rolesConfigSchema.optional(),
     tunnels: tunnelsArraySchema,
@@ -1084,6 +1096,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   tunnels: 'restart-required',
   'docker.file': 'restart-required', // Includes omoCli; installation changes rebuild the image.
   'git.ignore': 'restart-required',
+  githubCli: 'restart-required',
   logs: 'ignored',
   // Split: `match` lists are reload-safe (typeclaw role claim, hand-edits
   // adding/removing match rules apply without a container restart);
@@ -1179,6 +1192,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'network',
     'docker',
     'git',
+    'githubCli',
     'logs',
     'roles',
     'permissions',

@@ -230,6 +230,19 @@ export class SecretsBackend implements CredentialStore {
     }
   }
 
+  removeGithubCliSync(): void {
+    if (!existsSync(this.secretsPath)) return
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const { githubCli, ...rest } = this.readEnvelope()
+      if (githubCli === undefined) return
+      this.writeEnvelopeAtomic(rest)
+    } finally {
+      release?.()
+    }
+  }
+
   readMcpCredentialSync(serverName: string): McpCredential | undefined {
     if (!existsSync(this.secretsPath)) return undefined
     let release: (() => void) | undefined
