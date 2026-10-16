@@ -45,14 +45,12 @@ export type LlmFetchObserverOptions = {
   // Override the default pre-headers (TTFB) deadline applied to the outer
   // fetch(). When a provider silently holds a request without sending response
   // headers, this is the timer that releases the request so `pi-coding-agent`'s
-  // `_isRetryableError` can retry. Default: 15_000 ms.
+  // `_isRetryableError` can retry. Default: 30_000 ms.
   //
-  // Healthy turns return response headers within ~1s (observed Codex production
-  // p50: ~860ms). Pathological-but-healthy upper bounds: TLS handshake on a cold
-  // connection (~2s), prompt-prefill on a cache miss with large input (~3s),
-  // edge routing slowness (~2s) — sum ~7s. 15s is ~2x that, so anything past it
-  // is almost certainly the silent-hang failure mode rather than a real request
-  // making progress. False-positive cost is one retry (~5s extra); false-negative
+  // Most providers return response headers within ~1s, but slow-but-healthy
+  // OpenAI-compatible providers (e.g. z.ai GLM) routinely take 12-16s to send
+  // headers on large prompts, so a 15s deadline aborted real requests. 30s keeps
+  // a margin over that tail while still bounding a silent hang. False-positive cost is one retry (~5s extra); false-negative
   // cost is the full Bun socket deadline (~268s). Aggressive wins.
   ttfbMs?: number
   // Override the sliding inter-chunk idle deadline applied to the SSE body
@@ -101,11 +99,11 @@ const ENV_OVERALL_MS = 'TYPECLAW_LLM_OVERALL_MS'
 const ENV_CODEX_TTFB_MS = 'TYPECLAW_CODEX_TTFB_MS'
 const ENV_CODEX_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
 const ENV_CODEX_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
-const DEFAULT_TTFB_MS = 15_000
+const DEFAULT_TTFB_MS = 30_000
 const DEFAULT_IDLE_MS = 120_000
 const DEFAULT_OVERALL_MS = 300_000
 // Codex is healthy-FAST but silently hangs: observed header latency p50~1s /
-// p99~8s / max~10.8s, yet hung requests wait out the generic 15s floor. Pinning
+// p99~8s / max~10.8s, yet hung requests wait out the generic 30s floor. Pinning
 // 13s detects hangs ~2s sooner with ~2.2s margin over the healthy max. Pinned,
 // not adaptive: codex's p95 (~5.6s) never crosses the floor so widening is a
 // no-op, and a longer deadline only makes each silent hang costlier to recover.
@@ -116,8 +114,7 @@ const LOG_PREFIX = '[llm-fetch]'
 
 // Adaptive TTFB: give a provider that is OBSERVED to be slow-but-healthy more
 // pre-headers room, without blunting silent-hang detection for fast providers.
-// A fixed 15s guillotine kills legitimately-slow providers (e.g. GLM cold-start
-// TTFB ~16.5s while its p50 is ~1s); a uniform higher default would let a truly
+// A fixed floor kills legitimately-slow providers whose tail exceeds it; a uniform higher default would let a truly
 // hung FAST provider stall for the same widened window. So widening is scoped to
 // the specific origin whose recent successful header latency is actually high.
 //
@@ -125,15 +122,15 @@ const LOG_PREFIX = '[llm-fetch]'
 // are bimodal, mostly-1s with occasional 10–16s, so a mean-tracker sits low and
 // never widens for the spike). Nearest-rank p95 over the last ADAPTIVE_WINDOW_MS
 // of samples reacts to the current upper tail and forgets stale slowness.
-const ADAPTIVE_TTFB_FLOOR_MS = 15_000
-const ADAPTIVE_TTFB_CEIL_MS = 30_000
+const ADAPTIVE_TTFB_FLOOR_MS = 30_000
+const ADAPTIVE_TTFB_CEIL_MS = 60_000
 const ADAPTIVE_TTFB_MULTIPLIER = 2
 const ADAPTIVE_MIN_SAMPLES = 8
 const ADAPTIVE_MAX_SAMPLES = 32
 const ADAPTIVE_WINDOW_MS = 5 * 60_000
 // After a timeout at the CEIL budget, the origin is treated as slow-then-hung:
 // suppress all widening (learned + probe) and fail closed to the floor for this
-// long, so five rapid retries can't each inherit the 30s budget. A sub-floor
+// long, so five rapid retries can't each inherit the ceil budget. A sub-floor
 // success clears the suppression early.
 const ADAPTIVE_COOLDOWN_MS = 5 * 60_000
 
@@ -256,7 +253,7 @@ export function defaultLlmFetchEndpoints(env: NodeJS.ProcessEnv = process.env): 
       // GETs to the same host (auth probes, etc.) are deliberately ignored.
       match: (url, method) =>
         method === 'POST' && url.hostname === 'chatgpt.com' && url.pathname.includes('/codex/responses'),
-      // TTFB is pinned to the codex-specific default (not the generic 15s) so a
+      // TTFB is pinned to the codex-specific default (not the generic 30s) so a
       // silent hang is caught fast and adaptation is bypassed for this endpoint;
       // an operator-set TYPECLAW_CODEX_TTFB_MS still wins. Idle/overall keep the
       // fall-through shape (unset → generic TYPECLAW_LLM_* / built-in default) so
