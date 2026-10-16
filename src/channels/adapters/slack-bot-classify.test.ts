@@ -291,7 +291,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Slack attachment #1: file image/png name=diagram.png]')
+    expect(verdict.payload.text).toContain('file_id=F1')
     expect(verdict.payload.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F1', filename: 'diagram.png', mimetype: 'image/png' },
     ])
@@ -319,7 +319,8 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('look at this\n[Slack attachment #1: file image/png name=diagram.png]')
+    expect(verdict.payload.text).toStartWith('look at this\n')
+    expect(verdict.payload.text).toContain('file_id=F1')
     expect(verdict.payload.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F1', filename: 'diagram.png', mimetype: 'image/png' },
     ])
@@ -356,9 +357,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe(
-      '[Slack attachment #1: file image/png name=one.png]\n[Slack attachment #2: file text/plain name=two.txt]',
-    )
+    expect(verdict.payload.text.match(/file_id=F[A-Z0-9]+/g)).toEqual(['file_id=F1', 'file_id=F2'])
     expect(verdict.payload.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F1', filename: 'one.png', mimetype: 'image/png' },
       { id: 2, kind: 'file', ref: 'F2', filename: 'two.txt', mimetype: 'text/plain' },

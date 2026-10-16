@@ -99,3 +99,4 @@ export {
   type RegisteredTool,
 } from './registry'
 export { createHookBus, type HookBus } from './hooks'
+export { createSubagentSessionManager } from '@/agent/subagent-session'

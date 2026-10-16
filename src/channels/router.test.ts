@@ -24,6 +24,7 @@ import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 
 import type { AgentSession, SessionOriginRef } from '@/agent'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
+import { createChannelLookAtTool } from '@/agent/multimodal/look-at'
 import { detectProviderError } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
@@ -31,6 +32,7 @@ import { readContinuationState } from '@/agent/todo/continuation-state'
 import { recordTurnOutcome } from '@/agent/todo/continuation-wiring'
 import { resolveTodoScope } from '@/agent/todo/scope'
 import { writeTodos } from '@/agent/todo/store'
+import { createChannelFetchAttachmentTool } from '@/agent/tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from '@/agent/tools/channel-history'
 import { createChannelReplyTool } from '@/agent/tools/channel-reply'
 import { createPostGithubReviewTool } from '@/agent/tools/post-github-review'
@@ -46,6 +48,8 @@ import type { HookBus, SessionIdleEvent } from '@/plugin'
 import { waitFor } from '@/test-helpers/wait-for'
 
 import { createDiscordHistoryCallback } from './adapters/discord'
+import { createSlackHistoryCallback as createSlackUserHistoryCallback } from './adapters/slack'
+import { createSlackHistoryCallback as createSlackBotHistoryCallback } from './adapters/slack-bot'
 import { BackgroundObligationStore } from './background-obligations'
 import { recoveryNoticeCause } from './continuity-types'
 import {
@@ -18343,6 +18347,157 @@ describe('ChannelRouter history attachment registry', () => {
 
     expect(router.lookupInboundAttachment({ ...KEY, id: 999 })).toBeNull()
     expect(router.lookupInboundAttachment({ ...KEY, id: 1 })!.ref).toBe('NEW1')
+  })
+
+  for (const adapter of ['slack', 'slack-bot'] as const) {
+    test(`${adapter}: file_id learned from real channel_history selects the older colliding attachment and identifies visual failures`, async () => {
+      const origin = { ...KEY, adapter }
+      const { router } = makeRouter(await tempDir())
+      await router.route(inbound({ ...origin, text: 'open session' }))
+      await router.__testing!.flushDebounce(origin)
+      const messages = [
+        {
+          ts: '1700000000.000002',
+          user: 'U1',
+          text: 'newer image',
+          files: [{ id: 'FNEW', name: 'new.png', mimetype: 'image/png' }],
+        },
+        {
+          ts: '1700000000.000001',
+          user: 'U1',
+          text: 'older image',
+          files: [{ id: 'FOLD', name: 'old.png', mimetype: 'image/png' }],
+        },
+      ]
+      const logger = { info() {}, warn() {}, error() {} }
+      router.registerHistory(
+        adapter,
+        adapter === 'slack-bot'
+          ? createSlackBotHistoryCallback({
+              token: 'synthetic',
+              logger,
+              botUserIdRef: () => null,
+              fetchImpl: Object.assign(async () => Response.json({ ok: true, messages }), { preconnect() {} }),
+            })
+          : createSlackUserHistoryCallback({
+              logger,
+              client: { getMessages: async () => messages } as unknown as Parameters<
+                typeof createSlackUserHistoryCallback
+              >[0]['client'],
+            }),
+      )
+      const history = createChannelHistoryTool({ router, origin })
+      const output = await history.execute(
+        'history',
+        { scope: 'channel' },
+        undefined,
+        undefined,
+        {} as Parameters<typeof history.execute>[4],
+      )
+      const rendered = output.content.map((part) => ('text' in part ? part.text : '')).join('\n')
+      const selector = /older image[\s\S]*?attachment #(\d+):[^\]]*file_id=(F[A-Z0-9]+)/.exec(rendered)
+      expect(selector?.[2]).toBe('FOLD')
+      expect(router.lookupInboundAttachment({ ...origin, id: 1 })?.ref).toBe('FNEW')
+      const fetched: string[] = []
+      router.registerFetchAttachment(adapter, async (args) => {
+        fetched.push(args.ref)
+        return { ok: false, error: 'synthetic HTML substitution' }
+      })
+      const params = { attachment_id: Number(selector![1]), file_id: selector![2]! }
+      const download = createChannelFetchAttachmentTool({ router, origin })
+      const downloaded = await download.execute(
+        'download',
+        params,
+        undefined,
+        undefined,
+        {} as Parameters<typeof download.execute>[4],
+      )
+      expect(downloaded.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining('FOLD') }))
+      const visual = createChannelLookAtTool(router, origin)
+      const failed = await visual.execute(
+        'visual',
+        params,
+        undefined,
+        undefined,
+        {} as Parameters<typeof visual.execute>[4],
+      )
+      expect(failed.content).toContainEqual({ type: 'text', text: 'Selected Slack file_id=FOLD' })
+      expect(failed.content).toContainEqual(
+        expect.objectContaining({ text: expect.stringContaining('synthetic HTML substitution') }),
+      )
+      expect(fetched).toEqual(['FOLD', 'FOLD'])
+    })
+  }
+
+  test('history-discovered PDF replaces observed email #1, and exact refs remain selectable', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [historyMessage({ ts: 1000, attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }] })],
+    }))
+    await router.route(inbound({ text: '발주서 PDF 확인해줘' }))
+    let selected: string | undefined
+    let exact: string | undefined
+    sessions[0]!.onPrompt = () => {
+      router.registerHistoryAttachments(KEY, [
+        historyMessage({ ts: 1000, attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }] }),
+        historyMessage({ ts: 2000, attachments: [{ id: 1, kind: 'file', ref: 'PDF' }] }),
+      ])
+      selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      exact = router.lookupInboundAttachment({ ...KEY, id: 1, ref: 'EMAIL' })?.ref
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('PDF')
+    expect(exact).toBe('EMAIL')
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1, ref: 'UNSEEN' })).toBeNull()
+  })
+
+  test('an older attachment merged with a newer text-only request cannot shadow its history-discovered PDF', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    const ts = Date.now()
+    await router.route(
+      inbound({
+        text: 'earlier email',
+        ts: ts - 2000,
+        externalMessageId: 'email',
+        attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }],
+      }),
+    )
+    await router.route(inbound({ text: '새 PDF를 확인해줘', ts, externalMessageId: 'request' }))
+    let selected: string | undefined
+    sessions[0]!.onPrompt = () => {
+      router.registerHistoryAttachments(KEY, [
+        historyMessage({ ts: ts - 1000, attachments: [{ id: 1, kind: 'file', ref: 'PDF' }] }),
+      ])
+      selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('PDF')
+  })
+
+  test('a future queued image cannot replace the image being read in this turn', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    await router.route(inbound({ text: '확인', attachments: [{ id: 1, kind: 'photo', ref: 'CURRENT' }] }))
+    let selected: string | undefined
+    let first = true
+    sessions[0]!.onPrompt = async () => {
+      if (first) {
+        first = false
+        await router.route(
+          inbound({
+            text: '다음 사진',
+            externalMessageId: 'next',
+            attachments: [{ id: 1, kind: 'photo', ref: 'FUTURE' }],
+          }),
+        )
+        selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      }
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('CURRENT')
   })
 })
 

@@ -332,10 +332,7 @@ describe('createSlackAdapter', () => {
   })
 
   test('subtype-less RTM file messages reach the router with the same attachment descriptors as history', async () => {
-    for (const [text, expectedText] of [
-      ['', '[Slack attachment #1: file application/pdf name=report.pdf]'],
-      ['please review', 'please review\n[Slack attachment #1: file application/pdf name=report.pdf]'],
-    ] as const) {
+    for (const text of ['', 'please review']) {
       const r = router()
       const listener = new FakeListener()
       const adapter = createSlackAdapter({
@@ -370,7 +367,7 @@ describe('createSlackAdapter', () => {
       await adapter.stop()
 
       expect(r.routed).toHaveLength(1)
-      expect(r.routed[0]?.text).toBe(expectedText)
+      expect(r.routed[0]?.text).toContain('file_id=F0001')
       expect(r.routed[0]?.externalMessageId).toBe('1770000000.000100')
       expect(r.routed[0]?.attachments).toEqual([
         { id: 1, kind: 'file', ref: 'F0001', filename: 'report.pdf', mimetype: 'application/pdf' },
@@ -626,7 +623,7 @@ describe('createSlackHistoryCallback', () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.messages[0]?.text).toBe('[Slack attachment #1: file image/png name=image.png]')
+    expect(result.messages[0]?.text).toContain('file_id=F0001')
     expect(result.messages[0]?.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F0001', filename: 'image.png', mimetype: 'image/png' },
     ])
@@ -644,9 +641,7 @@ describe('createSlackHistoryCallback', () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.messages[0]?.text).toBe(
-      'two files\n[Slack attachment #1: file image/png name=image.png]\n[Slack attachment #2: file application/pdf name=b.pdf]',
-    )
+    expect(result.messages[0]?.text.match(/file_id=F[A-Z0-9]+/g)).toEqual(['file_id=F0001', 'file_id=F0002'])
     expect(result.messages[0]?.attachments?.map((a) => [a.id, a.ref])).toEqual([
       [1, 'F0001'],
       [2, 'F0002'],

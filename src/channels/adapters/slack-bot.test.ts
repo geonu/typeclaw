@@ -1603,7 +1603,7 @@ describe('createSlackHistoryCallback', () => {
     expect(msg.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F123', filename: 'photo.png', mimetype: 'image/png' },
     ])
-    expect(msg.text).toBe('이 사진 머임??\n[Slack attachment #1: file image/png name=photo.png]')
+    expect(msg.text).toContain('file_id=F123')
   })
 
   test('omits attachments and leaves text untouched when a history message has no files', async () => {
@@ -1650,7 +1650,7 @@ describe('createSlackHistoryCallback', () => {
     // then
     if (!result.ok) throw new Error('expected ok')
     const msg = result.messages[0]!
-    expect(msg.text).toBe('[Slack attachment #1: file application/pdf name=doc.pdf]')
+    expect(msg.text).toContain('file_id=F9')
     expect(msg.attachments).toHaveLength(1)
   })
 

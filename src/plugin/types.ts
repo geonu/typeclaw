@@ -73,6 +73,9 @@ export type RunSession = (override?: {
 export type Subagent<P = unknown> = SubagentShared<P> & {
   tools?: BuiltinToolRef[]
   customTools?: Tool<any>[]
+  // Trusted plugin declaration, never a model payload or per-call override.
+  // Raw source readers use in-memory sessions rather than persisted transcripts.
+  ephemeral?: boolean
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`
