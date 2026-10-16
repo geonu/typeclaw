@@ -4663,6 +4663,9 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     hooks.registerAll('observer', agentDir, noopLogger, {
       'tool.after': (event) => {
         afterResults.push(event.result)
+        if (event.callId === 'failure') {
+          event.result.content.push({ type: 'text', text: '[test:failure-advice]' })
+        }
       },
     })
     const wrapScripted = (results: ReadonlyArray<ScriptedBashStep>, sessionId: string) => {
@@ -4691,6 +4694,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       const rejection = failing.wrapped.execute('failure', { command: 'git status' }, undefined, undefined, {} as never)
       await expect(rejection).rejects.toThrow('Command exited with code 128')
       await expect(rejection).rejects.toThrow('[TypeClaw sandbox policy (LOCAL)')
+      await expect(rejection).rejects.toThrow('[test:failure-advice]')
       expect(failing.attempts()).toBe(1)
       expect(afterResults).toHaveLength(1)
       expect(afterResults[0]?.details).toEqual({
