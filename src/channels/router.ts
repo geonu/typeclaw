@@ -3505,8 +3505,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   ): Promise<void> => {
     const prefetch = adapterConfig.history.prefetch
     const isThread = live.key.thread !== null
-    const head = isThread ? prefetch.thread.head : 0
-    const tail = isThread ? prefetch.thread.tail : prefetch.channel.tail
+    let head = isThread ? prefetch.thread.head : 0
+    let tail = isThread ? prefetch.thread.tail : prefetch.channel.tail
     if (head === 0 && tail === 0) return
 
     // One fetch per cold start. We always pass the live thread when present so
@@ -3541,10 +3541,31 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // "Recent context" and once in "Current message". Adapters typically
     // return the latest channel/thread messages, so this overlap is the
     // common case, not the edge case.
-    const filteredMessages =
+    let filteredMessages =
       triggeringMessageId !== undefined
         ? result.messages.filter((m) => m.externalMessageId !== triggeringMessageId)
         : result.messages
+
+    // A thread rooted at the triggering message (a top-level mention the bot
+    // answers in-thread) has no history of its own yet, so the thread fetch
+    // seeds nothing and the agent starts blind to what was just said in the
+    // channel, including its own recent posts. Seed from the channel tail.
+    if (filteredMessages.length === 0 && isThread && live.key.thread === triggeringMessageId) {
+      tail = prefetch.channel.tail
+      if (tail === 0) return
+      head = 0
+      const channelResult = await fetchHistory(live.key.adapter, {
+        chat: live.key.chat,
+        thread: null,
+        limit: tail + 1,
+        prefetch: true,
+      })
+      if (!channelResult.ok) {
+        logger.info(`[channels] ${live.keyId}: channel prefetch fallback skipped (${channelResult.error})`)
+        return
+      }
+      filteredMessages = channelResult.messages.filter((m) => m.externalMessageId !== triggeringMessageId)
+    }
     if (filteredMessages.length === 0) return
 
     const seeded = sliceHeadTail(filteredMessages, head, tail)
