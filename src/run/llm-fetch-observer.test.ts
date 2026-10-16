@@ -1416,12 +1416,12 @@ describe('installLlmFetchObserver', () => {
 })
 
 describe('AdaptiveTtfbTracker', () => {
-  const FLOOR = 15_000
-  const CEIL = 30_000
+  const FLOOR = 30_000
+  const CEIL = 60_000
   const KEY = 'openai-compatible|https://api.z.ai'
   const OTHER = 'openai-compatible|https://api.fireworks.ai'
-  // 2x16s = 32s clamps to the 30s ceil, so this seed reliably exercises the cap.
-  const CEIL_SEED = 16_000
+  // 2x31s = 62s clamps to the 60s ceil, so this seed reliably exercises the cap.
+  const CEIL_SEED = 31_000
 
   function seedSamples(tracker: AdaptiveTtfbTracker, key: string, count: number, headersMs: number): void {
     for (let i = 0; i < count; i++) tracker.recordHeaders(key, headersMs)
@@ -1434,11 +1434,11 @@ describe('AdaptiveTtfbTracker', () => {
   })
 
   test('raises the budget from p95 once enough samples exist, capped at ceil', () => {
-    // given: 8 fast samples + one 10s spike → p95 is the spike, 2x = 20s
+    // given: 8 fast samples + one 20s spike → p95 is the spike, 2x = 40s
     const tracker = new AdaptiveTtfbTracker(() => 0)
     seedSamples(tracker, KEY, 8, 1_000)
-    tracker.recordHeaders(KEY, 10_000)
-    expect(tracker.resolve(KEY)).toBe(20_000)
+    tracker.recordHeaders(KEY, 20_000)
+    expect(tracker.resolve(KEY)).toBe(40_000)
   })
 
   test('never widens above the ceil even for a very slow p95', () => {
@@ -1476,8 +1476,8 @@ describe('AdaptiveTtfbTracker', () => {
     seedSamples(tracker, KEY, 8, 1_000)
     tracker.recordTimeout(KEY, FLOOR)
     expect(tracker.resolve(KEY)).toBe(CEIL) // probe granted
-    tracker.recordHeaders(KEY, 16_000) // probe observed a genuinely-slow header
-    expect(tracker.resolve(KEY)).toBe(CEIL) // 2x16s clamped to ceil, now learned
+    tracker.recordHeaders(KEY, CEIL_SEED) // probe observed a genuinely-slow header
+    expect(tracker.resolve(KEY)).toBe(CEIL) // 2x31s clamped to ceil, now learned
   })
 
   test('a ceil timeout fails closed to floor and suppresses widening', () => {
@@ -1517,7 +1517,8 @@ describe('AdaptiveTtfbTracker', () => {
 
   test('reset clears all learned state', () => {
     const tracker = new AdaptiveTtfbTracker(() => 0)
-    seedSamples(tracker, KEY, 12, 14_000)
+    seedSamples(tracker, KEY, 12, CEIL_SEED)
+    expect(tracker.resolve(KEY)).toBe(CEIL)
     tracker.reset()
     expect(tracker.resolve(KEY)).toBe(FLOOR)
   })
@@ -1525,7 +1526,7 @@ describe('AdaptiveTtfbTracker', () => {
 
 describe('adaptive TTFB integration through installLlmFetchObserver', () => {
   const URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions'
-  const FLOOR = 15_000
+  const FLOOR = 30_000
 
   const clearAdaptiveEnv = () => {
     delete process.env.TYPECLAW_LLM_TTFB_MS
@@ -1546,7 +1547,7 @@ describe('adaptive TTFB integration through installLlmFetchObserver', () => {
     const clock = makeClock()
     const scheduler = makeScheduler()
     const tracker = new AdaptiveTtfbTracker(clock.now)
-    for (let i = 0; i < 12; i++) tracker.recordHeaders('openai-compatible|https://api.z.ai', 16_000)
+    for (let i = 0; i < 12; i++) tracker.recordHeaders('openai-compatible|https://api.z.ai', 31_000)
 
     let signal: AbortSignal | undefined
     globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
@@ -1567,12 +1568,12 @@ describe('adaptive TTFB integration through installLlmFetchObserver', () => {
     try {
       clock.set(0)
       const pending = fetch(URL, { method: 'POST' })
-      // floor (15s) must NOT fire; only the widened 30s budget aborts
+      // floor (30s) must NOT fire; only the widened 60s budget aborts
       clock.set(FLOOR)
       await scheduler.fire(FLOOR)
       expect(signal?.aborted).toBe(false)
-      clock.set(30_000)
-      await scheduler.fire(30_000)
+      clock.set(60_000)
+      await scheduler.fire(60_000)
       await pending.catch((e) => {
         caught = e
       })
@@ -1580,7 +1581,7 @@ describe('adaptive TTFB integration through installLlmFetchObserver', () => {
       uninstall()
     }
     expect(caught).not.toBeNull()
-    expect(caught!.message).toContain('30000ms')
+    expect(caught!.message).toContain('60000ms')
   })
 
   test('records a successful headers sample so the origin can later widen', async () => {
@@ -1591,7 +1592,7 @@ describe('adaptive TTFB integration through installLlmFetchObserver', () => {
 
     let ctrl = makeControllableBody()
     globalThis.fetch = (async () => {
-      clock.set(16_000)
+      clock.set(31_000)
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
@@ -1608,11 +1609,11 @@ describe('adaptive TTFB integration through installLlmFetchObserver', () => {
         clock.set(0)
         const response = await fetch(URL, { method: 'POST' })
         const drainPromise = drainQuiet(response.body)
-        clock.set(16_000)
+        clock.set(31_000)
         await ctrl.close()
         await drainPromise
       }
-      expect(tracker.resolve('openai-compatible|https://api.z.ai')).toBe(30_000)
+      expect(tracker.resolve('openai-compatible|https://api.z.ai')).toBe(60_000)
     } finally {
       uninstall()
     }
