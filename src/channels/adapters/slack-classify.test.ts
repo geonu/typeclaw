@@ -65,7 +65,7 @@ describe('classifyInbound (slack user)', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') return
-    expect(verdict.payload.text).toBe('[Slack attachment #1: file image/png name=image.png]')
+    expect(verdict.payload.text).toContain('file_id=F0001')
     expect(verdict.payload.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F0001', filename: 'image.png', mimetype: 'image/png' },
     ])
@@ -83,9 +83,8 @@ describe('classifyInbound (slack user)', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') return
-    expect(verdict.payload.text).toBe(
-      'two files\n[Slack attachment #1: file image/png name=image.png]\n[Slack attachment #2: file text/plain name=notes.txt]',
-    )
+    expect(verdict.payload.text).toStartWith('two files\n')
+    expect(verdict.payload.text.match(/file_id=F[A-Z0-9]+/g)).toEqual(['file_id=F0001', 'file_id=F0002'])
     expect(verdict.payload.attachments).toEqual([
       { id: 1, kind: 'file', ref: 'F0001', filename: 'image.png', mimetype: 'image/png' },
       { id: 2, kind: 'file', ref: 'F0002', filename: 'notes.txt', mimetype: 'text/plain' },

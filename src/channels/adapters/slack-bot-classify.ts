@@ -221,6 +221,7 @@ export function describeSlackFile(file: SlackFile, id: number): InboundAttachmen
 
 export function renderPlaceholder(attachment: InboundAttachment): string {
   const parts: string[] = [`Slack attachment #${attachment.id}: ${attachment.kind}`]
+  parts.push(`file_id=${attachment.ref}`)
   if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
   if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)
   return `[${parts.join(' ')}]`

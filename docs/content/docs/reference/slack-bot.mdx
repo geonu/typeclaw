@@ -63,10 +63,13 @@ The adapter removes only the authenticated account's reaction with `reactions.re
 ### Exact attachment selection
 
 `attachment_id` is message-local: two messages can both contain attachment `#1`.
+Both live messages and history expose `file_id=F…` in each Slack attachment
+placeholder, so the selector is visible even when historical messages reuse `#1`.
 For an older attachment, read history first and pass its exact Slack `file_id`
 to `channel_fetch_attachment` or `look_at_channel_attachment` alongside
 `attachment_id`. An unseen ID is rejected, not replaced by another file.
-Downloads and visual reads identify the selected Slack file in their result.
+Downloads and visual reads identify the selected Slack file in success and
+download-error results.
 A current request's own attachment wins; observed old scrollback cannot shadow a
 newer attachment discovered through history, and queued future messages cannot
 retarget an in-flight read.

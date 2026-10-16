@@ -160,12 +160,13 @@ export function createChannelLookAtTool(
         maxBytes: LOOK_AT_MAX_BYTES,
         ...(found.filename !== undefined ? { filename: found.filename } : {}),
       })
-      if (!result.ok) return errorResult(result.error, { count: 0, prompt: params.prompt })
-      const viewed = await runLookAtImages(
-        [toImageContent(result.buffer.toString('base64'), result.mimetype ?? 'image/jpeg')],
-        params.prompt,
-        permissions,
-      )
+      const viewed = result.ok
+        ? await runLookAtImages(
+            [toImageContent(result.buffer.toString('base64'), result.mimetype ?? 'image/jpeg')],
+            params.prompt,
+            permissions,
+          )
+        : errorResult(result.error, { count: 0, prompt: params.prompt })
       if (origin.adapter === 'slack' || origin.adapter === 'slack-bot')
         viewed.content.unshift({ type: 'text', text: `Selected Slack file_id=${found.ref}` })
       return viewed
