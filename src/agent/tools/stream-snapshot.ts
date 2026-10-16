@@ -108,7 +108,7 @@ function formatResult(
       id: e.id,
       ts: e.ts,
       target: e.target,
-      payload: e.payload,
+      payload: snapshotPayload(e.payload),
       ...(e.replyTo !== undefined ? { replyTo: e.replyTo } : {}),
       ...(e.meta !== undefined ? { meta: e.meta } : {}),
     })),
@@ -123,12 +123,25 @@ function formatResult(
 
   const header = `${events.length} stream event(s) matching ${filterDesc} (oldest → newest):`
   const lines = [header, '']
-  for (const event of events) {
+  for (const event of details.events) {
     lines.push(formatEventLine(event))
   }
   return {
     content: [{ type: 'text' as const, text: lines.join('\n').trimEnd() }],
     details,
+  }
+}
+
+// Stream payloads are runtime objects: a handler cron job contains a function.
+// Tool details enter the transcript, which pi structuredClones before the next
+// provider request. Project only this diagnostic view to its persisted JSON
+// shape; never strip callbacks from the broker's live dispatch payload.
+function snapshotPayload(payload: unknown): unknown {
+  try {
+    const json = JSON.stringify(payload)
+    return json === undefined ? '<unserializable>' : JSON.parse(json)
+  } catch {
+    return '<unserializable>'
   }
 }
 
