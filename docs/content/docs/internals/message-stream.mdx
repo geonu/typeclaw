@@ -73,6 +73,22 @@ TUI ↔ WS depends on the stream-driven drain loop:
 
 `src/agent/tools/stream-snapshot.ts` — read-only tool exposing the broker's bounded ring buffer (default 1000 events). Agent can ask "what cron jobs fired in the last minute?" without a round-trip. Wired only when a Stream is injected. Read-only by design.
 
+The broker keeps runtime payloads, not a JSON-only event log: handler cron jobs
+carry the callback the consumer must execute. `stream_snapshot` projects each
+payload to its JSON representation for both the text summary and tool `details`,
+without changing the broker's payload. Function-valued object fields are omitted
+and function-valued array entries become `null`. Payloads with no JSON
+representation, or whose serialization throws (for example cycles or `bigint`),
+are shown as `<unserializable>`; the other events remain available.
+
+This boundary matters because tool `details` become part of the live transcript.
+Pi's extension context pass calls `structuredClone(messages)` before the next
+provider request, which cannot clone a function. Returning a raw handler job
+would make subsequent turns fail locally with `DataCloneError`, even though
+persisting the same transcript as JSON silently drops the function. This is a
+local conversation-preparation failure, not an LLM timeout; provider retries or
+model failover cannot repair the in-memory transcript.
+
 ## Rules of thumb
 
 - **In-memory and ephemeral.** Anything that must survive a restart belongs elsewhere (session JSONL, `cron.json`, MEMORY.md, recovery outbox). Publication alone never settles a durable response obligation.

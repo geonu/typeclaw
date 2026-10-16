@@ -35,6 +35,87 @@ describe('stream_snapshot tool', () => {
     expect(details.count).toBe(2)
   })
 
+  test('keeps handler-job snapshots cloneable without changing live dispatch', async () => {
+    const stream = createStream()
+    let executions = 0
+    const job = {
+      id: 'plugin-maintenance',
+      kind: 'handler' as const,
+      enabled: true,
+      schedule: '* * * * *',
+      handler: async () => {
+        executions++
+      },
+    }
+    stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
+    const tool = createStreamSnapshotTool({ stream })
+
+    const result = await tool.execute('id', {}, undefined, undefined, ctx)
+    // Pi clones the whole transcript before the next provider request, not
+    // just the text content. JSON persistence alone would hide the function.
+    const [cloned] = structuredClone([{ role: 'toolResult', ...result }])
+    const details = cloned!.details as { events: Array<{ payload: unknown }> }
+    expect(details.events[0]?.payload).toEqual({
+      id: job.id,
+      kind: 'handler',
+      enabled: true,
+      schedule: '* * * * *',
+    })
+
+    const liveJob = stream.scan()[0]!.payload as typeof job
+    await liveJob.handler()
+    expect(executions).toBe(1)
+  })
+
+  test('projects nested callbacks while preserving diagnostic data', async () => {
+    const stream = createStream()
+    const target = { kind: 'session' as const, sessionId: 'worker' }
+    stream.publish({
+      target,
+      payload: { status: 'ready', nested: { count: 2, callback: () => {} }, values: ['ok', () => {}] },
+      replyTo: 'request',
+      meta: { source: 'plugin' },
+    })
+    const tool = createStreamSnapshotTool({ stream })
+
+    const result = await tool.execute('id', {}, undefined, undefined, ctx)
+    const cloned = structuredClone(result)
+    expect(cloned.details).toMatchObject({
+      events: [
+        {
+          target,
+          payload: { status: 'ready', nested: { count: 2 }, values: ['ok', null] },
+          replyTo: 'request',
+          meta: { source: 'plugin' },
+        },
+      ],
+    })
+  })
+
+  test.each([
+    [
+      'cycle',
+      (() => {
+        const value: { self?: unknown } = {}
+        value.self = value
+        return value
+      })(),
+    ],
+    ['bigint', { count: 1n }],
+    ['function', () => {}],
+    ['symbol', Symbol('diagnostic')],
+    ['undefined', undefined],
+  ])('keeps an unserializable %s payload out of the transcript', async (_name, payload) => {
+    const stream = createStream()
+    stream.publish({ target: { kind: 'broadcast' }, payload })
+    const tool = createStreamSnapshotTool({ stream })
+
+    const result = await tool.execute('id', {}, undefined, undefined, ctx)
+    const cloned = structuredClone(result)
+    expect(cloned.details).toMatchObject({ events: [{ payload: '<unserializable>' }] })
+    expect(textOf(cloned)).toContain('<unserializable>')
+  })
+
   test('filters by target_kind', async () => {
     const stream = createStream()
     stream.publish({ target: { kind: 'broadcast' }, payload: 'b' })
