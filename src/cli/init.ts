@@ -1796,8 +1796,7 @@ async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['c
   // length checks below to avoid a TypeError on the "leave blank" path.
   const enteredSecret = typeof secret === 'string' ? secret : ''
   const reposRaw = await text({
-    message: 'Repositories to allow (comma-separated owner/repo)',
-    validate: (v) => (parseGithubRepos(v ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
+    message: 'Repositories to allow (comma-separated owner/repo, leave blank to skip)',
   })
   if (isCancel(reposRaw)) return back()
   const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
@@ -1808,7 +1807,7 @@ async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['c
       ...(webhookUrl !== undefined ? { webhookUrl } : {}),
       webhookPort: Number(port),
       ...(namedCreds !== undefined ? namedCreds : {}),
-      repos: parseGithubRepos(reposRaw),
+      repos: parseGithubRepos(reposRaw ?? ''),
       auth,
     },
   })

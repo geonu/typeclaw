@@ -1220,8 +1220,7 @@ async function promptGithubCredentials(cwd: string): Promise<{
   // length checks below to avoid a TypeError on the "leave blank" path.
   const enteredSecret = typeof secret === 'string' ? secret : ''
   const reposRaw = await text({
-    message: 'Repositories to allow (comma-separated owner/repo)',
-    validate: (value) => (parseRepos(value ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
+    message: 'Repositories to allow (comma-separated owner/repo, leave blank to skip)',
   })
   if (isCancel(reposRaw)) {
     cancel('Aborted.')
@@ -1234,7 +1233,7 @@ async function promptGithubCredentials(cwd: string): Promise<{
     ...(webhookUrl !== undefined ? { webhookUrl } : {}),
     webhookPort: Number(port),
     ...(namedCreds !== undefined ? namedCreds : {}),
-    repos: parseRepos(reposRaw),
+    repos: parseRepos(reposRaw ?? ''),
     auth,
   }
 }
