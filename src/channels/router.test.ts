@@ -13168,6 +13168,41 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(prompt).toContain('hey bot')
   })
 
+  test('a fresh thread rooted at the triggering message seeds from the channel tail', async () => {
+    // given: the thread holds only its root (the trigger); the channel holds a recent bot post
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const requests: Array<string | null> = []
+    router.registerHistory('discord-bot', async (req) => {
+      requests.push(req.thread)
+      return req.thread === null
+        ? {
+            ok: true,
+            messages: [
+              historyMessage({
+                externalMessageId: 'cron-post',
+                text: '팔로워 10만 달성',
+                authorName: 'Bot',
+                isBot: true,
+              }),
+              historyMessage({ externalMessageId: 'root', text: '축하해줘', authorName: 'Alice' }),
+            ],
+          }
+        : { ok: true, messages: [historyMessage({ externalMessageId: 'root', text: '축하해줘', authorName: 'Alice' })] }
+    })
+
+    // when: the root message itself engages, opening the thread
+    await router.route(inbound({ thread: 'root', externalMessageId: 'root', text: '축하해줘' }))
+    await router.__testing!.flushDebounce({ ...THREAD_KEY, thread: 'root' })
+
+    // then: the channel post is in recent context and the trigger is not duplicated
+    expect(requests).toEqual(['root', null])
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('## Recent context')
+    expect(prompt).toContain('팔로워 10만 달성')
+    expect(prompt.split('축하해줘')).toHaveLength(2)
+  })
+
   test('a peer bot in prefetched history does NOT make botInThread true (stays quiet on a human-rooted reply-to-other)', async () => {
     // Incident: dobby woke on a fresh thread cold-start whose prefetched
     // history held a PEER bot's message. `hasBotParticipated` counted that
