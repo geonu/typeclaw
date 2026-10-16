@@ -116,19 +116,28 @@ export function createChannelLookAtTool(
     description:
       'View an image attached to a channel message. Inbound messages show ' +
       '`[<Platform> attachment #N: <kind> <metadata>]`; pass `N` as `attachment_id`. Do not invent ids. ' +
-      'Images on the CURRENT inbound resolve directly; for one from an EARLIER message, call channel_history ' +
-      'first to make it resolvable by the same id.',
+      'Images on the CURRENT inbound resolve directly; for an EARLIER message call channel_history first. ' +
+      'On Slack pass file_id when the request names an exact file or several messages reuse #1.',
     parameters: Type.Object({
       attachment_id: Type.Integer({
         description: 'The number N from the inbound `[<Platform> attachment #N: ...]` placeholder.',
         minimum: 1,
       }),
+      file_id: Type.Optional(
+        Type.String({ pattern: '^F[A-Z0-9]+$', description: 'Exact Slack file ID from the request or history.' }),
+      ),
       prompt: Type.Optional(
         Type.String({ description: 'Optional question to ask about the image; omitted means describe it.' }),
       ),
     }),
     async execute(_toolCallId, params) {
-      const found = router.lookupInboundAttachment({ ...origin, id: params.attachment_id })
+      if (params.file_id !== undefined && origin.adapter !== 'slack' && origin.adapter !== 'slack-bot')
+        return errorResult('file_id is only supported for Slack attachments', { count: 0, prompt: params.prompt })
+      const found = router.lookupInboundAttachment({
+        ...origin,
+        id: params.attachment_id,
+        ...(params.file_id !== undefined ? { ref: params.file_id } : {}),
+      })
       if (found === null) {
         const validIds = router.listInboundAttachmentIds(origin)
         const validMsg =
@@ -152,11 +161,14 @@ export function createChannelLookAtTool(
         ...(found.filename !== undefined ? { filename: found.filename } : {}),
       })
       if (!result.ok) return errorResult(result.error, { count: 0, prompt: params.prompt })
-      return await runLookAtImages(
+      const viewed = await runLookAtImages(
         [toImageContent(result.buffer.toString('base64'), result.mimetype ?? 'image/jpeg')],
         params.prompt,
         permissions,
       )
+      if (origin.adapter === 'slack' || origin.adapter === 'slack-bot')
+        viewed.content.unshift({ type: 'text', text: `Selected Slack file_id=${found.ref}` })
+      return viewed
     },
   })
 }

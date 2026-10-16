@@ -51,11 +51,22 @@ export async function downloadSlackAttachment(options: {
       throw new Error(`Slack attachment download failed (${response.status})${snippet === '' ? '' : `: ${snippet}`}`)
     }
     const contentType = response.headers.get('content-type')?.toLocaleLowerCase() ?? ''
-    if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
+    const htmlResponse = contentType.includes('text/html') || contentType.includes('application/xhtml+xml')
+    const expectedHtml =
+      options.metadata.mimetype === 'text/html' || options.metadata.mimetype === 'application/xhtml+xml'
+    if (htmlResponse && !expectedHtml) {
       await discardAttachmentResponse(response)
-      throw new Error('Slack attachment download returned an HTML login response')
+      throw new Error('Slack attachment download returned HTML instead of the declared file type')
     }
-    return { buffer: await readAttachmentResponse(response, options.maxBytes), url }
+    const buffer = await readAttachmentResponse(response, options.maxBytes)
+    // HTML is a legitimate email/file type. Detect the authentication protocol,
+    // not human-language words (an email may itself discuss signing in).
+    if (
+      expectedHtml &&
+      /<form\b[^>]*\baction\s*=\s*["'][^"']*\/(?:signin|login)(?:[/?#"'])/i.test(buffer.toString('utf8'))
+    )
+      throw new Error('Slack attachment download returned an HTML login response')
+    return { buffer, url }
   }
 }
 

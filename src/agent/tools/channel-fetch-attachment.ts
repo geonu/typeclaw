@@ -61,14 +61,17 @@ export function createChannelFetchAttachmentTool({
       'messages with attachments show `[<Platform> attachment #N: <kind> <metadata>]` in the text. Pass `N` as ' +
       '`attachment_id`; do not invent ids that are not present in the message. The router resolves the private ' +
       'platform ref itself. Attachments on the CURRENT inbound message resolve directly; for one from an EARLIER ' +
-      'message, call channel_history first (it makes those attachments resolvable by the same id). On success ' +
-      'returns the absolute path of the saved file plus its detected mimetype and size.',
+      'message, call channel_history first. On Slack, pass the exact file_id when the request names one or ' +
+      'several messages reuse #1. Returns the selected file identity, saved path, mimetype and size.',
     parameters: Type.Object({
       attachment_id: Type.Integer({
         description:
           'The number N from the inbound `[<Platform> attachment #N: ...]` placeholder. Must be present in this turn.',
         minimum: 1,
       }),
+      file_id: Type.Optional(
+        Type.String({ pattern: '^F[A-Z0-9]+$', description: 'Exact Slack file ID from the request or history.' }),
+      ),
       filename: Type.Optional(
         Type.String({
           description:
@@ -79,12 +82,15 @@ export function createChannelFetchAttachmentTool({
     }),
 
     async execute(_toolCallId, params) {
+      if (params.file_id !== undefined && adapter !== 'slack' && adapter !== 'slack-bot')
+        return errorResult('file_id is only supported for Slack attachments')
       const found = router.lookupInboundAttachment({
         adapter,
         workspace: origin.workspace,
         chat: origin.chat,
         thread: origin.thread,
         id: params.attachment_id,
+        ...(params.file_id !== undefined ? { ref: params.file_id } : {}),
       })
       if (found === null) {
         const validIds = router.listInboundAttachmentIds({
@@ -107,6 +113,7 @@ export function createChannelFetchAttachmentTool({
         )
       }
       const ref = found.ref
+      const identityPart = adapter === 'slack' || adapter === 'slack-bot' ? ` file_id=${ref}` : ''
       const filename = params.filename ?? found.filename
       const result = await router.fetchAttachment(adapter, {
         ref,
@@ -115,7 +122,7 @@ export function createChannelFetchAttachmentTool({
       })
       if (!result.ok) {
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: ${result.error}`))
-        const text = `channel_fetch_attachment error: ${result.error}`
+        const text = `channel_fetch_attachment error:${identityPart} ${result.error}`
         const details: FetchAttachmentDetails = { ok: false, error: result.error }
         return { content: [{ type: 'text' as const, text }], details }
       }
@@ -135,13 +142,13 @@ export function createChannelFetchAttachmentTool({
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: write failed: ${message}`))
-        const text = `channel_fetch_attachment error: write failed: ${message}`
+        const text = `channel_fetch_attachment error:${identityPart} write failed: ${message}`
         const details: FetchAttachmentDetails = { ok: false, error: `write failed: ${message}` }
         return { content: [{ type: 'text' as const, text }], details }
       }
 
       const mimetypePart = result.mimetype !== undefined ? ` (${result.mimetype})` : ''
-      const text = `saved ${result.size} bytes to ${targetPath}${mimetypePart}`
+      const text = `saved ${result.size} bytes to ${targetPath}${mimetypePart}${identityPart}`
       const details: FetchAttachmentDetails = {
         ok: true,
         path: targetPath,

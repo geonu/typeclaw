@@ -9,6 +9,7 @@ import { LiveSubagentRegistry, newestRunningBackgroundChildStartedAt } from '@/a
 import { requestContainerRestart } from '@/agent/restart'
 import { sessionMetaPayload } from '@/agent/session-meta'
 import type { SessionOrigin } from '@/agent/session-origin'
+import { createSubagentSessionManager } from '@/agent/subagent-session'
 import {
   awaitWithSubagentTimeout,
   createSubagentConsumer,
@@ -557,7 +558,11 @@ async function startAgentRuntime(
     const snap = pluginRuntime.get()
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
-      const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
+      const sessionManager = createSubagentSessionManager(
+        cwd,
+        sessionFactory.sessionDir(),
+        entry.pluginSubagent.ephemeral,
+      )
       const sessionId = sessionManager.getSessionId()
       const origin: SessionOrigin = {
         kind: 'subagent' as const,
@@ -1350,6 +1355,7 @@ type PluginOnlySubagentKeys = Exclude<keyof import('@/plugin').Subagent<any>, ke
 const PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM = {
   tools: true,
   customTools: true,
+  ephemeral: true,
 } satisfies Record<PluginOnlySubagentKeys, true>
 // Reference the table so it's not dead code. The value is a runtime no-op;
 // the load-bearing work is the `satisfies` clause above which forces
@@ -1357,17 +1363,9 @@ const PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM = {
 void PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM
 
 function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): InternalSubagent<any> {
-  // The two diverging fields (`tools` is `BuiltinToolRef[]` plugin-side vs
-  // `AgentSessionTools` internal-side; `customTools` similarly differs) are
-  // resolved later in `createSessionForSubagent` via the
-  // `pluginSubagentByShim` lookup, which recovers the original plugin
-  // reference. Every other plugin-side field lives on `SubagentShared` and is structurally
-  // assignable to the internal `Subagent`, so a rest-spread carries them
-  // verbatim — including `visibility` and `requiresSpecificPermission`,
-  // whose silent drop in the previous shim made every plugin-contributed
-  // public subagent (scout, explorer, operator) invisible to the
-  // `spawn_subagent` tool. The list of keys removed here is enforced
-  // exhaustive at compile time by `PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM` above.
-  const { tools: _tools, customTools: _customTools, ...shared } = subagent
+  // Plugin-only tools and transcript persistence are resolved by the native
+  // factory through pluginSubagentByShim, which retains the original declaration.
+  // The internal registry shim carries only the shared scheduling/role contract.
+  const { tools: _tools, customTools: _customTools, ephemeral: _ephemeral, ...shared } = subagent
   return shared
 }

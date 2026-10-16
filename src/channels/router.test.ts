@@ -18344,6 +18344,77 @@ describe('ChannelRouter history attachment registry', () => {
     expect(router.lookupInboundAttachment({ ...KEY, id: 999 })).toBeNull()
     expect(router.lookupInboundAttachment({ ...KEY, id: 1 })!.ref).toBe('NEW1')
   })
+
+  test('history-discovered PDF replaces observed email #1, and exact refs remain selectable', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [historyMessage({ ts: 1000, attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }] })],
+    }))
+    await router.route(inbound({ text: '발주서 PDF 확인해줘' }))
+    let selected: string | undefined
+    let exact: string | undefined
+    sessions[0]!.onPrompt = () => {
+      router.registerHistoryAttachments(KEY, [
+        historyMessage({ ts: 1000, attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }] }),
+        historyMessage({ ts: 2000, attachments: [{ id: 1, kind: 'file', ref: 'PDF' }] }),
+      ])
+      selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      exact = router.lookupInboundAttachment({ ...KEY, id: 1, ref: 'EMAIL' })?.ref
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('PDF')
+    expect(exact).toBe('EMAIL')
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1, ref: 'UNSEEN' })).toBeNull()
+  })
+
+  test('an older attachment merged with a newer text-only request cannot shadow its history-discovered PDF', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    const ts = Date.now()
+    await router.route(
+      inbound({
+        text: 'earlier email',
+        ts: ts - 2000,
+        externalMessageId: 'email',
+        attachments: [{ id: 1, kind: 'file', ref: 'EMAIL' }],
+      }),
+    )
+    await router.route(inbound({ text: '새 PDF를 확인해줘', ts, externalMessageId: 'request' }))
+    let selected: string | undefined
+    sessions[0]!.onPrompt = () => {
+      router.registerHistoryAttachments(KEY, [
+        historyMessage({ ts: ts - 1000, attachments: [{ id: 1, kind: 'file', ref: 'PDF' }] }),
+      ])
+      selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('PDF')
+  })
+
+  test('a future queued image cannot replace the image being read in this turn', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    await router.route(inbound({ text: '확인', attachments: [{ id: 1, kind: 'photo', ref: 'CURRENT' }] }))
+    let selected: string | undefined
+    let first = true
+    sessions[0]!.onPrompt = async () => {
+      if (first) {
+        first = false
+        await router.route(
+          inbound({
+            text: '다음 사진',
+            externalMessageId: 'next',
+            attachments: [{ id: 1, kind: 'photo', ref: 'FUTURE' }],
+          }),
+        )
+        selected = router.lookupInboundAttachment({ ...KEY, id: 1 })?.ref
+      }
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(selected).toBe('CURRENT')
+  })
 })
 
 describe('review-thread resolver registry', () => {

@@ -60,6 +60,28 @@ The adapter removes only the authenticated account's reaction with `reactions.re
 | Membership               | yes       |                                                                                                                                                                                                         |
 | Cross-channel reads      | full      | One of only two adapters (with `discord-bot`) that back all three `channel_read` modes (`history`, `message`, `list`) — see [Cross-channel reads](/docs/reference/channel-adapters#cross-channel-reads) |
 
+### Exact attachment selection
+
+`attachment_id` is message-local: two messages can both contain attachment `#1`.
+For an older attachment, read history first and pass its exact Slack `file_id`
+to `channel_fetch_attachment` or `look_at_channel_attachment` alongside
+`attachment_id`. An unseen ID is rejected, not replaced by another file.
+Downloads and visual reads identify the selected Slack file in their result.
+A current request's own attachment wins; observed old scrollback cannot shadow a
+newer attachment discovered through history, and queued future messages cannot
+retarget an in-flight read.
+
+HTML email originals are valid attachments. HTML returned instead of a declared
+PDF/image, or a sign-in form returned for an HTML original, remains an error.
+The downloader retains its trusted-redirect and streaming-size limits.
+
+Plugins reading raw order documents should declare internal readers
+`ephemeral: true`. The runtime creates an in-memory session manager for that
+trusted declaration; model payloads cannot change it. Raw source pages then do
+not enter the ordinary persisted session transcript. A plugin can require the
+matching `createSubagentSessionManager` export before registering such a reader;
+older runtimes that do not support it must not silently persist the source.
+
 ## Thread stickiness
 
 Replies in the same Slack thread route to the same session. New top-level messages start fresh sessions. The `app_mention` event is required for the bot to hear mentions in channels where it is not a member.
