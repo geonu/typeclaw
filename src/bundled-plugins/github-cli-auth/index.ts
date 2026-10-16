@@ -33,6 +33,7 @@ import {
   resolveGithubCliStoreToken,
 } from './gh-store'
 import { ensureGitAskPassHelper, resolveSandboxGitAskPassPath } from './git-askpass'
+import { appendGitAuthDiagnostic, createGitAuthLoginResolver, type GitAuthCredential } from './git-auth-diagnostic'
 import {
   analyzeGitCommand,
   createSessionTmpGitResolvers,
@@ -88,6 +89,15 @@ export default definePlugin({
     const hasAppTokenResolver = ctx.github.hasAppTokenResolver
     const trustedGitTransportEnv: NodeJS.ProcessEnv = { ...process.env }
     const reviewCredentials = new Map<string, GithubTokenCredential>()
+    const resolveGitAuthLogin = createGitAuthLoginResolver()
+    const gitAuthDiagnostics = new Map<
+      string,
+      {
+        credentials: GitAuthCredential[]
+        ghCredential?: GitAuthCredential
+        push: boolean
+      }
+    >()
 
     // Every model-driven bash masks the canonical credential files. A role may
     // still USE a PAT through this runtime-owned overlay, which injects one
@@ -551,6 +561,20 @@ export default definePlugin({
         decision.pushProvenance?.kind === 'configured-remote'
           ? decision.pushProvenance.repoSlugs
           : [decision.repoSlug.toLocaleLowerCase()]
+      const noteGitCredential = (credentials: GitAuthCredential[]): void => {
+        // Match handleGhCommand's no-minter precedence. With a minter, gh uses
+        // the same per-repo credential as git, so no comparison is needed.
+        const ghToken = !hasAppTokenResolver()
+          ? (sandboxInheritedGhToken() ?? (canUsePat(event.origin) ? effectiveProcessToken() : undefined))
+          : undefined
+        gitAuthDiagnostics.set(event.callId, {
+          credentials,
+          ...(ghToken !== undefined
+            ? { ghCredential: { source: `github repo token via ${ghToken.envName}`, token: ghToken.value } }
+            : {}),
+          push: decision.access === 'write',
+        })
+      }
 
       if (!hasAppTokenResolver()) {
         const declared = declaredGitCredentialState()
@@ -574,6 +598,7 @@ export default definePlugin({
           // Withhold wins only when the same ambient names are absent from the overlay.
           event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV] = ['GH_TOKEN', 'GITHUB_TOKEN']
           if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
+          noteGitCredential([{ source: `declared .env ${declared.envName}`, token: declared.value }])
           return
         }
         if (decision.access !== 'write') return
@@ -621,6 +646,7 @@ export default definePlugin({
             cleanup: async () => await cleanupPreparedGithubStorePush(prepared.backingGitDir),
           }
         }
+        noteGitCredential([{ source: 'secrets.json#githubCli hosts (GitHub CLI store)', token: storeToken }])
         return
       }
       const credentials: GitRepoCredential[] = []
@@ -652,6 +678,12 @@ export default definePlugin({
       )
       if (grantedPush !== undefined) event.args.command = grantedPush.command
       else if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
+      noteGitCredential(
+        credentials.map(({ repoSlug, token }) => ({
+          source: `per-repo GitHub App token for ${repoSlug}`,
+          token,
+        })),
+      )
       return
     }
 
@@ -705,6 +737,11 @@ export default definePlugin({
           return
         },
         'tool.after': async (event) => {
+          const gitAuth = gitAuthDiagnostics.get(event.callId)
+          gitAuthDiagnostics.delete(event.callId)
+          if (event.tool === 'bash' && gitAuth !== undefined) {
+            await appendGitAuthDiagnostic({ result: event.result, ...gitAuth, resolveLogin: resolveGitAuthLogin })
+          }
           checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
           const dismissal = pendingDismissals.get(event.callId)
           pendingDismissals.delete(event.callId)

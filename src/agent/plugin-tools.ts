@@ -820,7 +820,16 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
             renderSandboxPolicyNote(preparedSandboxRuntime.withheld, opts.agentDir),
           )
         }
-        await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(finalError))
+        const errorResult = toErrorResult(finalError)
+        await runToolAfterSafely(opts, tool.name, toolCallId, errorResult)
+        const annotatedMessage = errorResult.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('\n')
+        if (annotatedMessage !== (finalError instanceof Error ? finalError.message : String(finalError))) {
+          if (finalError instanceof Error) finalError.message = annotatedMessage
+          else finalError = new Error(annotatedMessage)
+        }
         throw finalError
       }
       if (pinnedFiles === undefined) throw new Error('tool file boundary was not initialized')

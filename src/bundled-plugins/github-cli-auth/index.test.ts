@@ -48,6 +48,7 @@ import { buildSandboxedCommand, sessionTmpDir } from '@/sandbox'
 
 import { planGithubStorePush, setGhTokenCommandRunnerForTests } from './gh-store'
 import { resetGitAskPassHelperForTests } from './git-askpass'
+import { setGitAuthLoginResolverForTests } from './git-auth-diagnostic'
 import githubCliAuthPlugin from './index'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -1915,6 +1916,7 @@ esac
     delete process.env.TYPECLAW_TEST_GH_TOKEN
     delete process.env.TYPECLAW_TEST_GH_MODE
     setGhTokenCommandRunnerForTests(undefined)
+    setGitAuthLoginResolverForTests(undefined)
     delete process.env.TYPECLAW_GIT_ASKPASS_PATH
     resetGitAskPassHelperForTests()
     rmSync(agentDir, { recursive: true, force: true })
@@ -1949,6 +1951,32 @@ esac
     expect(typeof event.args[TYPECLAW_INTERNAL_BASH_PREPARE]).toBe('function')
     expect(JSON.stringify(result) ?? '').not.toContain('store_secret_value')
     expect(event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV]).toEqual(expect.arrayContaining([...authKeys]))
+  })
+
+  test('tool.after diagnoses the selected store account and the different gh repo account', async () => {
+    process.env.GH_TOKEN = 'ghp_repo_secret'
+    setGitAuthLoginResolverForTests(async (token) =>
+      token === 'store_secret_value' ? 'store-account' : 'repo-account',
+    )
+    const { before, after } = await hooksFor(unavailableResolver, false, {
+      agentDir,
+      permissions: privilegedPermissions,
+    })
+    const event = storeEvent()
+    expect(await before(event, { ...hookCtx, agentDir })).toBeUndefined()
+    const result = {
+      content: [{ type: 'text' as const, text: 'remote: Permission to example/project denied to store-account.' }],
+      details: { error: 'Command exited with code 128' },
+    }
+
+    await after({ tool: 'bash', sessionId: event.sessionId, callId: event.callId, result }, { ...hookCtx, agentDir })
+
+    const output = JSON.stringify(result)
+    expect(output).toContain('githubCli')
+    expect(output).toContain('login: store-account')
+    expect(output).toContain('login: repo-account')
+    expect(output).not.toContain('store_secret_value')
+    expect(output).not.toContain('ghp_repo_secret')
   })
 
   test('rewrites a default push through a clean bare repository with hostile source config excluded', async () => {
