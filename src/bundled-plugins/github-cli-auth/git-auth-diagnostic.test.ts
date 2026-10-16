@@ -4,7 +4,7 @@ import type { ToolResult } from '@/plugin'
 
 import { appendGitAuthDiagnostic, createGitAuthLoginResolver } from './git-auth-diagnostic'
 
-const credentials = [{ source: 'secrets.json#githubCli hosts (GitHub CLI store)', token: 'store_secret' }]
+const credentials = [{ source: 'declared .env GH_TOKEN', token: 'declared_secret' }]
 const ghCredential = { source: 'github repo token via GH_TOKEN', token: 'repo_secret' }
 
 describe('git auth diagnostic', () => {
@@ -18,16 +18,16 @@ describe('git auth diagnostic', () => {
   ])('identifies both credential accounts after %s', async (text) => {
     const result: ToolResult = { content: [{ type: 'text', text }], details: { exitCode: 128 } }
     const resolveLogin = createGitAuthLoginResolver(async (token) =>
-      token === 'store_secret' ? 'wrong-account' : 'repo-account',
+      token === 'declared_secret' ? 'wrong-account' : 'repo-account',
     )
 
     await appendGitAuthDiagnostic({ result, credentials, ghCredential, push: true, resolveLogin })
 
     const output = JSON.stringify(result)
-    expect(output).toContain('githubCli')
+    expect(output).toContain('.env GH_TOKEN')
     expect(output).toContain('wrong-account')
     expect(output).toContain('repo-account')
-    expect(output).not.toContain('store_secret')
+    expect(output).not.toContain('declared_secret')
     expect(output).not.toContain('repo_secret')
   })
 
@@ -66,13 +66,13 @@ describe('git auth diagnostic', () => {
       credentials,
       push: false,
       resolveLogin: createGitAuthLoginResolver(async () => {
-        throw new Error('store_secret')
+        throw new Error('declared_secret')
       }),
     })
 
-    expect(JSON.stringify(result)).toContain('githubCli')
+    expect(JSON.stringify(result)).toContain('.env GH_TOKEN')
     expect(JSON.stringify(result)).toContain('unknown')
-    expect(JSON.stringify(result)).not.toContain('store_secret')
+    expect(JSON.stringify(result)).not.toContain('declared_secret')
   })
 
   test('caches concurrent login lookups by token and separates rotated tokens', async () => {

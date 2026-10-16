@@ -25,13 +25,6 @@ import {
   usesGhApiGraphqlEndpoint,
 } from './gh-command'
 import { detectReviewDismissal } from './gh-review-detect'
-import {
-  cleanupPreparedGithubStorePush,
-  GH_STORE_AMBIENT_AUTH_KEYS,
-  planGithubStorePush,
-  prepareGithubStorePush,
-  resolveGithubCliStoreToken,
-} from './gh-store'
 import { ensureGitAskPassHelper, resolveSandboxGitAskPassPath } from './git-askpass'
 import { appendGitAuthDiagnostic, createGitAuthLoginResolver, type GitAuthCredential } from './git-auth-diagnostic'
 import {
@@ -202,19 +195,13 @@ export default definePlugin({
       'This push was allowed for one configured channels.github.repos destination, but the credential broker resolved a different one (the remote may have changed). Re-run the push; if it repeats, check the remote with `git remote -v`.'
     const missingAppAuthForPushReason =
       'Pushing to github.com needs an eligible credential and validated destination, and TypeClaw has nothing it can give this git command. ' +
-      'Operator remedy: declare `GH_TOKEN` in the agent `.env` and restart, configure GitHub App auth under ' +
-      '`channels.github` for per-repo short-lived tokens, or authenticate host `gh` with ' +
-      '`gh auth login --hostname github.com`; the next real `typeclaw start` or `typeclaw restart` automatically captures ' +
-      'that active account into the trusted-runtime store (a start against an already-running container is a no-op). ' +
+      'Operator remedy: declare `GH_TOKEN` in the agent `.env` and restart, or configure GitHub App auth under ' +
+      '`channels.github` for per-repo short-lived tokens. The host `gh` login never funds a push, even when ' +
+      '`githubCli.importHostAuth` is enabled. ' +
       'If App auth is already configured, the adapter failed to start — check ' +
       '`typeclaw logs`. Do not retry with ' +
       '`gh auth setup-git`, a credential helper, or a tokenized remote URL: those are blocked and the ' +
       'credential files are masked in this sandbox.'
-    const multiPushStoreReason =
-      'The trusted GitHub CLI credential store can fund exactly one configured push repository. ' +
-      'This remote has multiple GitHub push destinations; use an authoritative declared PAT or GitHub App auth, ' +
-      'or configure exactly one push URL.'
-
     let warnedSandboxedPatWithheld = false
     const warnSandboxedPatWithheldOnce = (): void => {
       if (warnedSandboxedPatWithheld) return
@@ -602,52 +589,10 @@ export default definePlugin({
           return
         }
         if (decision.access !== 'write') return
-        if (declared.kind !== 'absent') return { block: true, reason: missingAppAuthForPushReason }
-        if (destinationRepos.length !== 1) return { block: true, reason: multiPushStoreReason }
-
-        const askpass = await ensureGitAskPassHelper(resolveSandboxGitAskPassPath())
-        const plan = await planGithubStorePush(decision, { agentDir, sessionId, askpassPath: askpass })
-        if (plan === null) return { block: true, reason: missingAppAuthForPushReason }
-        const storeToken = await resolveGithubCliStoreToken()
-        if (storeToken === null) return { block: true, reason: missingAppAuthForPushReason }
-        const credentialEnv = await buildGitCredentialOverlay(
-          [{ repoSlug: plan.repo, token: storeToken }],
-          event.args[TYPECLAW_INTERNAL_BASH_ENV],
-          { expectedRemote: plan.remote, trustedEnv: {} },
-        )
-        event.args[TYPECLAW_INTERNAL_BASH_ENV] = credentialEnv
-        const inheritedNames = [
-          ...Object.keys(process.env),
-          ...Object.keys(credentialEnv),
-          'SSH_ASKPASS',
-          'SSH_AUTH_SOCK',
-          'HTTP_PROXY',
-          'HTTPS_PROXY',
-          'ALL_PROXY',
-          'http_proxy',
-          'https_proxy',
-          'all_proxy',
-        ]
-        event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV] = [
-          ...new Set([
-            ...GH_STORE_AMBIENT_AUTH_KEYS,
-            ...inheritedNames.filter(
-              (name) => name.startsWith('GIT_') || name.startsWith('SSH_') || /proxy/i.test(name),
-            ),
-          ]),
-        ]
-        event.args[TYPECLAW_INTERNAL_BASH_PREPARE] = async () => {
-          const prepared = await prepareGithubStorePush(plan)
-          if (prepared === null) throw new Error(missingAppAuthForPushReason)
-          return {
-            command: prepared.command,
-            env: prepared.env,
-            mount: prepared.mount,
-            cleanup: async () => await cleanupPreparedGithubStorePush(prepared.backingGitDir),
-          }
-        }
-        noteGitCredential([{ source: 'secrets.json#githubCli hosts (GitHub CLI store)', token: storeToken }])
-        return
+        // The host `gh` login is the operator's identity, not the agent's, so it never funds
+        // a push: anything it signed would land on GitHub as the operator. App auth and an
+        // authoritative declared PAT stay the authorized push credentials.
+        return { block: true, reason: missingAppAuthForPushReason }
       }
       const credentials: GitRepoCredential[] = []
       for (const repoSlug of destinationRepos) {

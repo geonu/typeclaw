@@ -98,7 +98,7 @@ The same applies to PRs: a quick `gh pr list --search` avoids opening a PR for s
    ```sh
    gh issue create --repo OWNER/REPO --title '<conventional title>' --body '<filled body>'
    ```
-   For a **pull request**, push the head branch yourself first when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`, then the trusted GitHub CLI store. The store can fund a configured GitHub remote from any accessible repository path, including `workspace`, mounts, nested repositories, and `/tmp`. It accepts one configured destination and does not accept explicit-URL or `--set-upstream` pushes. Name the remote and branch explicitly:
+   For a **pull request**, push the head branch yourself first when an eligible broker credential exists. Credential precedence is GitHub App, then an authorized PAT declared in `.env`. The trusted GitHub CLI store is never a push credential: it funds `gh` work only. Name the remote and branch explicitly:
    ```sh
    git -C <checkout> push <remote> <branch>
    ```
