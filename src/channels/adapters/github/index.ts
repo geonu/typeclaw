@@ -427,6 +427,22 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           }
           tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
         }
+        // The channel PAT is the agent's own GitHub identity, so lend it to a git push
+        // for a configured repo instead of making the operator duplicate it in `.env`.
+        // repos[] is enforced here because this adapter owns it; the broker adds the
+        // role gate, so sandboxed roles still never receive the long-lived PAT.
+        if (options.githubTokenBridge !== undefined) {
+          unregisterTokenBridge = options.githubTokenBridge.registerPatResolver(async (repoSlug) => {
+            const allowed = new Set((options.configRef().repos ?? []).map(canonicalGithubRepo))
+            if (!allowed.has(canonicalGithubRepo(repoSlug))) {
+              throw new Error(
+                `repo \`${repoSlug}\` is not in this agent's configured \`channels.github.repos[]\`; ` +
+                  'refusing to lend the GitHub channel PAT for it. Add it to `repos[]` if the agent is meant to push there.',
+              )
+            }
+            return { token: await auth.token() }
+          })
+        }
       }
       if (options.secrets.auth.type === 'app' && options.githubTokenBridge !== undefined) {
         // Gate ad-hoc `gh` minting on the configured repos[]. The slug arrives

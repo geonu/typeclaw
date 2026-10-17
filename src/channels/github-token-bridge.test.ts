@@ -82,6 +82,19 @@ describe('createGithubTokenBridge', () => {
     expect(bridge.hasAppTokenResolver()).toBe(false)
   })
 
+  it('a PAT resolver funds resolvePatForRepo without claiming App minting', async () => {
+    const bridge = createGithubTokenBridge()
+    expect((await bridge.resolvePatForRepo('acme/widgets')).kind).toBe('unavailable')
+
+    const unregister = bridge.registerPatResolver(async () => ({ token: 'ghp_x' }))
+
+    expect(await bridge.resolvePatForRepo('acme/widgets')).toEqual({ kind: 'token', token: 'ghp_x' })
+    expect(bridge.hasAppTokenResolver()).toBe(false)
+    expect((await bridge.resolveTokenForRepo('acme/widgets')).kind).toBe('unavailable')
+    unregister()
+    expect((await bridge.resolvePatForRepo('acme/widgets')).kind).toBe('unavailable')
+  })
+
   it('carries adapter-resolved self login with the active App resolver', () => {
     const bridge = createGithubTokenBridge()
     const unregister = bridge.registerResolver(

@@ -318,6 +318,7 @@ async function startAgentRuntime(
     resolveGithubTokenForRepo: githubTokenBridge.resolveTokenForRepo,
     hasGithubAppTokenResolver: githubTokenBridge.hasAppTokenResolver,
     getGithubAppSelfLogin: githubTokenBridge.getAppSelfLogin,
+    resolveGithubPatForRepo: githubTokenBridge.resolvePatForRepo,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   // Emit the container's fixed resource limits BEFORE vector startup. The

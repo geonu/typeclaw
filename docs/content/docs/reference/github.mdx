@@ -77,7 +77,7 @@ Authenticated network Git (`clone`, `fetch`, `pull`, `push`, `ls-remote`) runs i
 
 ### Trusted-runtime GitHub CLI store
 
-Credential precedence for `git push` is GitHub App, then an authoritative PAT declared in the agent `.env`. The trusted GitHub CLI store is **never** a push credential, even with `importHostAuth` enabled: the host `gh` login is the operator’s identity, so a push it signed would land on GitHub as the operator. The store funds brokered `gh` work only, and `fetch`/`clone` never use it.
+Credential precedence for `git push` is GitHub App, then an authoritative PAT declared in the agent `.env`, then the GitHub channel's own PAT when `channels.github` uses PAT auth. The channel PAT funds a push only for a destination listed in `channels.github.repos[]` and only for roles entitled to use a PAT (`fs.see.secrets` or `security.bypass.medium`, such as `owner`); sandboxed roles never receive it. The trusted GitHub CLI store is **never** a push credential, even with `importHostAuth` enabled: the host `gh` login is the operator’s identity, so a push it signed would land on GitHub as the operator. The store funds brokered `gh` work only, and `fetch`/`clone` never use it.
 
 The store is **opt-in per agent**, because the host `gh` login is the operator's identity, not the agent's. Without opt-in, `typeclaw start` never copies it and removes any `githubCli` entry an earlier start left in `secrets.json`. To opt in:
 

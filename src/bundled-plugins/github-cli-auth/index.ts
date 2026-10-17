@@ -195,8 +195,10 @@ export default definePlugin({
       'This push was allowed for one configured channels.github.repos destination, but the credential broker resolved a different one (the remote may have changed). Re-run the push; if it repeats, check the remote with `git remote -v`.'
     const missingAppAuthForPushReason =
       'Pushing to github.com needs an eligible credential and validated destination, and TypeClaw has nothing it can give this git command. ' +
-      'Operator remedy: declare `GH_TOKEN` in the agent `.env` and restart, or configure GitHub App auth under ' +
-      '`channels.github` for per-repo short-lived tokens. The host `gh` login never funds a push, even when ' +
+      'Operator remedy: declare `GH_TOKEN` in the agent `.env` and restart, configure GitHub App auth under ' +
+      '`channels.github` for per-repo short-lived tokens, or (PAT channel auth) list the repo in ' +
+      '`channels.github.repos[]` so its PAT can fund the push. ' +
+      'The host `gh` login never funds a push, even when ' +
       '`githubCli.importHostAuth` is enabled. ' +
       'If App auth is already configured, the adapter failed to start — check ' +
       '`typeclaw logs`. Do not retry with ' +
@@ -589,6 +591,34 @@ export default definePlugin({
           return
         }
         if (decision.access !== 'write') return
+        // PAT-mode channel auth lends its PAT for configured repos (the adapter enforces
+        // repos[]). Only an absent `.env` declaration falls through here: an invalid one
+        // stays blocked rather than being silently replaced by a different credential.
+        if (declared.kind === 'absent' && canUsePat(event.origin) && ctx.github.resolvePatForRepo !== undefined) {
+          const credentials: GitRepoCredential[] = []
+          for (const repoSlug of destinationRepos) {
+            const result = await ctx.github.resolvePatForRepo(repoSlug)
+            if (result.kind === 'unavailable') {
+              return { block: true, reason: `${missingAppAuthForPushReason} Channel PAT: ${result.reason}` }
+            }
+            credentials.push({ repoSlug, token: result.token })
+          }
+          event.args[TYPECLAW_INTERNAL_BASH_ENV] = await buildGitCredentialOverlay(
+            credentials,
+            event.args[TYPECLAW_INTERNAL_BASH_ENV],
+            {
+              expectedRemote:
+                decision.pushProvenance?.kind === 'configured-remote' ? decision.pushProvenance.remote : undefined,
+              pushUrls:
+                decision.pushProvenance?.kind === 'configured-remote' ? decision.pushProvenance.pushUrls : undefined,
+              trustedEnv: trustedGitTransportEnv,
+            },
+          )
+          event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV] = ['GH_TOKEN', 'GITHUB_TOKEN']
+          if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
+          noteGitCredential(credentials.map(({ token }) => ({ source: 'GitHub channel PAT', token })))
+          return
+        }
         // The host `gh` login is the operator's identity, not the agent's, so it never funds
         // a push: anything it signed would land on GitHub as the operator. App auth and an
         // authoritative declared PAT stay the authorized push credentials.
