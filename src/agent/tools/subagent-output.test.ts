@@ -358,6 +358,27 @@ describe('createSubagentOutputTool — provenance cap', () => {
     expect(noProvenanceMsg).toBe(OPAQUE)
   })
 
+  test('the spawning session can read its own higher-role-spawned run after a lower-role speaker', async () => {
+    // given an owner-spawned run owned by session parent_1
+    const registry = new LiveSubagentRegistry()
+    registry.register(makeLive({ spawnedByRole: 'owner', parentSessionId: 'parent_1' }))
+    const tool = (callerSessionId: string) =>
+      createSubagentOutputTool({
+        liveRegistry: registry,
+        getOrigin: () => guestOrigin,
+        permissions: capPermissions(),
+        callerSessionId,
+      })
+
+    // when a guest-origin turn reads it from the spawning session vs another session
+    const own = await tool('parent_1').execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const other = await tool('parent_2').execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+
+    // then only the spawning session gets through
+    expect((own.details as { ok: boolean }).ok).toBe(true)
+    expect((other.details as { error?: string }).error).toBe(OPAQUE)
+  })
+
   test('owner gets a truthful Unknown task_id for an absent task', async () => {
     const registry = new LiveSubagentRegistry()
     const msg = await errorFor(ownerOrigin, registry, 'bg_missing')
