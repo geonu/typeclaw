@@ -301,6 +301,27 @@ describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
     expect(results[0]?.url).toBe('https://ok.example/')
   })
 
+  test('falls back to the next impersonation profile within one attempt when the first is challenged', async () => {
+    // given: a single attempt, first profile gets a CAPTCHA, the next a SERP
+    _setSearchRetryForTest({ attempts: 1, sleep: async () => {} })
+    installFakeBinary(fakeCurlSwitching(scratchDir, CAPTCHA_SERP, RESULT_SERP))
+
+    // when
+    const results = await ddgSearch('q', 10)
+
+    // then
+    expect(results[0]?.url).toBe('https://ok.example/')
+  })
+
+  test('reports a CAPTCHA only when every impersonation profile is challenged', async () => {
+    // given: a single attempt and every response is a CAPTCHA
+    _setSearchRetryForTest({ attempts: 1, sleep: async () => {} })
+    installFakeBinary(fakeCurlSwitching(scratchDir, CAPTCHA_SERP, CAPTCHA_SERP))
+
+    // when / then
+    await expect(ddgSearch('q', 10)).rejects.toBeInstanceOf(DdgCaptchaError)
+  })
+
   test('retries past a transient connection timeout (curl exit 28) and returns results', async () => {
     // given: first spawn exits 28 (curl connection timeout), the next serves a SERP
     const counter = join(scratchDir, 'count')

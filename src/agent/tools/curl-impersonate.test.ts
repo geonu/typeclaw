@@ -91,6 +91,18 @@ describe.skipIf(onWindows)('curlImpersonate', () => {
     expect(result.bytesIn).toBe(15)
   })
 
+  test('spawns the per-request binary when one is given', async () => {
+    // given: the fake is reachable only through req.binary, not the default
+    installFakeBinary(FAKE_BINARY_BODY('<html>profile</html>'))
+    _setCurlBinaryForTest(null)
+
+    // when
+    const result = await curlImpersonate({ url: 'https://example.com', binary: join(scratchDir, 'fake-curl') })
+
+    // then
+    expect(result.body).toBe('<html>profile</html>')
+  })
+
   test('preserves a 404 body and reports httpStatus=404 (does NOT throw)', async () => {
     installFakeBinary(FAKE_BINARY_BODY('not found', 404, 'https://example.com/missing', 'text/plain'))
 
