@@ -28,18 +28,21 @@ import { withToolOomPriorityArgv } from '@/container/tool-oom-priority'
 export const CURL_IMPERSONATE_BINARY = 'curl_chrome136'
 export const DEFAULT_TIMEOUT_SECONDS = 30
 
-let curlBinary: string = CURL_IMPERSONATE_BINARY
+let binaryOverrideForTest: string | null = null
 
 // Test-only seam: lets *.test.ts point the spawn at a fake `curl_chrome136`
 // script in a tmpdir so we exercise the real Bun.spawn path without depending
 // on a curl-impersonate install on the test host. Production code never calls
 // this — the module-level default above is what production sees.
 export function _setCurlBinaryForTest(binary: string | null): void {
-  curlBinary = binary ?? CURL_IMPERSONATE_BINARY
+  binaryOverrideForTest = binary
 }
 
 export type CurlImpersonateRequest = {
   url: string
+  // Wrapper to impersonate (e.g. `curl_firefox147`). Defaults to
+  // CURL_IMPERSONATE_BINARY. Only names shipped in the pinned tarball work.
+  binary?: string
   method?: 'GET' | 'POST'
   // Form-urlencoded body fields for POST. Each entry is passed as a separate
   // --data-urlencode argument so curl handles the encoding. Required if
@@ -131,7 +134,7 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
   const writeOutTemplate = `${sentinel}%{http_code}\n%{url_effective}\n%{content_type}\n%{size_download}\n%{header_json}\n`
 
   const cmd: string[] = [
-    curlBinary,
+    binaryOverrideForTest ?? req.binary ?? CURL_IMPERSONATE_BINARY,
     // `--disable` (alias -q) MUST be the first argument to suppress reading
     // ~/.curlrc and /etc/curlrc. Without it, a user or attacker-controlled
     // curlrc could inject --proxy, --header, --resolve, --no-location, etc.,
@@ -334,7 +337,11 @@ let availabilityCache: boolean | undefined
 export async function isCurlImpersonateAvailable(): Promise<boolean> {
   if (availabilityCache !== undefined) return availabilityCache
   try {
-    const proc = spawn({ cmd: [curlBinary, '--version'], stdout: 'ignore', stderr: 'ignore' })
+    const proc = spawn({
+      cmd: [binaryOverrideForTest ?? CURL_IMPERSONATE_BINARY, '--version'],
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
     const code = await proc.exited
     availabilityCache = code === 0
   } catch {

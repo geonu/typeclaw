@@ -10,6 +10,8 @@ icon: Search
 
 **The DDG client shells out to `curl-impersonate`, not Bun's native fetch.** Seeing `Bun.spawn(['curl_chrome136', ...])` is intentional — do not modernize. DDG fingerprints TLS handshake (JA3/JA4) and HTTP/2 SETTINGS-frames before any header is read. Bun's `fetch` can't match Chrome's handshake (upstream Bun #11368), so requests get 202'd / CAPTCHA-gated on residential IPs. Verified empirically and matches what the Python (`primp`/`ddgs`) and JS (`node-curl-impersonate`) DDG-scraping ecosystems converged on.
 
+**DDG search uses the Firefox, then Safari, profiles — not Chrome.** Since 2026-10, DDG-lite answers every desktop Chrome fingerprint (`curl_chrome124`–`curl_chrome146`) with a 202 challenge from IPs where `curl_firefox147` and `curl_safari184` still get a normal SERP. `ddgSearch` tries `DDG_PROFILES` in order and reports a CAPTCHA only when every profile is challenged. `web_fetch` keeps the `curl_chrome136` default.
+
 ## The pin
 
 Pinned to **lexiforest's actively-maintained fork** (Chrome 136+ profiles, v1.5.6, May 2026) — **not** the original `lwthiker/curl-impersonate` whose last release carries Chrome ≤116 (two years stale, useless against current DDG fingerprinting). The constant block in `dockerfile.ts` calls this out by name.

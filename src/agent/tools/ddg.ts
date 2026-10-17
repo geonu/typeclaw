@@ -20,6 +20,13 @@ export { _setCurlBinaryForTest } from './curl-impersonate'
 
 const DDG_LITE_URL = 'https://lite.duckduckgo.com/lite/'
 
+// As of 2026-10 DDG-lite answers every desktop Chrome fingerprint (124-146,
+// including the curl_chrome136 default) with a 202 challenge page from IPs
+// where Firefox and Safari fingerprints still get a normal SERP. Try them in
+// order and only treat the request as CAPTCHA'd when every profile is
+// challenged. Both wrappers ship in the pinned curl-impersonate tarball.
+export const DDG_PROFILES = ['curl_firefox147', 'curl_safari184'] as const
+
 // Empirically derived: a clean source IP serves DDG-lite at concurrency ~4 but
 // trips a sticky multi-minute CAPTCHA at 5-6 (see keyed-semaphore.ts header).
 // The whole agent egresses from one IP and the scout subagent fans out parallel
@@ -55,11 +62,11 @@ export async function ddgSearch(query: string, limit: number, signal?: AbortSign
     () =>
       withSearchRetry(
         async () => {
-          const html = await fetchDdgHtml(query, signal)
-          if (isCaptcha(html)) {
-            throw new DdgCaptchaError()
+          for (const binary of DDG_PROFILES) {
+            const html = await fetchDdgHtml(query, signal, binary)
+            if (!isCaptcha(html)) return parseDdgHtml(html).slice(0, limit)
           }
-          return parseDdgHtml(html).slice(0, limit)
+          throw new DdgCaptchaError()
         },
         { ...retryOverride, shouldRetry: isTransientSearchError, signal },
       ),
@@ -88,9 +95,10 @@ export class DdgCaptchaError extends Error {
   }
 }
 
-export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
+export async function fetchDdgHtml(query: string, signal?: AbortSignal, binary?: string): Promise<string> {
   const response = await curlImpersonate({
     url: DDG_LITE_URL,
+    binary,
     method: 'POST',
     formFields: [{ name: 'q', value: query }],
     signal,
