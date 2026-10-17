@@ -1306,6 +1306,53 @@ describe('createGithubAdapter lifecycle', () => {
     })
   })
 
+  describe('PAT-auth push bridge repo allowlist', () => {
+    test('lends the channel PAT only for repos[] and revokes it on config removal and stop', async () => {
+      // given: a PAT-mode adapter wired to a real bridge, configured for acme/widgets
+      const { createGithubTokenBridge } = await import('@/channels/github-token-bridge')
+      const bridge = createGithubTokenBridge()
+      const { fetch: fetchImpl } = fakeFetchRecording(({ url }) =>
+        url.endsWith('/user')
+          ? Response.json({ id: 7, login: 'agent-user' })
+          : new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+      let repos = ['acme/widgets']
+      const originalToken = process.env.GH_TOKEN
+      const adapter = createGithubAdapter({
+        router: freshRouter(),
+        configRef: () => githubConfig(repos),
+        secrets: patSecrets(),
+        agentDir,
+        logger: silentLogger(),
+        fetchImpl,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+        githubTokenBridge: bridge,
+      })
+
+      try {
+        // when / then
+        await adapter.start()
+        expect(bridge.hasAppTokenResolver()).toBe(false)
+        await expect(bridge.resolvePatForRepo('ACME/Widgets')).resolves.toEqual({ kind: 'token', token: 'ghp_test' })
+        const refused = await bridge.resolvePatForRepo('victim/private')
+        expect(refused.kind).toBe('unavailable')
+        if (refused.kind === 'unavailable') expect(refused.reason).toContain('not in this agent')
+
+        repos = []
+        expect((await bridge.resolvePatForRepo('acme/widgets')).kind).toBe('unavailable')
+
+        repos = ['acme/widgets']
+        await adapter.stop()
+        expect((await bridge.resolvePatForRepo('acme/widgets')).kind).toBe('unavailable')
+      } finally {
+        await adapter.stop()
+        if (originalToken === undefined) delete process.env.GH_TOKEN
+        else process.env.GH_TOKEN = originalToken
+      }
+    })
+  })
+
   describe('start() open-PR reconciliation', () => {
     function reviewConfig(on: 'opened' | 'review_requested' | 'off') {
       return (): ChannelAdapterConfig & GithubAdapterConfig => {

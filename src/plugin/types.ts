@@ -313,6 +313,7 @@ export type PluginGithubServices = {
   resolveTokenForRepo: ResolveGithubTokenForRepo
   hasAppTokenResolver: () => boolean
   getAppSelfLogin?: () => string | null
+  resolvePatForRepo?: ResolveGithubTokenForRepo
 }
 
 export type PluginExports = {

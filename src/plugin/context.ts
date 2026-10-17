@@ -15,6 +15,7 @@ export type CreatePluginContextOptions<TConfig> = {
   resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
   hasGithubAppTokenResolver?: () => boolean
   getGithubAppSelfLogin?: () => string | null
+  resolveGithubPatForRepo?: ResolveGithubTokenForRepo
   spawnSubagent: SpawnSubagentFn
   isBooted: () => boolean
 }
@@ -36,6 +37,7 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
       resolveTokenForRepo: opts.resolveGithubTokenForRepo ?? githubTokenUnavailable,
       hasAppTokenResolver: opts.hasGithubAppTokenResolver ?? (() => false),
       getAppSelfLogin: opts.getGithubAppSelfLogin ?? (() => null),
+      resolvePatForRepo: opts.resolveGithubPatForRepo ?? githubTokenUnavailable,
     },
     spawnSubagent: async (name: string, payload?: unknown, options?: SpawnSubagentOptions) => {
       if (!opts.isBooted()) {

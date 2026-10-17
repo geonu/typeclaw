@@ -19,6 +19,11 @@ export type GithubTokenBridge = {
   // process-wide GH_TOKEN, so brokered gh paths cannot rely on its prefix.
   hasAppTokenResolver: () => boolean
   getAppSelfLogin: () => string | null
+  // PAT-mode channel auth: the adapter lends its stored PAT for git push to a
+  // configured repo. Kept apart from the App minter so PAT presence never flips
+  // hasAppTokenResolver() and the App-only paths (sandboxed minting, push grants).
+  resolvePatForRepo: ResolveGithubTokenForRepo
+  registerPatResolver: (resolver: (repoSlug: string) => Promise<GithubTokenCredential>) => () => void
   registerResolver: (
     resolver: (repoSlug: string) => Promise<GithubTokenCredential>,
     selfLogin?: () => string | null,
@@ -29,11 +34,30 @@ const NO_RESOLVER_REASON =
   'GitHub App token unavailable; the GitHub channel adapter is not running or failed to start. ' +
   'Check `typeclaw logs` and `secrets.json#channels.github`.'
 
+const NO_PAT_RESOLVER_REASON =
+  'No GitHub channel PAT is available; the GitHub channel is not configured with PAT auth, or its adapter is not running.'
+
 export function createGithubTokenBridge(): GithubTokenBridge {
   let current: ((repoSlug: string) => Promise<GithubTokenCredential>) | null = null
   let currentSelfLogin: (() => string | null) | null = null
+  let currentPat: ((repoSlug: string) => Promise<GithubTokenCredential>) | null = null
 
   return {
+    resolvePatForRepo: async (repoSlug) => {
+      const resolver = currentPat
+      if (resolver === null) return { kind: 'unavailable', reason: NO_PAT_RESOLVER_REASON }
+      try {
+        return { kind: 'token', ...(await resolver(repoSlug)) }
+      } catch (err) {
+        return { kind: 'unavailable', reason: describeError(err) }
+      }
+    },
+    registerPatResolver: (resolver) => {
+      currentPat = resolver
+      return () => {
+        if (currentPat === resolver) currentPat = null
+      }
+    },
     resolveTokenForRepo: async (repoSlug) => {
       const resolver = current
       if (resolver === null) return { kind: 'unavailable', reason: NO_RESOLVER_REASON }

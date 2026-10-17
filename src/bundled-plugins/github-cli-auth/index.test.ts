@@ -70,7 +70,12 @@ afterEach(() => {
   else process.env.GITHUB_TOKEN = originalGithubToken
 })
 
-type HookOpts = { permissions?: PermissionService; logger?: PluginLogger; agentDir?: string }
+type HookOpts = {
+  permissions?: PermissionService
+  logger?: PluginLogger
+  agentDir?: string
+  resolvePat?: (repoSlug: string) => Promise<GithubTokenResolveResult>
+}
 
 function pluginContext(
   resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>,
@@ -88,6 +93,7 @@ function pluginContext(
       resolveTokenForRepo: resolve,
       hasAppTokenResolver: () => hasAppTokenResolver,
       getAppSelfLogin: () => 'review-bot',
+      ...(opts.resolvePat !== undefined ? { resolvePatForRepo: opts.resolvePat } : {}),
     },
     spawnSubagent: async () => {},
   }
@@ -2224,5 +2230,69 @@ describe.skipIf(process.platform === 'win32')('github-cli-auth plugin — host g
     expect(source).not.toContain('gh-store')
     expect(source).not.toContain('GithubCliStoreToken')
     expect(existsSync(join(import.meta.dir, 'gh-store.ts'))).toBe(false)
+  })
+
+  const pushEvent = (): ToolBeforeEvent => ({
+    tool: 'bash',
+    sessionId: 'pat-session',
+    callId: 'pat-call',
+    args: { command: 'git -C mounts/source push origin topic' },
+  })
+
+  test('a PAT-mode GitHub channel funds a credential-entitled push to a configured repo', async () => {
+    // given: no `.env` PAT and no App minter, but the channel PAT is lent for example/project
+    const requested: string[] = []
+    const hook = await hookFor(tokenResolver('unused_app_token'), false, {
+      agentDir,
+      permissions: privilegedPermissions,
+      resolvePat: async (repoSlug) => {
+        requested.push(repoSlug)
+        return { kind: 'token', token: 'channel_pat_value' }
+      },
+    })
+    const event = pushEvent()
+
+    // when
+    const result = await hook(event, { ...hookCtx, agentDir })
+
+    // then: the push runs with the channel PAT in the runtime-owned overlay only
+    expect(result).toBeUndefined()
+    expect(requested).toEqual(['example/project'])
+    expect(JSON.stringify(event.args[TYPECLAW_INTERNAL_BASH_ENV])).toContain('channel_pat_value')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV]).toEqual(['GH_TOKEN', 'GITHUB_TOKEN'])
+    expect(String(event.args.command)).not.toContain('channel_pat_value')
+  })
+
+  test('a sandboxed role never receives the channel PAT for a push', async () => {
+    let called = false
+    const hook = await hookFor(tokenResolver('unused_app_token'), false, {
+      agentDir,
+      resolvePat: async () => {
+        called = true
+        return { kind: 'token', token: 'channel_pat_value' }
+      },
+    })
+    const event = pushEvent()
+
+    const result = await hook(event, { ...hookCtx, agentDir })
+
+    expect(result).toMatchObject({ block: true })
+    expect(called).toBe(false)
+    expect(JSON.stringify(event.args)).not.toContain('channel_pat_value')
+  })
+
+  test('a push to a repo the channel refuses stays blocked and names the cause', async () => {
+    const hook = await hookFor(tokenResolver('unused_app_token'), false, {
+      agentDir,
+      permissions: privilegedPermissions,
+      resolvePat: async () => ({ kind: 'unavailable', reason: 'repo `example/project` is not in repos[]' }),
+    })
+    const event = pushEvent()
+
+    const result = await hook(event, { ...hookCtx, agentDir })
+
+    expect(result).toMatchObject({ block: true })
+    expect((result as { reason: string }).reason).toContain('repo `example/project` is not in repos[]')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 })
