@@ -16,7 +16,8 @@ export type AuthorizeLiveSubagentAccessArgs = {
   // The caller's own session id. When the caller is itself a subagent, access
   // is scoped to subagents IT spawned (live.parentSessionId === callerSessionId)
   // so a nested subagent cannot read or cancel siblings or parent-branch runs.
-  // Omitted by main-session callers, which keep the role-severity cap only.
+  // For main-session callers it identifies the spawning session: that session
+  // may always access its own runs; other sessions' runs stay role-capped.
   callerSessionId?: string
 }
 
@@ -25,8 +26,9 @@ export type AuthorizeLiveSubagentAccessArgs = {
 // modes, both requiring the base permission first:
 //   - SUBAGENT caller: scoped to runs it spawned (live.parentSessionId ===
 //     callerSessionId). Ownership is the authorization; the role cap is skipped.
-//   - MAIN-SESSION caller: capped to the requester's role — must resolve to a
-//     role at least as high as the role that spawned the subagent.
+//   - MAIN-SESSION caller: the spawning session may always access its own run;
+//     any other session is capped to the requester's role — it must resolve to
+//     a role at least as high as the role that spawned the subagent.
 //
 // The ordering closes an existence oracle: the task-independent base-permission
 // check runs BEFORE any registry lookup, and for non-owner callers an absent
@@ -84,7 +86,12 @@ export function authorizeLiveSubagentAccess(args: AuthorizeLiveSubagentAccessArg
   if (live === undefined) {
     return { ok: false, message: accessAll ? `Unknown task_id: ${taskId}.` : opaqueDenial }
   }
-  if (accessAll) {
+  // The session that spawned the run may always read/cancel it. In a shared
+  // channel session the origin follows the latest speaker, so a lower-role
+  // message (or the completion wake that follows it) would otherwise lock the
+  // agent out of its own subagent's result. The cap still stops a lower-role
+  // session from reaching a run spawned by a different session.
+  if (accessAll || (callerSessionId !== undefined && live.parentSessionId === callerSessionId)) {
     return { ok: true, live }
   }
 
