@@ -72,6 +72,7 @@ import {
   CHANNEL_MAX_OUTPUT_TOKENS,
   CONTINUATION_REACTION_EMOJI,
   createChannelRouter,
+  QUEUED_REACTION_EMOJI,
   disengageReactionEmojiFor,
   DUPLICATE_SEND_ERROR,
   EMPTY_STOP_AFTER_TOOL_WORK_NUDGE,
@@ -1500,7 +1501,7 @@ describe('ChannelRouter session lifecycle', () => {
     expect(removed).toHaveLength(1)
     expect(removed[0]).toMatchObject({
       target: { adapter: 'discord-bot', value: 'queued-message' },
-      emoji: 'eyes',
+      emoji: QUEUED_REACTION_EMOJI,
       expectedAccountIdentity: 'test-account',
     })
   })
@@ -3306,6 +3307,60 @@ describe('ChannelRouter auto-react on engage', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(called).toBe(false)
+  })
+
+  test('marks an inbound queued behind an in-flight turn with an hourglass and clears it after its turn', async () => {
+    // given a typing-capable adapter with a turn held mid-flight, and a reaction add that resolves late
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const added: ReactionRequest[] = []
+    const removed: RemoveOwnReactionRequest[] = []
+    let releaseAdd: () => void = () => {}
+    const addHeld = new Promise<void>((resolve) => {
+      releaseAdd = resolve
+    })
+    router.registerPrepareOwnReaction('discord-bot', async (req) => ({
+      accountIdentity: 'test-account',
+      target: req.reactionRef,
+      emoji: req.emoji,
+    }))
+    router.registerReaction('discord-bot', async (req) => {
+      added.push(req)
+      await addHeld
+      return { ok: true }
+    })
+    router.registerRemoveOwnReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+    router.setTypingCapability('discord-bot', true)
+    let releaseTurn: () => void = () => {}
+    const turnHeld = new Promise<void>((resolve) => {
+      releaseTurn = resolve
+    })
+    await router.route(inbound({ externalMessageId: 'm1', reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await turnHeld
+    }
+    const drainPromise = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    // when a second message arrives during that turn
+    const queuedRef = { adapter: 'discord-bot' as const, value: 'queued-ref' }
+    await router.route(inbound({ externalMessageId: 'm2', text: 'also this', reactionRef: queuedRef }))
+    await waitFor(() => added.length > 0)
+
+    // then only the queued message gets the hourglass
+    expect(added).toHaveLength(1)
+    expect(added[0]).toMatchObject({ emoji: QUEUED_REACTION_EMOJI, reactionRef: queuedRef })
+
+    // and it is removed once its turn ends, even though the add landed after completion
+    sessions[0]!.onPrompt = async () => {}
+    releaseTurn()
+    await drainPromise
+    releaseAdd()
+    await waitFor(() => removed.length > 0)
+    expect(removed[0]).toMatchObject({ emoji: QUEUED_REACTION_EMOJI })
   })
 
   test('adds :eyes: again once typing capability is cleared', async () => {
