@@ -244,6 +244,7 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 export const MAX_CHANNEL_SENDS_PER_TURN = 10
 export const ENGAGE_REACTION_EMOJI = 'eyes'
 export const CONTINUATION_REACTION_EMOJI = 'hourglass_flowing_sand'
+export const QUEUED_REACTION_EMOJI = 'hourglass_flowing_sand'
 // Marks the triggering message of a turn that failed for a reason the user can
 // only answer by retrying, in place of a chat notice. Adapters that cannot
 // render it (GitHub's fixed set, reaction-less platforms) get the text notice.
@@ -6294,7 +6295,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         event.replyToBotMessageId === null &&
         !live.multiHumanGroup
 
-      const engageReaction = autoReactOnEngage(event)
+      const engageReaction = autoReactOnEngage(event, live.draining)
 
       updateLoopGuard(live, event)
 
@@ -6645,15 +6646,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // supporting reactions, a transient API error) can NEVER block engagement,
   // enqueueing, or the agent's actual reply. No reactionRef = nothing reactable
   // (synthetic inbounds, reaction-less adapters) = silent skip.
-  const autoReactOnEngage = (event: InboundMessage): WaitingReactionHandle | null => {
-    if (event.reactionRef === undefined || typingCapableAdapters.has(event.adapter)) return null
+  //
+  // A message queued behind an in-flight turn gets an :hourglass_flowing_sand:
+  // even where typing renders: that indicator belongs to the running turn and
+  // cannot tell the sender their message is waiting. GitHub's fixed reaction
+  // set has no hourglass, so it keeps :eyes:.
+  const autoReactOnEngage = (event: InboundMessage, queuedBehindTurn: boolean): WaitingReactionHandle | null => {
+    if (event.reactionRef === undefined) return null
+    if (!queuedBehindTurn && typingCapableAdapters.has(event.adapter)) return null
     return waitingReactions.acquire({
       adapter: event.adapter,
       workspace: event.workspace,
       chat: event.chat,
       thread: event.thread,
       reactionRef: event.reactionRef,
-      emoji: ENGAGE_REACTION_EMOJI,
+      emoji: queuedBehindTurn && event.adapter !== 'github' ? QUEUED_REACTION_EMOJI : ENGAGE_REACTION_EMOJI,
     })
   }
 
