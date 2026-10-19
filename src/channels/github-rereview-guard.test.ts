@@ -101,6 +101,21 @@ describe('re-review stranding guard', () => {
     if (decision.block) expect(decision.reason).toContain('Could not verify')
   })
 
+  it('re-queries once after a transient review-state failure before deciding', async () => {
+    let calls = 0
+    const decision = await evaluateRereviewGuard(
+      input({
+        getReviewState: async () => {
+          calls += 1
+          if (calls === 1) return { ok: false, error: 'GitHub reviews 503', code: 'transient' }
+          return { ok: true, selfBlocking: false, selfBlockingReviewId: null, approve: true }
+        },
+      }),
+    )
+    expect(decision.block).toBe(false)
+    expect(calls).toBe(2)
+  })
+
   it('fires on a close-out claim even without the resolve flag', async () => {
     const decision = await evaluateRereviewGuard(
       input({ wantsResolve: false, text: 'Confirmed fixed — that resolves it.', getReviewState: stateOk(true) }),

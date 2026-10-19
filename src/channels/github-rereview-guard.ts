@@ -42,7 +42,11 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
   if (!isCloseoutAttempt(input)) return ALLOW
 
   const round = matchingRound(input)
-  const state = await input.getReviewState({ adapter: 'github', workspace: input.workspace, chat: input.chat })
+  const request = { adapter: 'github', workspace: input.workspace, chat: input.chat } as const
+  let state = await input.getReviewState(request)
+  // One immediate re-query absorbs a single GitHub API blip, which would
+  // otherwise refuse a legitimate close-out the model has to re-author.
+  if (!state.ok && state.code === 'transient') state = await input.getReviewState(request)
 
   // Fail closed: an unverifiable review state is treated as a live block, so the
   // bot never strands a re-review on a transient API failure.
