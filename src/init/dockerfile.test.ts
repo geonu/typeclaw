@@ -681,8 +681,31 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
 
   test('base Dockerfile points agent-browser at the apt chromium on arm64 (no Chrome for Testing download path on that arch)', () => {
     const base = buildBaseDockerfile()
-    expect(base).toContain('/root/.agent-browser/config.json')
-    expect(base).toContain('/usr/bin/chromium')
+    expect(base).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome')
+    // The sandbox runs with --clearenv, so the default lives in the launcher, not an image ENV.
+    expect(base).toContain('${AGENT_BROWSER_EXECUTABLE_PATH:=/usr/local/lib/typeclaw-agent-browser/chrome}')
+    expect(base).not.toContain('ENV AGENT_BROWSER_EXECUTABLE_PATH')
+  })
+
+  // The model's bwrap sandbox binds /usr but not /root, and its PATH has no
+  // `node`. Anything agent-browser needs at runtime under /root is invisible
+  // there and fails with `agent-browser.real: not found`.
+  test.each([
+    ['base', () => buildBaseDockerfile()],
+    ['inline', () => buildDockerfile(undefined, { baseImageVersion: null })],
+  ])('%s Dockerfile keeps agent-browser runtime files out of /root so the sandbox can run them', (_, build) => {
+    const out = build()
+    expect(out).toContain(
+      'BUN_INSTALL=/usr/local/lib/typeclaw-agent-browser BUN_INSTALL_BIN=/usr/local/lib/typeclaw-agent-browser/bin',
+    )
+    expect(out).toContain(
+      'chmod 0755 /usr/local/lib/typeclaw-agent-browser/install/global/node_modules/agent-browser/bin/agent-browser-linux-*',
+    )
+    expect(out).toContain(
+      'exec /usr/local/bin/bun /usr/local/lib/typeclaw-agent-browser/install/global/node_modules/agent-browser/bin/agent-browser.js',
+    )
+    expect(out).toContain('HOME=/usr/local/lib/typeclaw-agent-browser agent-browser install')
+    expect(out).not.toContain('/root/.agent-browser')
   })
 
   test('base Dockerfile omits gh keyring bootstrap — toggle-driven layers live in the per-agent Dockerfile so typeclaw.json toggles do not force a base-image rebuild', () => {
@@ -2072,7 +2095,9 @@ describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)',
     const bk = buildDockerfile(allTogglesOn, { baseImageVersion: null })
     const lg = buildDockerfile(allTogglesOn, { baseImageVersion: null, buildKit: false })
     expect(bk).toContain('RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\')
-    expect(lg).toContain('RUN bun install -g agent-browser')
+    expect(lg).toMatch(
+      /^RUN BUN_INSTALL=\S+ BUN_INSTALL_BIN=\S+ BUN_INSTALL_CACHE_DIR=\S+ bun install -g agent-browser/m,
+    )
   })
 
   test('legacy mode strips structurally-unsafe append lines (heredoc `<<`) but still emits ENTRYPOINT/CMD', () => {
@@ -2111,7 +2136,8 @@ describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)',
 })
 
 function extractWrapperBody(dockerfile: string): string {
-  const shebangIdx = dockerfile.indexOf('#!/bin/sh')
+  const heredocIdx = dockerfile.indexOf("<<'TYPECLAW_AGENT_BROWSER_WRAPPER_EOF'")
+  const shebangIdx = dockerfile.indexOf('#!/bin/sh', heredocIdx)
   const endIdx = dockerfile.indexOf('\nTYPECLAW_AGENT_BROWSER_WRAPPER_EOF', shebangIdx)
   if (shebangIdx < 0 || endIdx < 0) throw new Error('wrapper heredoc not found in Dockerfile')
   return dockerfile.slice(shebangIdx, endIdx)
