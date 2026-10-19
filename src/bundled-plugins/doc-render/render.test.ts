@@ -5,19 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import {
-  COMPILER_PACKAGE,
-  COMPILER_VERSION,
-  isModuleNotFound,
-  loadCompilerModule,
-  requiredCompilerPlatformPackage,
-} from './render'
+import { chromePath, DEFAULT_CHROME_PATH, loadPlaywright, PLAYWRIGHT_PACKAGE, PLAYWRIGHT_VERSION } from './render'
 
 async function writeFakePackage(
   baseDir: string,
-  name: string,
   source: string,
-  version = COMPILER_VERSION,
+  version = PLAYWRIGHT_VERSION,
+  name = PLAYWRIGHT_PACKAGE,
 ): Promise<void> {
   const pkgDir = join(baseDir, 'node_modules', ...name.split('/'))
   await mkdir(pkgDir, { recursive: true })
@@ -28,18 +22,10 @@ async function writeFakePackage(
   await writeFile(join(pkgDir, 'index.js'), source)
 }
 
-describe('isModuleNotFound', () => {
-  test.each([
-    'Cannot find package "@myriaddreamin/typst-ts-node-compiler"',
-    'Cannot find module "x"',
-    'error: Module not found "y"',
-    `something mentioning ${COMPILER_PACKAGE} directly`,
-  ])('treats Bun resolution failure %j as a missing module', (message) => {
-    expect(isModuleNotFound(message)).toBe(true)
-  })
-
-  test('does not flag an unrelated runtime error', () => {
-    expect(isModuleNotFound('TypeError: x is not a function')).toBe(false)
+describe('chromePath', () => {
+  test('prefers the operator override, else the image default', () => {
+    expect(chromePath({ AGENT_BROWSER_EXECUTABLE_PATH: '/opt/chrome' })).toBe('/opt/chrome')
+    expect(chromePath({})).toBe(DEFAULT_CHROME_PATH)
   })
 })
 
@@ -54,106 +40,50 @@ describe('render script CLI', () => {
   })
 })
 
-describe('compiler resolution', () => {
-  test('loads the compiler and required platform package from the writable scratch runtime', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'doc-render-scratch-'))
-    const runtimeDir = join(root, 'runtime')
-    const platformPackage = await requiredCompilerPlatformPackage()
-    await writeFakePackage(
-      runtimeDir,
-      COMPILER_PACKAGE,
-      `import { platformByte } from '${platformPackage}'; export const NodeCompiler = { create() { return { pdf() { return new Uint8Array([platformByte]) } } } }`,
-    )
-    await writeFakePackage(runtimeDir, platformPackage, 'export const platformByte = 2')
+describe('playwright resolution', () => {
+  test('loads playwright-core from the writable scratch runtime', async () => {
+    const runtimeDir = join(mkdtempSync(join(tmpdir(), 'doc-render-scratch-')), 'runtime')
+    await writeFakePackage(runtimeDir, 'export const chromium = { marker: 2 }')
 
-    const compiler = await loadCompilerModule(runtimeDir)
-    const pdf = compiler.NodeCompiler.create({ workspace: '.' }).pdf({ mainFilePath: 'main.typ' })
+    const pw = (await loadPlaywright(runtimeDir)) as unknown as { chromium: { marker: number } }
 
-    expect([...pdf]).toEqual([2])
+    expect(pw.chromium.marker).toBe(2)
   })
 
-  test('ignores a conflicting compiler beneath the document cwd', async () => {
+  test('ignores a conflicting playwright-core beneath the document cwd', async () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-render-shadow-'))
     const docDir = join(root, 'documents')
     const runtimeDir = join(root, 'runtime')
+    await writeFakePackage(docDir, 'export const chromium = { marker: 1 }')
+    await writeFakePackage(runtimeDir, 'export const chromium = { marker: 2 }')
 
-    for (const [baseDir, byte] of [
-      [docDir, 1],
-      [runtimeDir, 2],
-    ] as const) {
-      const pkgDir = join(baseDir, 'node_modules', '@myriaddreamin', 'typst-ts-node-compiler')
-      await mkdir(pkgDir, { recursive: true })
-      await writeFile(
-        join(pkgDir, 'package.json'),
-        JSON.stringify({ name: COMPILER_PACKAGE, version: COMPILER_VERSION, type: 'module', exports: './index.js' }),
-      )
-      await writeFile(
-        join(pkgDir, 'index.js'),
-        `export const NodeCompiler = { create() { return { pdf() { return new Uint8Array([${byte}]) } } } }`,
-      )
-    }
-    await writeFakePackage(runtimeDir, await requiredCompilerPlatformPackage(), 'export const platformByte = 2')
+    expect(Bun.resolveSync(PLAYWRIGHT_PACKAGE, docDir)).toContain(docDir)
 
-    expect(Bun.resolveSync(COMPILER_PACKAGE, docDir)).toContain(docDir)
-
-    const compiler = await loadCompilerModule(runtimeDir)
-    const pdf = compiler.NodeCompiler.create({ workspace: '.' }).pdf({ mainFilePath: 'main.typ' })
-
-    expect([...pdf]).toEqual([2])
+    const pw = (await loadPlaywright(runtimeDir)) as unknown as { chromium: { marker: number } }
+    expect(pw.chromium.marker).toBe(2)
   })
 
-  test('rejects a hostile ancestor platform package when the runtime-local platform package is absent', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'doc-render-platform-ancestor-'))
+  test('rejects an ancestor playwright-core when the runtime-local package is absent', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-render-ancestor-'))
     const runtimeDir = join(root, 'scratch', 'runtime')
-    const platformPackage = await requiredCompilerPlatformPackage()
-    const marker = join(root, 'hostile-platform-executed')
-    await writeFakePackage(
-      runtimeDir,
-      COMPILER_PACKAGE,
-      `import '${platformPackage}'; export const NodeCompiler = { create() {} }`,
-    )
+    const marker = join(root, 'hostile-executed')
+    await mkdir(runtimeDir, { recursive: true })
     await writeFakePackage(
       root,
-      platformPackage,
-      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'executed')`,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'x')`,
     )
 
-    await expect(loadCompilerModule(runtimeDir)).rejects.toThrow(platformPackage)
+    expect(Bun.resolveSync(PLAYWRIGHT_PACKAGE, runtimeDir)).toContain(root)
+    await expect(loadPlaywright(runtimeDir)).rejects.toThrow(
+      `${PLAYWRIGHT_PACKAGE}@${PLAYWRIGHT_VERSION} is not installed`,
+    )
     expect(await Bun.file(marker).exists()).toBeFalse()
   })
 
-  test('rejects an ancestor compiler when the runtime-local package is absent', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'doc-render-ancestor-'))
-    const runtimeDir = join(root, 'scratch', 'runtime')
-    const ancestorPkgDir = join(root, 'node_modules', '@myriaddreamin', 'typst-ts-node-compiler')
-    await mkdir(runtimeDir, { recursive: true })
-    await mkdir(ancestorPkgDir, { recursive: true })
-    await writeFile(
-      join(ancestorPkgDir, 'package.json'),
-      JSON.stringify({ name: COMPILER_PACKAGE, version: COMPILER_VERSION, type: 'module', exports: './index.js' }),
-    )
-    await writeFile(join(ancestorPkgDir, 'index.js'), 'export const NodeCompiler = { create() {} }')
-
-    expect(Bun.resolveSync(COMPILER_PACKAGE, runtimeDir)).toContain(ancestorPkgDir)
-    await expect(loadCompilerModule(runtimeDir)).rejects.toThrow(COMPILER_PACKAGE)
-  })
-
-  test('fails when the runtime-local package is absent instead of using global resolution', async () => {
-    const runtimeDir = mkdtempSync(join(tmpdir(), 'doc-render-absent-'))
-
-    await expect(loadCompilerModule(runtimeDir)).rejects.toThrow(COMPILER_PACKAGE)
-  })
-
-  test('rejects a runtime-local compiler at a different version', async () => {
+  test('rejects a runtime-local playwright-core at a different version', async () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), 'doc-render-version-'))
-    const pkgDir = join(runtimeDir, 'node_modules', '@myriaddreamin', 'typst-ts-node-compiler')
-    await mkdir(pkgDir, { recursive: true })
-    await writeFile(
-      join(pkgDir, 'package.json'),
-      JSON.stringify({ name: COMPILER_PACKAGE, version: '0.0.0', type: 'module', exports: './index.js' }),
-    )
-    await writeFile(join(pkgDir, 'index.js'), 'export const NodeCompiler = { create() {} }')
+    await writeFakePackage(runtimeDir, 'export const chromium = {}', '0.0.0')
 
-    await expect(loadCompilerModule(runtimeDir)).rejects.toThrow(COMPILER_VERSION)
+    await expect(loadPlaywright(runtimeDir)).rejects.toThrow(PLAYWRIGHT_VERSION)
   })
 })

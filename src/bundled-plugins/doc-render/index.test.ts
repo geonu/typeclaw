@@ -6,7 +6,7 @@ import { join, sep } from 'node:path'
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
-import docRenderPlugin, { renderScriptPath, templateLibPath } from './index'
+import docRenderPlugin, { renderScriptPath } from './index'
 
 describe('doc-render plugin', () => {
   test('contributes the skill directory and no tools or hooks', async () => {
@@ -21,10 +21,6 @@ describe('doc-render plugin', () => {
 
   test('the bundled render script exists on disk', () => {
     expect(existsSync(renderScriptPath())).toBe(true)
-  })
-
-  test('the bundled theme library exists on disk', () => {
-    expect(existsSync(templateLibPath())).toBe(true)
   })
 })
 
