@@ -266,6 +266,25 @@ describe('reviewer read-only bash policy — ambiguous shell fails closed', () =
     expect(allows(cmd)).toBe(false)
   })
 
+  test.each([
+    'gh api repos/o/r/pulls/42 --jq \'"`" + .title\'',
+    'gh pr view 42 --repo o/r --json body --jq \'.body | test("\\$\\(")\'',
+    "git log --format='`%h` %s' -5",
+  ])('allows substitution-like text inside single quotes: %s', (cmd) => {
+    expect(allows(cmd)).toBe(true)
+  })
+
+  test('denies a substitution hidden between quotes inside comments', () => {
+    expect(allows("echo safe # '\necho $(printf substitution-ran) # '")).toBe(false)
+  })
+
+  test.each(['git log "`id`"', "git log \"it's `id`\" 'x'", "git log \\'`id`'"])(
+    'still denies live substitution outside single quotes: %s',
+    (cmd) => {
+      expect(allows(cmd)).toBe(false)
+    },
+  )
+
   test('denies an unbalanced quote (cannot parse safely)', () => {
     expect(allows('cat "unterminated')).toBe(false)
   })

@@ -599,13 +599,53 @@ function classifySegment(segment: Segment): void {
 
 export function enforceReviewerReadonlyBashPolicy(command: string): void {
   if (typeof command !== 'string' || command.trim().length === 0) return
+  // Single-quoted text is literal to bash, so backticks or `$(` inside a quoted
+  // jq filter or markdown review body are not substitutions. Double quotes stay
+  // in the scan because bash still substitutes inside them.
+  const scanned = stripSingleQuotedText(command)
   for (const { pattern, reason } of FAIL_CLOSED_CONSTRUCTS) {
-    if (pattern.test(command)) {
+    if (pattern.test(scanned)) {
       throw new SubagentBashPolicyError(`command uses ${reason}, which the reviewer policy cannot analyze safely.`)
     }
   }
   const segments = splitIntoSegments(command)
   for (const segment of segments) classifySegment(segment)
+}
+
+// A `'` inside double quotes or after a backslash does not open a quote, so a
+// plain regex would let `"it's `id`" 'x'` hide a live substitution.
+function stripSingleQuotedText(command: string): string {
+  let out = ''
+  let inDouble = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string
+    if (ch === '\\') {
+      out += command.slice(i, i + 2)
+      i++
+      continue
+    }
+    if (ch === '"') inDouble = !inDouble
+    // Bash ignores an unquoted `#` comment through the newline, so quotes inside
+    // it would mis-pair here and in splitIntoSegments and hide the next line.
+    if (ch === '#' && !inDouble && (i === 0 || /[\s;&|()]/.test(command[i - 1] as string))) {
+      const newline = command.indexOf('\n', i)
+      const comment = command.slice(i, newline === -1 ? undefined : newline)
+      if (/['"]/.test(comment)) {
+        throw new SubagentBashPolicyError(
+          'a shell comment containing quotes cannot be analyzed safely; drop the comment.',
+        )
+      }
+    }
+    if (ch === "'" && !inDouble) {
+      const end = command.indexOf("'", i + 1)
+      if (end === -1) return command
+      out += "''"
+      i = end
+      continue
+    }
+    out += ch
+  }
+  return out
 }
 
 export function enforceSubagentBashPolicy(policy: SubagentBashPolicy, command: string): void {
