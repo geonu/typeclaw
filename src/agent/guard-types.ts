@@ -21,5 +21,8 @@ export type InternalGuard = {
   readonly owner: string
   readonly key: string
   readonly tools: ReadonlySet<string>
+  // Hygiene guards that protect no boundary set this so a bug in their check
+  // is logged and skipped instead of denying every call to their tools.
+  readonly skipOnCheckError?: true
   readonly check: (event: InternalGuardEvent) => InternalGuardResult | Promise<InternalGuardResult>
 }

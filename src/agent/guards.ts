@@ -35,6 +35,7 @@ export function buildInternalGuards(agentDir: string): readonly InternalGuard[] 
       owner: 'guard',
       key: GUARD_IMAGE_READ_REDIRECT,
       tools: ['read'],
+      skipOnCheckError: true,
       check: checkImageReadRedirect,
     },
     {
@@ -54,18 +55,21 @@ export function buildInternalGuards(agentDir: string): readonly InternalGuard[] 
       owner: 'bun-hygiene',
       key: GUARD_GLOBAL_INSTALL,
       tools: ['bash'],
+      skipOnCheckError: true,
       check: checkGlobalInstallGuard,
     },
     {
       owner: 'bun-hygiene',
       key: GUARD_NON_BUN_PACKAGE_MANAGER,
       tools: ['bash'],
+      skipOnCheckError: true,
       check: checkNonBunPackageManagerGuard,
     },
     {
       owner: 'bun-hygiene',
       key: GUARD_NON_BUN_PACKAGE_RUNNER,
       tools: ['bash'],
+      skipOnCheckError: true,
       check: checkNonBunPackageRunnerGuard,
     },
   ]
