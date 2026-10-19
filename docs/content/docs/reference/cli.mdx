@@ -45,6 +45,8 @@ Store: `secrets.json#providers`. See [/concepts/secrets-policy](/docs/concepts/s
 
 ```sh
 typeclaw model set default fireworks/kimi-k2
+typeclaw model set default openai/gpt-5.4-mini --override slack --match 'slack:*'   # per-channel override
+typeclaw model override match slack 'discord:G1/C2'   # add a rule to an override
 typeclaw model add deep anthropic/claude-opus-4-5
 typeclaw model remove fast
 typeclaw model list                                # current profiles

@@ -92,6 +92,48 @@ The object form accepts `model` (a single ref) **or** `models` (a single ref or 
 
 Set it from the CLI with `typeclaw model set <profile> <ref> --thinking <level>` (targets that profile), or `typeclaw model thinking <level>` for the `default` profile's level. `--thinking default` clears a profile's override.
 
+## `modelOverrides`
+
+Per-channel model selection. Each named entry layers a partial `models` block over the global one for the chats its `match` rules cover, the same `{ match, ... }` shape as [`roles`](/docs/concepts/permissions-model).
+
+```json
+{
+  "models": {
+    "default": "anthropic/claude-sonnet-4-5",
+    "fast": "openai/gpt-5.4-nano"
+  },
+  "modelOverrides": {
+    "slack": {
+      "match": ["slack:*"],
+      "models": { "default": "openai/gpt-5.4-mini" }
+    },
+    "support": {
+      "match": ["slack:T0123/C0ABCDE", "discord:G1/C2"],
+      "models": {
+        "default": "anthropic/claude-opus-4-5",
+        "fast": { "model": "openai/gpt-5.4-mini", "thinkingLevel": "off" }
+      }
+    }
+  }
+}
+```
+
+- **`match`** uses the role match-rule syntax, limited to channel rules: `*`, `slack:*`, `slack:T0123`, `slack:T0123/C0ABCDE`, `slack:dm/*`, and so on. `author:`, `tui`, `cron`, and `subagent` rules are rejected. Platform rules cover every adapter of that platform (`slack:` matches both `slack` and `slack-bot`).
+- **`models`** takes the same values as the top-level `models` (a ref, a fallback chain, or `{ model(s), thinkingLevel }`) and needs at least one profile, but not `default`.
+- **Resolution is per profile.** For each profile, the most specific matching rule across all entries wins: a chat beats a workspace or DM bucket, which beats a platform, which beats `*`. On a tie the later-declared entry wins. Profiles no matching entry defines use the global `models`. In the example, chat `C0ABCDE` gets Opus for `default` and the override's `fast`; every other Slack chat gets gpt-5.4-mini for `default` and the global `fast`.
+- **Subagents** spawned from a chat (directly or through other subagents) resolve profiles the same way, so a chat's `fast` or `deep` also applies to its workers. TUI and cron sessions use the global `models`.
+
+Run `typeclaw reload` after editing; new sessions pick up the change.
+
+```sh
+typeclaw model set default anthropic/claude-opus-4-5 --override support --match 'slack:T0123/C0ABCDE'
+typeclaw model set fast openai/gpt-5.4-mini --override support --thinking off
+typeclaw model override match support 'discord:G1/C2'
+typeclaw model override unmatch support 'discord:G1/C2'
+typeclaw model remove fast --override support
+typeclaw model override remove support
+```
+
 ## `network`
 
 ```json

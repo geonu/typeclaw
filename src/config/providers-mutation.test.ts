@@ -107,6 +107,26 @@ describe('findModelsReferencingProvider', () => {
     expect(findModelsReferencingProvider(root, 'openai')).toEqual(['vision'])
     expect(findModelsReferencingProvider(root, 'zai')).toEqual([])
   })
+
+  test('counts modelOverrides profiles, including fallback refs, so removal is guarded', async () => {
+    // given a provider referenced only by a channel override's fallback chain
+    const configPath = join(root, 'typeclaw.json')
+    const cfg = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
+    cfg.modelOverrides = {
+      support: {
+        match: ['slack:*'],
+        models: { default: ['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', 'openai/gpt-5.4-mini'] },
+      },
+    }
+    await writeFile(configPath, `${JSON.stringify(cfg, null, 2)}\n`)
+    addProvider(root, 'openai', { type: 'api_key', key: 'sk-x' })
+
+    // when / then
+    expect(findModelsReferencingProvider(root, 'openai')).toEqual(['modelOverrides.support.default'])
+    const result = removeProvider(root, 'openai')
+    expect(result.ok).toBe(false)
+    expect(removeProvider(root, 'openai', { force: true }).ok).toBe(true)
+  })
 })
 
 describe('removeProvider', () => {

@@ -6,10 +6,16 @@ import { defineCommand } from 'citty'
 
 import { type CustomModelMeta, type ThinkingLevel, thinkingLevelSchema } from '@/config'
 import {
+  addOverrideMatch,
   addProfile,
+  listModelOverrides,
   listModelProfiles,
   listRegisteredModelRefs,
+  removeOverride,
+  removeOverrideMatch,
+  removeOverrideProfile,
   removeProfile,
+  setOverrideProfile,
   setProfile,
   setProfileThinkingLevel,
 } from '@/config/models-mutation'
@@ -62,15 +68,33 @@ const setSub = defineCommand({
         "reasoning effort for THIS profile (off|minimal|low|medium|high|xhigh|max|default); the `default` profile's level is the de-facto global default",
       required: false,
     },
+    override: {
+      type: 'string',
+      description: 'set the profile inside this `modelOverrides` entry instead of the global `models`',
+      required: false,
+    },
+    match: {
+      type: 'string',
+      description: "with --override: add this match rule (e.g. 'slack:*'); required when creating the override",
+      required: false,
+    },
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
+    if (args.match !== undefined && args.override === undefined) {
+      console.error(errorLine('--match requires --override <name>.'))
+      process.exit(1)
+    }
     // `model set <ref>` shorthand targets the `default` profile; a shorthand ref
     // is resolved as an explicit ref (so its errors surface via resolvePickedRef's
     // exit-1 path), and a bare/named-profile invocation falls back to the picker.
     const shorthandRef = resolveShorthandRef(args.profile, args.ref)
     const profile = shorthandRef !== undefined ? 'default' : (args.profile ?? (await pickProfileName()))
     const picked = await resolvePickedRef(shorthandRef ?? args.ref, cwd)
+    if (args.override !== undefined) {
+      runSetOverrideProfile(cwd, args.override, profile, picked, args)
+      return
+    }
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
@@ -207,17 +231,26 @@ const removeSub = defineCommand({
       description: 'profile name to remove',
       required: true,
     },
+    override: {
+      type: 'string',
+      description: 'remove the profile from this `modelOverrides` entry instead of the global `models`',
+      required: false,
+    },
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    intro(`Removing model profile: ${args.profile}`)
-    const result = removeProfile(cwd, args.profile)
+    const scope = args.override !== undefined ? ` from override ${args.override}` : ''
+    intro(`Removing model profile: ${args.profile}${scope}`)
+    const result =
+      args.override !== undefined
+        ? removeOverrideProfile(cwd, args.override, args.profile)
+        : removeProfile(cwd, args.profile)
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
     }
     done({
-      title: c.green(`Profile "${args.profile}" removed.`),
+      title: c.green(`Profile "${args.profile}" removed${scope}.`),
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
@@ -274,7 +307,60 @@ const listSub = defineCommand({
         }
       }
     }
+
+    for (const override of listModelOverrides(cwd)) {
+      console.log('')
+      console.log(`${c.bold(`override ${override.name}`)}  ${c.dim(override.match.join(', '))}`)
+      for (const p of override.profiles) {
+        const thinking = p.thinkingLevel !== undefined ? `  ${c.dim(p.thinkingLevel)}` : ''
+        console.log(`  ${p.profile.padEnd(profileWidth + 2)}${p.refs.join(' → ')}${thinking}`)
+      }
+    }
   },
+})
+
+const overrideMatchSub = defineCommand({
+  meta: { name: 'match', description: 'add a match rule to a `modelOverrides` entry' },
+  args: {
+    name: { type: 'positional', description: 'override name', required: true },
+    rule: { type: 'positional', description: "match rule, e.g. 'slack:T0123/C0123'", required: true },
+  },
+  run({ args }) {
+    finishOverrideEdit(
+      addOverrideMatch(ensureAgentDir(), args.name, args.rule),
+      `Override "${args.name}" now matches ${args.rule}.`,
+    )
+  },
+})
+
+const overrideUnmatchSub = defineCommand({
+  meta: { name: 'unmatch', description: 'remove a match rule from a `modelOverrides` entry' },
+  args: {
+    name: { type: 'positional', description: 'override name', required: true },
+    rule: { type: 'positional', description: 'match rule to remove', required: true },
+  },
+  run({ args }) {
+    finishOverrideEdit(
+      removeOverrideMatch(ensureAgentDir(), args.name, args.rule),
+      `Override "${args.name}" no longer matches ${args.rule}.`,
+    )
+  },
+})
+
+const overrideRemoveSub = defineCommand({
+  meta: { name: 'remove', description: 'delete a `modelOverrides` entry' },
+  args: { name: { type: 'positional', description: 'override name', required: true } },
+  run({ args }) {
+    finishOverrideEdit(removeOverride(ensureAgentDir(), args.name), `Override "${args.name}" removed.`)
+  },
+})
+
+const overrideSub = defineCommand({
+  meta: {
+    name: 'override',
+    description: 'edit `modelOverrides` match rules (set profiles with `model set --override`)',
+  },
+  subCommands: { match: overrideMatchSub, unmatch: overrideUnmatchSub, remove: overrideRemoveSub },
 })
 
 export const modelCommand = defineCommand({
@@ -288,8 +374,51 @@ export const modelCommand = defineCommand({
     remove: removeSub,
     list: listSub,
     thinking: thinkingSub,
+    override: overrideSub,
   },
 })
+
+function runSetOverrideProfile(
+  cwd: string,
+  name: string,
+  profile: string,
+  picked: PickedModelRef,
+  args: { force?: boolean; thinking?: string; match?: string },
+): void {
+  let thinking: { level: ThinkingLevel | undefined } | undefined
+  if (args.thinking !== undefined) {
+    const parsed = parseThinkingArg(args.thinking)
+    if (!parsed.ok) {
+      console.error(errorLine(parsed.reason))
+      process.exit(1)
+    }
+    thinking = { level: parsed.level }
+  }
+  intro(`Setting model profile: ${profile} → ${picked.ref} in override ${name}`)
+  const result = setOverrideProfile(cwd, name, profile, picked.ref, {
+    force: args.force === true,
+    ...(args.match !== undefined ? { match: args.match } : {}),
+    ...(picked.meta !== undefined ? { meta: picked.meta } : {}),
+    ...(thinking !== undefined ? { thinkingLevel: thinking.level } : {}),
+  })
+  finishOverrideEdit(result, `Profile "${profile}" set in override "${name}".`, `${profile} → ${picked.ref}`)
+}
+
+function finishOverrideEdit(
+  result: { ok: true } | { ok: false; reason: string },
+  title: string,
+  details?: string,
+): void {
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  done({
+    title: c.green(title),
+    ...(details !== undefined ? { details } : {}),
+    hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
+  })
+}
 
 function ensureAgentDir(): string {
   const cwd = findAgentDir(process.cwd()) ?? process.cwd()

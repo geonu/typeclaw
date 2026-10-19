@@ -2,6 +2,7 @@ import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { z } from 'zod'
 
 import { getConfig, resolveModel } from '@/config'
+import { effectiveModels } from '@/config/model-overrides'
 import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
@@ -309,7 +310,10 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath, backgroundDrain } =
       normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
     let aborted = false
-    let activeModelRef = resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions))[0]!
+    let activeModelRef = resolveFallbackChain(
+      effectiveModels(getConfig(), sessionOptions.spawnedByOrigin),
+      resolveSubagentProfile(subagent, sessionOptions),
+    )[0]!
     // Latency tolerance is decided ONCE here, from the REQUESTED profile — not the
     // one resolveProfile() landed on. A `deep` subagent whose operator never
     // configured `models.deep` still runs on a background path nobody is watching
@@ -380,7 +384,10 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           allowEscalation: false,
         })
         const result = await promptPersistentTurnWithFallback({
-          refs: resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions)),
+          refs: resolveFallbackChain(
+            effectiveModels(getConfig(), sessionOptions.spawnedByOrigin),
+            resolveSubagentProfile(subagent, sessionOptions),
+          ),
           currentModelRef: activeModelRef,
           profile: resolveSubagentProfile(subagent, sessionOptions),
           retryPolicy,

@@ -34,6 +34,7 @@ import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
 import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { getConfig, resolveModel } from '@/config'
+import { effectiveModels } from '@/config/model-overrides'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
@@ -3217,7 +3218,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         keyId,
         room,
         session: created.session,
-        activeModelRef: resolveFallbackChain(getConfig().models, undefined)[0]!,
+        activeModelRef: resolveFallbackChain(effectiveModels(getConfig(), origin), undefined)[0]!,
         turnThinkingDefault: created.session.thinkingLevel,
         lastQuestionSignal: null,
         pendingUserTurnSignal: null,
@@ -5602,7 +5603,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.promptInFlight = true
         try {
           const result = await promptPersistentTurnWithFallback({
-            refs: resolveFallbackChain(getConfig().models, undefined),
+            refs: resolveFallbackChain(effectiveModels(getConfig(), live.originRef.current), undefined),
             currentModelRef: live.activeModelRef,
             session: live.session,
             text: promptText,

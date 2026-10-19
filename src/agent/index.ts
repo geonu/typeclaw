@@ -21,6 +21,7 @@ import {
   type ResolvedProfile,
   type ThinkingLevel,
 } from '@/config'
+import { effectiveModels } from '@/config/model-overrides'
 import { defaultThinkingLevelForRef, isOpenAiFamilyRef, providerForModelRef, type ModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
@@ -285,7 +286,10 @@ export function attachLoopGuardTurnTracking(
 }
 
 export async function createSessionWithDispose(options: CreateSessionOptions = {}): Promise<CreateSessionResult> {
-  const resolved = resolveProfile(getConfig().models, options.profile)
+  // Profiles resolve against the session's effective models: the global block
+  // with any `modelOverrides` matching this session's channel layered on top.
+  const models = effectiveModels(getConfig(), options.origin)
+  const resolved = resolveProfile(models, options.profile)
   // Unknown profiles silently fall back to `default`. The fallback is by design
   // (see `resolveProfile`) and surfacing a warning here just creates noise on
   // every memory-logger / dreaming subagent spawn for advanced users who know
@@ -552,7 +556,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
   // Read live so a reloaded `models` lands on the next session without a
   // container restart.
-  const thinkingLevel = resolveSessionThinkingLevel(getConfig().models, resolved, activeRef)
+  const thinkingLevel = resolveSessionThinkingLevel(models, resolved, activeRef)
   const { session } = await createAgentSession({
     model,
     modelRuntime,
