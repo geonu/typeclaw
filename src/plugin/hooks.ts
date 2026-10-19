@@ -67,6 +67,7 @@ export type HookBus = {
       owner: string
       key: string
       tools: ReadonlySet<string>
+      skipOnCheckError?: true
       check: (
         event: Readonly<ToolBeforeEvent>,
       ) =>
@@ -231,6 +232,7 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
               result = await guard.check(event)
             } catch (err) {
               reg.logger.error(`guard ${guard.key} threw: ${err instanceof Error ? err.message : String(err)}`)
+              if (guard.skipOnCheckError) continue
               return { block: true, reason: `guard ${guard.key} failed closed after its check threw` }
             }
             if (result === undefined) continue

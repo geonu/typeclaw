@@ -1238,6 +1238,45 @@ describe('wrapSystemTool', () => {
     expect(errors).toEqual(['guard brokenCheck threw: unexpected failure'])
   })
 
+  test('a throwing hygiene guard marked skipOnCheckError is logged and skipped', async () => {
+    const calls: string[] = []
+    const errors: string[] = []
+    const tool = definePiTool({
+      name: 'look_at',
+      label: 'look_at',
+      description: '',
+      parameters: Type.Object({}),
+      async execute() {
+        calls.push('tool')
+        return { content: [], details: undefined }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'guard',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: (message) => errors.push(message) },
+      {},
+    )
+    const guards: InternalGuard[] = [
+      {
+        owner: 'guard',
+        key: 'brokenHygiene',
+        tools: new Set(['look_at']),
+        skipOnCheckError: true,
+        check: () => {
+          throw new Error('unexpected failure')
+        },
+      },
+    ]
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks, guards })
+
+    await wrapped.execute('c', {}, undefined, undefined, {} as never)
+
+    expect(calls).toEqual(['tool'])
+    expect(errors).toEqual(['guard brokenHygiene threw: unexpected failure'])
+  })
+
   test('write system tool runs the registered skill guard after an earlier hook mutation', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-plugin-tools-'))
     await mkdir(path.join(agentDir, 'memory', 'skills'), { recursive: true })

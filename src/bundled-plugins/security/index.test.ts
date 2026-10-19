@@ -300,6 +300,44 @@ describe('security plugin wiring', () => {
     expect(evaluatedLaterCheck).toBe(false)
   })
 
+  test('skips only a heuristic guard whose evaluation throws, logging it for the operator', async () => {
+    const errors: string[] = []
+    const logger: PluginLogger = { info: () => {}, warn: () => {}, error: (message) => errors.push(message) }
+    const permissions: PermissionService = {
+      ...noopPermissionService,
+      has: (_origin, permission) => {
+        if (permission === SECURITY_PERMISSIONS.bypassSsrf) throw new Error('ssrf check broke')
+        return false
+      },
+    }
+    const exports = await securityPlugin.plugin({ ...pluginContext('/agent'), logger, permissions })
+    const hook = exports.hooks?.['tool.before']
+    if (!hook) throw new Error('security plugin did not register tool.before')
+
+    const fetchResult = await hook(toolEvent('web_fetch', { url: 'https://example.com/api' }), hookContext('/agent'))
+    const envResult = await hook(toolEvent('bash', { command: 'env' }), hookContext('/agent'))
+
+    expect(fetchResult).toBeUndefined()
+    expect(errors.join('\n')).toContain('guard=ssrf')
+    expect(envResult?.reason).toContain('secretExfilBash')
+  })
+
+  test('still fails closed when a promotion guard evaluation throws', async () => {
+    const permissions: PermissionService = {
+      ...noopPermissionService,
+      has: (_origin, permission) => {
+        if (permission === SECURITY_PERMISSIONS.bypassRolePromotion) throw new Error('role check broke')
+        return false
+      },
+    }
+    const hook = await toolBeforeHookWith(permissions)
+
+    const result = await hook(toolEvent('web_fetch', { url: 'https://example.com/api' }), hookContext('/agent'))
+
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toMatch(/internal security guard error/i)
+  })
+
   test('blocks a wrapped tool through HookBus when security evaluation throws internally', async () => {
     const inaccessible = '/agent/protected/MEMORY.md'
     const errors: string[] = []
