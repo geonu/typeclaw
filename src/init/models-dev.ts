@@ -52,6 +52,10 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string | null> = {
   // `kimi-for-coding` alias is surfaced regardless of upstream membership.
   'moonshot-coding': 'moonshot',
   opengateway: null,
+  // models.dev's `inception` catalog lists only Mercury 2 / 2.5 / Edit 2, which
+  // are retired for new users or don't serve chat. Surface the curated
+  // Mercury 3 record alone.
+  inception: null,
 }
 
 function upstreamProviderFor(

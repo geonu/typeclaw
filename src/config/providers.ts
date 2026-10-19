@@ -1405,6 +1405,60 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // Inception (Mercury diffusion LLMs) official API. OpenAI-compatible
+  // /v1/chat/completions with Bearer auth, so it goes through pi-ai's
+  // `openai-completions` adapter with a custom baseUrl. api-key only.
+  //
+  // Only Mercury 3 is listed: Mercury 2 / 2.5 are closed to new users as of
+  // 2026-10-19 and shut down for existing ones on 2026-11-15. Mercury Voice is
+  // enterprise-gated, Mercury Decide and Mercury Edit 2 don't serve chat.
+  //
+  // Cost is the standard rate from docs.inceptionlabs.ai/get-started/models
+  // as of 2026-10-20, not the 50%-off launch price, so the record doesn't go
+  // stale when the promotion ends. No cache-write surcharge is published.
+  //
+  // reasoning_effort accepts instant/low/medium/high and defaults to `low`
+  // when omitted. `off` maps to `instant` so a non-reasoning turn really drops
+  // to the fastest mode instead of silently reasoning at the default.
+  //
+  // The OpenAPI spec (api.inceptionlabs.ai/openapi.json) documents neither
+  // `store` nor the `developer` role, and pi-ai doesn't auto-detect compat
+  // for this baseUrl, so both are turned off.
+  inception: {
+    id: 'inception',
+    name: 'Inception (Mercury)',
+    baseUrl: 'https://api.inceptionlabs.ai/v1',
+    auth: ['api-key'],
+    apiKeyEnv: 'INCEPTION_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'mercury-3': {
+        id: 'mercury-3',
+        name: 'Mercury 3',
+        api: 'openai-completions',
+        provider: 'inception',
+        baseUrl: 'https://api.inceptionlabs.ai/v1',
+        reasoning: true,
+        thinkingLevelMap: {
+          off: 'instant',
+          minimal: 'low',
+          low: 'low',
+          medium: 'medium',
+          high: 'high',
+          xhigh: 'high',
+        },
+        input: ['text'],
+        cost: { input: 0.2, output: 0.7, cacheRead: 0.02, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 131072,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true,
+        },
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
@@ -1491,6 +1545,11 @@ export const KNOWN_PROVIDER_VENDORS = {
       moonshot: { label: 'Pay-as-you-go', hint: 'Moonshot Open Platform API billing' },
       'moonshot-coding': { label: 'Coding Plan', hint: 'Kimi Code subscription' },
     },
+  },
+  inception: {
+    id: 'inception',
+    name: 'Inception (Mercury)',
+    providers: ['inception'],
   },
   // Listed last because it is a reseller, not a lab: a user who knows they want
   // Anthropic should land on the Anthropic row, not the gateway that proxies it.

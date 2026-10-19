@@ -32,6 +32,8 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, Probe>> = {
   // validation, because init would vouch for a key that cannot complete a single
   // request. /v1/me is the cheapest endpoint that actually 401s on a bad key.
   opengateway: { url: 'https://apis.opengateway.ai/v1/me', authHeader: 'bearer', successShape: 'json-object' },
+  // inception has no probe: its /v1/models is public and returns 200 for any
+  // key, so probing it would vouch for garbage.
 }
 
 // When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
@@ -194,6 +196,7 @@ export const API_KEY_DASHBOARD_URL: Partial<Record<KnownProviderId, string>> = {
   moonshot: 'https://platform.moonshot.ai/console/api-keys',
   'moonshot-coding': 'https://www.kimi.com/code/console',
   opengateway: 'https://opengateway.ai/docs/reference/guides/authentication',
+  inception: 'https://platform.inceptionlabs.ai',
 }
 
 // MiniMax sells the same `minimax` provider under two billing surfaces that

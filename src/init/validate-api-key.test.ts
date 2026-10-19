@@ -337,8 +337,11 @@ describe('validateApiKey', () => {
 describe('drift guard', () => {
   test('every api-key-supporting provider either has a probe or is an explicit OAuth-only exception', () => {
     const probes = new Set(providersWithApiKeyProbe())
-    const apiKeyProviders = (Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]).filter((id) =>
-      supportsApiKey(KNOWN_PROVIDERS[id]),
+    // Inception serves /v1/models publicly and has no authenticated GET, so a
+    // probe would accept any string.
+    const noAuthenticatedProbe = new Set<KnownProviderId>(['inception'])
+    const apiKeyProviders = (Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]).filter(
+      (id) => supportsApiKey(KNOWN_PROVIDERS[id]) && !noAuthenticatedProbe.has(id),
     )
     for (const id of apiKeyProviders) {
       expect(probes.has(id), `provider "${id}" supports api-key but has no entry in PROVIDER_PROBE`).toBe(true)
