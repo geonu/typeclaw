@@ -1392,7 +1392,7 @@ describe('writeDockerAssets', () => {
     // Common cache-optimization mistake: mounting ~/.agent-browser/browsers
     // would make rebuilds faster but ship a broken image, because cache
     // mounts are excluded from the final image. The Chrome for Testing
-    // binary lives at ~/.agent-browser/browsers/chrome-<version>/chrome and
+    // binary lives under .agent-browser/browsers/chrome-<version>/ and
     // the runtime calls into it directly; if it disappears, the agent's
     // browser tool fails to launch on every container start.
     expect(dockerfile).not.toMatch(/--mount=type=cache,target=[^\s]*\.agent-browser\/browsers/)
@@ -1428,7 +1428,7 @@ describe('writeDockerAssets', () => {
     // since `agent-browser install` would fail (no upstream linux/arm64 binary).
     expect(dockerfile).toMatch(/\$TARGETARCH.*=.*["']?arm64["']?/)
     expect(dockerfile).toMatch(/apt-get install[^\n]*\bchromium\b/)
-    expect(dockerfile).toMatch(/"executablePath"\s*:\s*"\/usr\/bin\/chromium"/)
+    expect(dockerfile).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome')
   })
 
   test('returns devMode true when typeclaw dep is a file: spec', async () => {

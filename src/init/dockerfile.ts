@@ -1085,18 +1085,37 @@ RUN ARCH_TARBALL="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-linux-gnu;
  && rm curl-impersonate.tar.gz \\
  && /usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version > /dev/null`
 
-const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable, arm64 only): point agent-browser at the apt-installed
-# chromium. Independent of the npm install below so it stays cached across
+// Everything agent-browser needs at runtime lives under /usr: the model's
+// bwrap sandbox binds /usr but not /root, and its PATH has no `node`.
+const AGENT_BROWSER_ROOT = '/usr/local/lib/typeclaw-agent-browser'
+const AGENT_BROWSER_PACKAGE = `${AGENT_BROWSER_ROOT}/install/global/node_modules/agent-browser`
+// Stable browser path for both arches: apt chromium on arm64, Chrome for
+// Testing on amd64 (linked in Layer 5).
+const AGENT_BROWSER_CHROME = `${AGENT_BROWSER_ROOT}/chrome`
+
+const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable): point agent-browser at a browser path visible inside the
+# sandbox. arm64 uses the apt chromium; amd64 links Chrome for Testing in
+# Layer 5. Independent of the npm install below so it stays cached across
 # agent-browser version bumps.
 RUN if [ "$TARGETARCH" = "arm64" ]; then \\
-      mkdir -p /root/.agent-browser \\
-   && printf '%s\\n' '{"executablePath":"/usr/bin/chromium"}' > /root/.agent-browser/config.json; \\
+      mkdir -p ${AGENT_BROWSER_ROOT} \\
+   && ln -sf /usr/bin/chromium ${AGENT_BROWSER_CHROME}; \\
     fi`
 
+// Layer 4: the npm tarball ships the native binaries without the exec bit and
+// the JS launcher chmods them on first run, which fails on the read-only /usr
+// inside the sandbox, so set it at build time. The launcher runs under bun
+// because the image's `node` fallback is outside the sandbox PATH, and it
+// defaults the browser path itself because the sandbox clears image ENV.
+// An inherited AGENT_BROWSER_EXECUTABLE_PATH (operator .env) still wins.
 const renderAgentBrowserInstallLayer = (buildKit: boolean): string =>
-  `# Layer 4 (volatile): install agent-browser globally so it survives the
-# runtime bind-mount over /agent/node_modules.
-RUN ${bunCacheMount(buildKit)}bun install -g agent-browser@^0.33.0`
+  `# Layer 4 (volatile): install agent-browser under /usr so it survives the
+# runtime bind-mount over /agent/node_modules and stays visible in bwrap.
+RUN ${bunCacheMount(buildKit)}BUN_INSTALL=${AGENT_BROWSER_ROOT} BUN_INSTALL_BIN=${AGENT_BROWSER_ROOT}/bin BUN_INSTALL_CACHE_DIR=/root/.bun/install/cache bun install -g agent-browser@^0.33.0 \\
+ && chmod 0755 ${AGENT_BROWSER_PACKAGE}/bin/agent-browser-linux-* \\
+ && printf '%s\\n' '#!/bin/sh' ': "\${AGENT_BROWSER_EXECUTABLE_PATH:=${AGENT_BROWSER_CHROME}}"' 'export AGENT_BROWSER_EXECUTABLE_PATH' 'exec /usr/local/bin/bun ${AGENT_BROWSER_PACKAGE}/bin/agent-browser.js "$@"' > /usr/local/bin/agent-browser \\
+ && chmod 0755 /usr/local/bin/agent-browser \\
+ && agent-browser --version > /dev/null`
 
 // Layer 4.5: shim the agent-browser binary with a wrapper that calls
 // \`agent-browser close\` before \`open\`/\`goto\`/\`navigate\` when headed
@@ -1219,7 +1238,8 @@ exec env _TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1 "$real" "$@"
 TYPECLAW_AGENT_BROWSER_WRAPPER_EOF`
 
 // Layer 5: download the pinned Chrome for Testing build into
-// ~/.agent-browser/browsers/. NO cache mount on that path because the
+// $HOME/.agent-browser/browsers/, with HOME pointed under /usr so the
+// sandbox can see it, then link it to the stable path. NO cache mount on that path because the
 // runtime needs the binary in the image, and no apt cache mount either
 // because nothing in this layer runs apt.
 //
@@ -1233,7 +1253,10 @@ TYPECLAW_AGENT_BROWSER_WRAPPER_EOF`
 const renderChromeForTestingLayer = (): string =>
   `# Layer 5 (heavy, amd64 only): Chrome for Testing download.
 RUN if [ "$TARGETARCH" != "arm64" ]; then \\
-      agent-browser install; \\
+      HOME=${AGENT_BROWSER_ROOT} agent-browser install \\
+   && chrome="$(find ${AGENT_BROWSER_ROOT}/.agent-browser/browsers -type f -name chrome -perm -u+x | head -n 1)" \\
+   && [ -n "$chrome" ] \\
+   && ln -sf "$chrome" ${AGENT_BROWSER_CHROME}; \\
     fi`
 
 function renderOmoCliInstallLayer(enabled: boolean): string {
