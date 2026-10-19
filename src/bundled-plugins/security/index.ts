@@ -141,6 +141,26 @@ function reportInternalGuardError(logger: PluginLogger, guard: string, error: un
   logger.error(`internal security guard error guard=${guard}${code}: ${detail}`)
 }
 
+// The medium-tier heuristic guards (secretExfilBash/Read, ssrf,
+// sessionSearchSecrets) cover non-canonical surfaces: canonical credential
+// stores stay masked by the bash sandbox and privateSurfaceRead regardless.
+// A bug in one of them must not deny every tool call it inspects, so its
+// internal error is logged for the operator and only that check is skipped.
+// Promotion, taint, private-surface, and high-tier checks keep failing closed
+// through the hook-level catch.
+function runHeuristicGuard(
+  logger: PluginLogger,
+  guard: string,
+  run: () => SecurityBlock | undefined,
+): SecurityBlock | undefined {
+  try {
+    return run()
+  } catch (error) {
+    reportInternalGuardError(logger, guard, error)
+    return undefined
+  }
+}
+
 export default definePlugin({
   permissions: Object.values(SECURITY_PERMISSIONS),
   // No wildcard exclusions: owner bypasses every security tier by default
@@ -239,16 +259,15 @@ export default definePlugin({
               )
           if (gitRemoteTaintedResult) return gitRemoteTaintedResult
 
-          const secretExfilBashResult = canBypass(
-            GUARD_SECRET_EXFIL_BASH_SEVERITY,
-            SECURITY_PERMISSIONS.bypassSecretExfilBash,
+          const secretExfilBashResult = runHeuristicGuard(ctx.logger, 'secretExfilBash', () =>
+            canBypass(GUARD_SECRET_EXFIL_BASH_SEVERITY, SECURITY_PERMISSIONS.bypassSecretExfilBash)
+              ? undefined
+              : withPermissionHint(
+                  checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
+                  SECURITY_PERMISSIONS.bypassSecretExfilBash,
+                  GUARD_SECRET_EXFIL_BASH_SEVERITY,
+                ),
           )
-            ? undefined
-            : withPermissionHint(
-                checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
-                SECURITY_PERMISSIONS.bypassSecretExfilBash,
-                GUARD_SECRET_EXFIL_BASH_SEVERITY,
-              )
           if (secretExfilBashResult) return secretExfilBashResult
 
           const gitExfilResult = canBypass(GUARD_GIT_EXFIL_SEVERITY, SECURITY_PERMISSIONS.bypassGitExfil)
@@ -263,16 +282,15 @@ export default definePlugin({
             if (pushGrant.kind !== 'allow') return withPushGrantHint(gitExfilResult, pushGrant)
           }
 
-          const secretExfilReadResult = canBypass(
-            GUARD_SECRET_EXFIL_READ_SEVERITY,
-            SECURITY_PERMISSIONS.bypassSecretExfilRead,
+          const secretExfilReadResult = runHeuristicGuard(ctx.logger, 'secretExfilRead', () =>
+            canBypass(GUARD_SECRET_EXFIL_READ_SEVERITY, SECURITY_PERMISSIONS.bypassSecretExfilRead)
+              ? undefined
+              : withPermissionHint(
+                  checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
+                  SECURITY_PERMISSIONS.bypassSecretExfilRead,
+                  GUARD_SECRET_EXFIL_READ_SEVERITY,
+                ),
           )
-            ? undefined
-            : withPermissionHint(
-                checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
-                SECURITY_PERMISSIONS.bypassSecretExfilRead,
-                GUARD_SECRET_EXFIL_READ_SEVERITY,
-              )
           if (secretExfilReadResult) return secretExfilReadResult
 
           // Not severity-bypassed: private directories remain role-derived,
@@ -293,25 +311,26 @@ export default definePlugin({
           )
           if (privateSurfaceReadResult) return privateSurfaceReadResult
 
-          const ssrfResult = canBypass(GUARD_SSRF_SEVERITY, SECURITY_PERMISSIONS.bypassSsrf)
-            ? undefined
-            : withPermissionHint(
-                checkSsrfGuard({ tool: event.tool, args: event.args }),
-                SECURITY_PERMISSIONS.bypassSsrf,
-                GUARD_SSRF_SEVERITY,
-              )
+          const ssrfResult = runHeuristicGuard(ctx.logger, 'ssrf', () =>
+            canBypass(GUARD_SSRF_SEVERITY, SECURITY_PERMISSIONS.bypassSsrf)
+              ? undefined
+              : withPermissionHint(
+                  checkSsrfGuard({ tool: event.tool, args: event.args }),
+                  SECURITY_PERMISSIONS.bypassSsrf,
+                  GUARD_SSRF_SEVERITY,
+                ),
+          )
           if (ssrfResult) return ssrfResult
 
-          const sessionSearchSecretsResult = canBypass(
-            GUARD_SESSION_SEARCH_SECRETS_SEVERITY,
-            SECURITY_PERMISSIONS.bypassSessionSearchSecrets,
+          const sessionSearchSecretsResult = runHeuristicGuard(ctx.logger, 'sessionSearchSecrets', () =>
+            canBypass(GUARD_SESSION_SEARCH_SECRETS_SEVERITY, SECURITY_PERMISSIONS.bypassSessionSearchSecrets)
+              ? undefined
+              : withPermissionHint(
+                  checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
+                  SECURITY_PERMISSIONS.bypassSessionSearchSecrets,
+                  GUARD_SESSION_SEARCH_SECRETS_SEVERITY,
+                ),
           )
-            ? undefined
-            : withPermissionHint(
-                checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
-                SECURITY_PERMISSIONS.bypassSessionSearchSecrets,
-                GUARD_SESSION_SEARCH_SECRETS_SEVERITY,
-              )
           if (sessionSearchSecretsResult) return sessionSearchSecretsResult
 
           const systemPromptLeakResult = canBypass(
