@@ -688,7 +688,7 @@ function raceSubagentCompletion(
 // The tags a subagent can use to wrap its structured result: the reviewer's
 // `<review>`, the researcher's `<report>`. Fixed literals — never user input —
 // so the per-tag patterns below are injection-safe.
-type FinalBlockTag = 'review' | 'report'
+type FinalBlockTag = 'review' | 'report' | 'qa'
 
 // A complete <TAG>...</TAG> block. The block IS the result: same-message
 // preamble/trailing chatter or a later summary turn must not become the captured
@@ -699,6 +699,7 @@ type FinalBlockTag = 'review' | 'report'
 const FINAL_BLOCK_RE: Readonly<Record<FinalBlockTag, RegExp>> = {
   review: /<review>[\s\S]*?<\/review>/g,
   report: /<report>[\s\S]*?<\/report>/g,
+  qa: /<qa>[\s\S]*?<\/qa>/g,
 }
 
 function lastTaggedBlock(text: string, tag: FinalBlockTag): string | null {
@@ -725,7 +726,11 @@ function lastTaggedBlock(text: string, tag: FinalBlockTag): string | null {
 // only catches children that declare none.
 const DRAIN_MAX_CHILD_WAIT_MS = 600_000
 
-const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { researcher: 'report', reviewer: 'review' }
+const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = {
+  researcher: 'report',
+  reviewer: 'review',
+  qa: 'qa',
+}
 
 // Bounded re-prompt budget for the required-block guard, mirroring the channel
 // empty-response guard's MAX_EMPTY_TURN_RETRIES. A subagent that owes a result
@@ -739,9 +744,11 @@ const MAX_REQUIRED_BLOCK_RETRIES = 2
 // The tail is tag-specific: each block has different mandatory child fields.
 function renderRequiredBlockRetryNudge(tag: FinalBlockTag): string {
   const tail =
-    tag === 'report'
-      ? 'in particular do NOT call write_report. Do NOT continue researching or spawn more subagents.\n\nIf the report file was not successfully written, still emit the block: set <report_file>none</report_file>, <confidence>low</confidence> (explain the report artifact was not completed), and note in <open_questions> that the run should be retried.'
-      : `Do NOT re-run gh, diff reads, or spawn more subagents.\n\nEmit the block from the analysis you have already done: include your <summary>, whatever <finding> items you can support with evidence, and a <verdict> (approve | request-changes | comment). Only use a real verdict if you actually reached one. If you could NOT analyze enough to decide, do NOT invent a verdict — set <verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict> exactly (this signals an incomplete review; the parent will not treat it as approve/request-changes/comment, even on a re-review).`
+    tag === 'qa'
+      ? `Do NOT run more commands or start more processes.\n\nEmit the block from the scenarios you have already executed: <summary>, <target>, every <scenario> with the verdict you actually observed (mark unexecuted ones not-run), <findings>, <coverage_gaps>, and a <verdict>. If required scenarios never ran, the verdict is inconclusive, never pass.`
+      : tag === 'report'
+        ? 'in particular do NOT call write_report. Do NOT continue researching or spawn more subagents.\n\nIf the report file was not successfully written, still emit the block: set <report_file>none</report_file>, <confidence>low</confidence> (explain the report artifact was not completed), and note in <open_questions> that the run should be retried.'
+        : `Do NOT re-run gh, diff reads, or spawn more subagents.\n\nEmit the block from the analysis you have already done: include your <summary>, whatever <finding> items you can support with evidence, and a <verdict> (approve | request-changes | comment). Only use a real verdict if you actually reached one. If you could NOT analyze enough to decide, do NOT invent a verdict — set <verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict> exactly (this signals an incomplete review; the parent will not treat it as approve/request-changes/comment, even on a re-review).`
   return `---
 **[SYSTEM MESSAGE — not from a human]**
 
@@ -807,6 +814,24 @@ ${headline}. The ${name} subagent could not complete a review in this run: ${cau
 </findings>
 <verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict>
 </review>`
+  }
+  if (tag === 'qa') {
+    return `<qa>
+<summary>
+The ${name} subagent could not complete a QA run: ${cause}. No scenario results are reliable — do not treat any earlier text as a pass. Rerun QA${providerFailed ? ' once the provider recovers' : ''}.
+</summary>
+<target>
+unknown
+</target>
+<scenarios>
+</scenarios>
+<findings>
+</findings>
+<coverage_gaps>
+The entire QA request remains untested.
+</coverage_gaps>
+<verdict>inconclusive</verdict>
+</qa>`
   }
   return `<${tag}>\nThe ${name} subagent could not produce the required <${tag}> block (${cause}) and could not recover; rerun it or inspect the transcript.\n</${tag}>`
 }

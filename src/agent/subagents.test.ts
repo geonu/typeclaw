@@ -1600,6 +1600,41 @@ describe('startSubagent', () => {
     expect(result.finalMessage).toContain(`<verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict>`)
   })
 
+  async function runQa(turns: { role?: string; content: unknown }[][]) {
+    const { session, prompts } = scriptedResearcherSession(turns)
+    const registry = { qa: { systemPrompt: 'X' } satisfies Subagent }
+    const { completion } = startSubagent('qa', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_qa',
+    })
+    const result = await completion
+    return { result, prompts }
+  }
+
+  test('qa: the last <qa> block is returned without surrounding prose', async () => {
+    const qa = '<qa>\n<verdict>pass</verdict>\n</qa>'
+    const { result, prompts } = await runQa([[{ role: 'assistant', content: `Ran everything.\n${qa}\nDone.` }]])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(qa)
+    expect(prompts).toHaveLength(1)
+  })
+
+  test('qa: exhausting the nudge budget installs an inconclusive fallback, never a pass', async () => {
+    const { result, prompts } = await runQa([
+      [{ role: 'assistant', content: 'building the project' }],
+      [{ role: 'assistant', content: 'still running tests' }],
+      [{ role: 'assistant', content: 'still nothing' }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true (guard, not silent drop), got error: ${result.error}`)
+    expect(prompts).toHaveLength(3)
+    expect(prompts[1]).toContain('Do NOT call any tools')
+    expect(result.finalMessage).toContain('<verdict>inconclusive</verdict>')
+    expect(result.finalMessage).not.toContain('<verdict>pass</verdict>')
+  })
+
   type FailingTurn =
     | { role?: string; content?: unknown; stopReason?: string; errorMessage?: string }
     | { throws: string }
