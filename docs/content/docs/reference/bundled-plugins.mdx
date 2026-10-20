@@ -13,7 +13,7 @@ Nine plugins ship with TypeClaw and load automatically. You don't list them in `
 | `guard`           | none            | managed-file guards — blocks accidental overwrites of `typeclaw.json`, `cron.json`, `MEMORY.md` outside the right subagent                                           |
 | `memory`          | `memory`        | three subagents (`memory-logger`, `dreaming`, daily-stream rotator); writes daily memory streams and consolidates them into `MEMORY.md` and muscle-memory skills     |
 | `backup`          | `backup`        | auto-commits `sessions/` and `memory/` on idle; LLM-generated commit subjects                                                                                        |
-| `agent-browser`   | `agentBrowser`  | headed Chrome under Xvfb for bot-resistant browsing; dashboard host-forward                                                                                          |
+| `agent-browser`   | `agentBrowser`  | agent-browser skill and dashboard host-forward; loads only when `browser.engines` lists `agent-browser` (the CLI and its Chrome stay in every image)                 |
 | `managed-browser` | none            | starts the shared Chrome for `browser.engines`/`browser.extensions`, ships each engine's skill, and hands bash a token-gated CDP URL for roles with `browser.shared` |
 | `explorer`        | none            | workspace exploration tools — file tree, glob, grep tuned for agent ergonomics                                                                                       |
 | `scout`           | none            | web-research subagent that scrapes and summarizes                                                                                                                    |

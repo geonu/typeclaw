@@ -199,7 +199,7 @@ const dockerfileObjectSchema = z.object({
   tmux: dockerfileFeatureSchema.default(true),
   // `fonts-noto-cjk` is an ~89MB metapackage that makes Chromium render
   // Korean/Japanese/Chinese glyphs correctly in screenshots, `page.pdf()`,
-  // and any other raster output the agent-browser plugin produces. Without
+  // and any other raster output a browser engine produces. Without
   // it CJK text renders as silent tofu boxes (□□□) — a confusing failure an
   // agent cannot self-diagnose from a screenshot it took itself.
   //
@@ -222,7 +222,7 @@ const dockerfileObjectSchema = z.object({
   cloudflared: z.boolean().default(false),
   // Install xvfb so the entrypoint shim can spawn an Xvfb virtual X
   // server and export DISPLAY, giving headed Chrome (agent-browser
-  // --headed, Playwright headful) a real X11 display to connect to.
+  // --headed, the managed shared browser, Playwright headful) a real X11 display to connect to.
   // Default `true` because modern bot detection (Akamai/Cloudflare Bot
   // Manager) fingerprints `--headless` and `--headless=new` regardless
   // of UA spoof, and headed-via-Xvfb is the cheapest path to a passing

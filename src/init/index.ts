@@ -760,8 +760,8 @@ function addCustomModel(
   customModels[ref] = meta ?? {}
 }
 
-// agent-browser ships in every agent: the bundled SKILL.md (src/skills/
-// agent-browser/SKILL.md) is a discovery stub that calls `agent-browser
+// agent-browser ships in every agent: the bundled SKILL.md (src/bundled-plugins/
+// agent-browser/skills/agent-browser/SKILL.md) is a discovery stub that calls `agent-browser
 // skills get core` at runtime, so the CLI must be installed for the skill
 // to function. The Dockerfile pre-downloads Chromium too, so the agent
 // can drive a browser without any first-run setup.
