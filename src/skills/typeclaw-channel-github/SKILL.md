@@ -236,7 +236,7 @@ A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. The
 - `comment` → post the summary as the substantive top-level PR reply with `channel_reply`. **Exception — re-reviews:** if an unresolved blocking obligation exists, a top-level comment discharges neither form of block. Use `post_github_review` to land a fresh formal verdict instead.
 - `request-changes` → call `post_github_review({ event: "REQUEST_CHANGES", body: "<summary>" })`. This combination is rare; faithfully encode the reviewer's verdict.
 
-The bundled `agent-browser` is **not** for PR reviews — `gh api` is faster and more reliable. Only use the browser when the API genuinely can't reach what you need.
+The browser (`agent-browser` or any other enabled engine) is **not** for PR reviews — `gh api` is faster and more reliable. Only use the browser when the API genuinely can't reach what you need.
 
 ## Resolving review threads you authored
 

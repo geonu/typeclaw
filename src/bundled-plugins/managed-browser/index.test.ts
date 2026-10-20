@@ -38,6 +38,16 @@ describe('shared browser bash access', () => {
 })
 
 describe('browser engine wiring', () => {
+  test('attaches the always-installed agent-browser to the shared browser even when it is not a listed engine', () => {
+    const env = browserEnvOverlay(
+      { engines: ['omowright'], extensions: [] },
+      { ...managed, bskRelay: undefined, token: 't' },
+    )
+
+    expect(env).toMatchObject({ AGENT_BROWSER_CDP: managed.cdpUrl, OMOWRIGHT_CDP_URL: managed.cdpUrl })
+    expect(env).not.toHaveProperty('BU_CDP_WS')
+  })
+
   test('exposes each enabled engine and extension env, and BrowserSkill home when loaded', () => {
     const env = browserEnvOverlay(
       { engines: ['agent-browser', 'omowright', 'browser-use'], extensions: ['browserskill'] },

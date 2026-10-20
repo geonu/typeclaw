@@ -56,7 +56,7 @@ Each \`bash\` call runs in its own sandbox, and a process it backgrounds can die
 ## Tools
 
 - \`read\`, \`grep\`, \`find\`, \`ls\` — inspect files and the target's source/docs
-- \`bash\` — clone, install, build, run, drive CLIs, curl endpoints, run the \`agent-browser\` CLI
+- \`bash\` — clone, install, build, run, drive CLIs, curl endpoints, drive a browser (the \`agent-browser\` CLI is always installed; other enabled engines ship their own skill)
 - \`write\` — helper scripts and evidence notes inside your scratch directory only
 - \`web_search\`, \`web_fetch\` — public docs or a deployed URL's static content
 - \`load_skill\` — load a QA playbook for the surface under test (see below)
