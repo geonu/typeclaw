@@ -13,7 +13,13 @@ OmOWright is a JavaScript library with the Playwright API shape (`page.goto`, `p
 // save as /tmp/browse.mjs, run: bun /tmp/browse.mjs
 import { compactSnapshot, connect, createAgentTabs } from '/usr/local/lib/typeclaw-browser/omowright/index.js'
 
-const browser = await connect(process.env.OMOWRIGHT_CDP_URL)
+const url = process.env.OMOWRIGHT_CDP_URL
+// The relay requires the token on every request; omowright drops the URL query
+// for HTTP discovery (listTargets), so pass it as an Authorization header too.
+const token = new URL(url).searchParams.get('token')
+const browser = await connect(url, {
+  client: { authorizer: { resolveAuthorization: async () => `Bearer ${token}` } },
+})
 const tabs = createAgentTabs(browser) // background tabs that never steal focus
 const page = await tabs.open('https://example.com')
 console.log(compactSnapshot(await page.snapshot())) // refs like [ref=e1]
