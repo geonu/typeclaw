@@ -35,7 +35,7 @@ import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { getConfig, resolveModel } from '@/config'
 import { effectiveModels } from '@/config/model-overrides'
-import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
+import { CORE_PERMISSIONS, type MatchableOrigin, type PermissionService } from '@/permissions'
 import type { ChannelOutboundBeforeEvent, ChannelOutboundOrigin, HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
@@ -1694,10 +1694,10 @@ export type ChannelRouter = {
   // session was found and the reminder was queued, `no-live-session`
   // otherwise. Used by the subagent-completion bridge in
   // src/run/index.ts; safe for tests to call directly via a fake router.
-  // Delegate work to the session that owns `target` (same adapter) instead of
+  // Delegate work to the live session that owns `target` on any adapter instead of
   // posting there blind. Routed as a synthetic inbound authored by the source
-  // turn's requester, so it queues behind any running turn, cold-starts with
-  // history prefetch, and re-checks the requester's role in the target.
+  // turn's requester, so it queues behind any running turn and re-checks the
+  // requester's target role without linking identities across platforms.
   handoff: (args: { fromSessionId: string; target: ChannelKey; text: string }) => Promise<ChannelHandoffResult>
   searchSessions: (args: SessionSearchArgs) => SessionSearchTarget[]
   injectSubagentCompletionReminder: (args: {
@@ -4465,7 +4465,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(live.room?.parentChat !== undefined ? { parentChat: live.room.parentChat } : {}),
       ...(live.room?.parentChatName !== undefined ? { parentChatName: live.room.parentChatName } : {}),
       ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
-      lastInboundAuthorAdapter: live.currentTurnAuthorAdapter,
+      ...(live.currentTurnAuthorAdapter !== live.key.adapter
+        ? { lastInboundAuthorAdapter: live.currentTurnAuthorAdapter }
+        : {}),
       ...(live.currentTurnReactionRef !== null ? { reactionRef: live.currentTurnReactionRef } : {}),
       participants: live.participants,
       ...(membership !== null ? { membership } : {}),
@@ -8888,13 +8890,32 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'unknown-command', name: lowered }
   }
 
-  const acceptBackgroundResponse: ChannelRouter['acceptBackgroundResponse'] = async (args) =>
-    backgroundObligations.withTargetLane(args.key, async () => {
+  const acceptBackgroundResponse: ChannelRouter['acceptBackgroundResponse'] = async (args) => {
+    // Freeze the authenticated live actor before entering the asynchronous lane.
+    // Legacy callers without a live parent retain their supplied provenance.
+    const live = liveSessions.get(channelKeyId(args.key))
+    let principal: MatchableOrigin | undefined
+    if (live !== undefined && !live.destroyed && live.sessionId === args.parentSessionId) {
+      const authorId = live.currentTurnAuthorId ?? live.lastTurnAuthorId
+      const authorAdapter =
+        live.currentTurnAuthorId !== null ? live.currentTurnAuthorAdapter : live.lastTurnAuthorAdapter
+      principal = {
+        kind: 'channel',
+        adapter: live.key.adapter,
+        workspace: live.key.workspace,
+        chat: live.key.chat,
+        ...(live.room?.parentChat !== undefined ? { parentChat: live.room.parentChat } : {}),
+        ...(authorId !== null ? { lastInboundAuthorId: authorId } : {}),
+        ...(authorAdapter !== live.key.adapter ? { lastInboundAuthorAdapter: authorAdapter } : {}),
+      }
+    }
+    return backgroundObligations.withTargetLane(args.key, async () => {
       await ready
       inboundJournal.assertAvailable()
-      const row = await backgroundObligations.accept(args)
+      const row = await backgroundObligations.accept({ ...args, ...(principal !== undefined ? { principal } : {}) })
       return { obligationId: row.obligationId, generation: row.generation }
     })
+  }
 
   const suppressUnstartedBackgroundResponse: ChannelRouter['suppressUnstartedBackgroundResponse'] = async (
     ref,

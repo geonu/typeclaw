@@ -123,6 +123,7 @@ export async function handoffFixture(
     return state
   }
   return {
+    agentDir: dir,
     router,
     permissions,
     sessions,
