@@ -115,10 +115,22 @@ export type StatusSnapshot = {
 }
 
 export class LiveSubagentRegistry {
+  private readonly listeners = new Set<(parentSessionId: string | undefined) => void>()
   private readonly entries = new Map<string, LiveSubagent>()
   private readonly events = new Map<string, SubagentProgressEvent[]>()
   private readonly capturedFinalMessages = new Map<string, string>()
   private readonly pendingWorkKeyRegistrations = new Map<string, Set<PendingWorkKeyRegistration>>()
+
+  subscribe(listener: (parentSessionId: string | undefined) => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  private notify(parentSessionId: string | undefined): void {
+    for (const listener of this.listeners) listener(parentSessionId)
+  }
 
   register(live: LiveSubagent): void {
     if (this.entries.has(live.taskId)) {
@@ -126,6 +138,7 @@ export class LiveSubagentRegistry {
     }
     this.entries.set(live.taskId, live)
     this.events.set(live.taskId, [{ kind: 'started', ts: live.startedAt }])
+    this.notify(live.parentSessionId)
   }
 
   beginWorkKeyRegistration(workKey: string): PendingWorkKeyRegistration {
@@ -151,9 +164,11 @@ export class LiveSubagentRegistry {
   }
 
   unregister(taskId: string): void {
+    const entry = this.entries.get(taskId)
     this.entries.delete(taskId)
     this.events.delete(taskId)
     this.capturedFinalMessages.delete(taskId)
+    if (entry) this.notify(entry.parentSessionId)
   }
 
   get(taskId: string): LiveSubagent | undefined {
@@ -198,6 +213,7 @@ export class LiveSubagentRegistry {
     if (entry === undefined) return
     entry.completion = completion
     entry.status = completion.ok ? 'completed' : 'failed'
+    this.notify(entry.parentSessionId)
   }
 
   // First-writer-wins settlement, returning whether THIS caller won. A subagent
@@ -215,6 +231,7 @@ export class LiveSubagentRegistry {
     if (entry === undefined || entry.status !== 'running') return false
     entry.completion = completion
     entry.status = completion.ok ? 'completed' : 'failed'
+    this.notify(entry.parentSessionId)
     return true
   }
 
@@ -288,10 +305,12 @@ export class LiveSubagentRegistry {
 
   clear(): void {
     // Shutdown must not erase evidence of children that have not terminated.
+    const parents = new Set(Array.from(this.entries.values(), (entry) => entry.parentSessionId))
     this.entries.clear()
     this.events.clear()
     this.capturedFinalMessages.clear()
     this.pendingWorkKeyRegistrations.clear()
+    for (const parent of parents) this.notify(parent)
   }
 
   private removePendingWorkKeyRegistration(registration: PendingWorkKeyRegistration): void {

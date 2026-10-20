@@ -47,6 +47,31 @@ Receipt durability is not an upstream transaction. Adapters may acknowledge tran
 
 Delivery is at least once: remote notice success before a local receipt commit is ambiguous and may duplicate a notice on retry. Unavailable destinations remain blocked and owed until authorized delivery becomes possible. Journal corruption conservatively freezes all potentially mixed background/outbox work; it does not reinterpret surviving child JSON. See [engagement](/docs/internals/engagement#durable-inbound-admission-and-turn-ownership) for admission, storage repair, retention and durability limits.
 
+### Idle parent prompt-cache keepalive
+
+`src/agent/subagent-cache-keepalive.ts` keeps the last conversational request warm
+only while its parent session is settled and `LiveSubagentRegistry` has running
+background children for that exact parent. Registry lifecycle notifications and
+SDK `agent_start`/`agent_settled` events own the timer; completion, a new turn and
+session disposal cancel both scheduled and in-flight requests. Pi's general cache
+warmer is disabled so it cannot warm unrelated idle or streaming sessions.
+
+The session's final `onPayload` hook snapshots the provider payload after prompt
+cache-key handling, along with the model and normalized context. Replay goes
+straight through the authenticated model runtime, not the agent loop: system,
+tools and their order, conversation, thinking settings and cache keys stay
+identical. Only the output budget changes to one token (or the existing legacy
+thinking budget plus one, the API minimum); the request aborts at Anthropic
+`message_start`, after prefill. Responses are discarded, never persisted or sent
+to channels, and diagnostics go only to the operator's debug output.
+
+Only `anthropic-messages` requests with actual five-minute cache markers qualify.
+OpenAI, disabled caching and one-hour caches are excluded. Pings run at 4m30s,
+with a maximum of six per idle period. A timer more than 15 seconds late, or a
+parent that settles after that deadline, does not attempt a cold cache write.
+Failures stop warming until the next real request; there is no configuration
+field or persisted keepalive state.
+
 ### Tool-loop termination
 
 `src/agent/loop-guard.ts` combines exact repeated-call detection with a sliding target window. Reads are classified at the awaited SDK `turn_start` boundary: calls for one canonical path emitted in the same assistant tool batch count once. Successful non-empty textual results contribute bounded observed intervals; recorded pages establish the frontier, and exact-adjacent sibling intervals extend it even when parallel calls finish out of order. Suppressed siblings do not count as independent loop observations. Recorded images, overlap, backtracking, gaps, empty results, and malformed ranges retain the coarse path signature and accumulate toward a block.

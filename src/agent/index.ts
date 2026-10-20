@@ -71,6 +71,7 @@ import {
   type SessionOrigin,
   type SessionRoleContext,
 } from './session-origin'
+import { SubagentCacheKeepalive } from './subagent-cache-keepalive'
 import type { CreateSessionForSubagent, SubagentCoalescer, SubagentRegistry } from './subagents'
 import {
   buildSystemPolicy,
@@ -564,6 +565,26 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+  // Pi's general warmer also runs without background children. TypeClaw owns
+  // the narrower idle-parent policy and never persists synthetic ping results.
+  session.setCacheWarmingMode('off')
+  const cacheKeepalive = options.liveSubagentRegistry
+    ? new SubagentCacheKeepalive(
+        options.plugins?.sessionId ?? sessionManager.getSessionId(),
+        options.liveSubagentRegistry,
+        (requestModel, context, streamOptions) => modelRuntime.streamSimple(requestModel, context, streamOptions),
+      )
+    : undefined
+  const unsubCacheKeepalive = session.subscribe((event) => {
+    if (event.type === 'agent_start') cacheKeepalive?.startTurn()
+    if (event.type === 'agent_settled') cacheKeepalive?.settle()
+  })
+  const innerDispose = session.dispose.bind(session)
+  session.dispose = () => {
+    cacheKeepalive?.close()
+    unsubCacheKeepalive()
+    innerDispose()
+  }
 
   // Wrapping also means `agent.streamFunction !== streamSimple`, which puts pi's
   // summarization auth on its lenient branch (agent-session.js:214-232): a
@@ -576,17 +597,18 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       streamOptions?.maxTokens ??
       (requestModel.maxTokens > 0 ? Math.min(requestModel.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) : undefined)
     const promptCacheKey = promptCacheKeyForOrigin(getOrigin())
-    const onPayload =
-      promptCacheKey === undefined
-        ? streamOptions?.onPayload
-        : async (payload: unknown, payloadModel: typeof requestModel) => {
-            const next = (await streamOptions?.onPayload?.(payload, payloadModel)) ?? payload
-            return withPromptCacheKey(next, promptCacheKey)
-          }
+    const onPayload = async (payload: unknown, payloadModel: typeof requestModel) => {
+      const next = (await streamOptions?.onPayload?.(payload, payloadModel)) ?? payload
+      const final = promptCacheKey === undefined ? next : withPromptCacheKey(next, promptCacheKey)
+      if (streamOptions?.sessionId === session.sessionId) {
+        cacheKeepalive?.capture(payloadModel, context, { ...streamOptions, maxTokens }, final)
+      }
+      return final
+    }
     return await innerStreamFunction(requestModel, context, {
       ...streamOptions,
       maxTokens,
-      ...(onPayload ? { onPayload } : {}),
+      onPayload,
     })
   }
 
@@ -653,6 +675,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
         )
       : undefined
   const dispose = async () => {
+    cacheKeepalive?.close()
+    unsubCacheKeepalive()
     releaseSubagentTmp?.()
     unsubLoopGuardTurn()
     unsubRestart?.()
