@@ -96,7 +96,7 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
 
   // Peer bots are excluded from the count — a 1-human-N-bot room is still
   // "solo" for the fallback at the bottom.
-  const effectiveHumans = countEffectiveHumans(participants, input.membership, now)
+  const effectiveHumans = countEngagementHumans(message, participants, input.membership, now, botInThread)
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
@@ -279,6 +279,22 @@ function targetsSomeoneElse(
   if (message.replyToOtherMessageId !== null && !botInThread) return true
   if (textTargetsAnyPeerBot(message.text, participants)) return true
   return false
+}
+
+// Membership is a room property, so a Slack thread inherits its parent
+// channel's count. Once the bot is part of the thread, the thread's own
+// speakers are the better signal: a thread between one human and the bot is a
+// solo conversation even inside a crowded channel, and a second human posting
+// there flips it back to multi-human.
+export function countEngagementHumans(
+  message: InboundMessage,
+  participants: readonly ChannelParticipant[],
+  membership: MembershipCount | null,
+  now: number,
+  botInThread: boolean,
+): number {
+  if (botInThread && isThreadRoom(message)) return participants.filter((p) => p.isBot !== true).length
+  return countEffectiveHumans(participants, membership, now)
 }
 
 export function countEffectiveHumans(
