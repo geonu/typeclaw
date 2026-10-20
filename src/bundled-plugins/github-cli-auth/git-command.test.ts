@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,47 +15,68 @@ import { GIT_CREDENTIAL_ENV_KEYS } from './git-credential-env'
 const CWD = '/agent'
 
 describe.skipIf(process.platform === 'win32')('default Git resolver subprocess bounds', () => {
-  test.each([
-    { mode: 'timeout', maxMs: 3_000 },
-    { mode: 'overflow', maxMs: 3_000 },
-  ])('$mode fails closed within the bound', async ({ mode, maxMs }) => {
-    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-git-resolver-'))
-    const executable = join(dir, 'git')
-    const marker = join(dir, 'descendant-survived')
-    const originalPath = process.env.PATH
-    const originalMarker = process.env.TYPECLAW_TEST_MARKER
-    try {
-      await writeFile(
-        executable,
-        mode === 'timeout'
-          ? '#!/bin/sh\n(sleep 2.3; : > "$TYPECLAW_TEST_MARKER") &\nsleep 5\n'
-          : '#!/bin/sh\nwhile :; do printf 0123456789; done\n',
-      )
-      await chmod(executable, 0o755)
-      process.env.PATH = `${dir}:${originalPath ?? ''}`
-      process.env.TYPECLAW_TEST_MARKER = marker
-      const started = performance.now()
+  // The fake git never exits on its own, so returning at all proves the resolver
+  // killed it. Asserting outcomes (null result, descendant gone) instead of a
+  // wall-clock ceiling keeps this deterministic on an oversubscribed runner.
+  test.each(['timeout', 'overflow'] as const)(
+    '%s fails closed',
+    async (mode) => {
+      const dir = await mkdtemp(join(tmpdir(), 'typeclaw-git-resolver-'))
+      const executable = join(dir, 'git')
+      const pidFile = join(dir, 'descendant.pid')
+      const originalPath = process.env.PATH
+      const originalPidFile = process.env.TYPECLAW_TEST_PID_FILE
+      try {
+        await writeFile(
+          executable,
+          mode === 'timeout'
+            ? '#!/bin/sh\nsleep 600 &\necho $! > "$TYPECLAW_TEST_PID_FILE"\nwait\n'
+            : '#!/bin/sh\nwhile :; do printf 0123456789; done\n',
+        )
+        await chmod(executable, 0o755)
+        process.env.PATH = `${dir}:${originalPath ?? ''}`
+        process.env.TYPECLAW_TEST_PID_FILE = pidFile
 
-      expect(await defaultGitResolvers.resolveConfig('/unused', 'remote.pushDefault')).toBeNull()
-      expect(performance.now() - started).toBeLessThan(maxMs)
-      if (mode === 'timeout') {
-        await Bun.sleep(600)
-        expect(
-          await stat(marker).then(
-            () => true,
-            () => false,
-          ),
-        ).toBe(false)
+        expect(await defaultGitResolvers.resolveConfig('/unused', 'remote.pushDefault')).toBeNull()
+
+        if (mode === 'timeout') {
+          const descendant = Number.parseInt((await readFile(pidFile, 'utf8')).trim(), 10)
+          expect(await waitUntil(() => !isProcessAlive(descendant), 10_000)).toBe(true)
+        }
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH
+        else process.env.PATH = originalPath
+        if (originalPidFile === undefined) delete process.env.TYPECLAW_TEST_PID_FILE
+        else process.env.TYPECLAW_TEST_PID_FILE = originalPidFile
+        await rm(dir, { recursive: true, force: true })
       }
-    } finally {
-      if (originalPath === undefined) delete process.env.PATH
-      else process.env.PATH = originalPath
-      if (originalMarker === undefined) delete process.env.TYPECLAW_TEST_MARKER
-      else process.env.TYPECLAW_TEST_MARKER = originalMarker
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
+    },
+    30_000,
+  )
 })
+
+// A killed descendant may linger as a zombie until its new parent reaps it, so a
+// zombie counts as dead: it can no longer run or write anything.
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false
+  }
+  const state = Bun.spawnSync(['ps', '-o', 'stat=', '-p', String(pid)])
+    .stdout.toString()
+    .trim()
+  return state !== '' && !state.startsWith('Z')
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline) {
+    if (predicate()) return true
+    await Bun.sleep(25)
+  }
+  return predicate()
+}
 
 function resolvers(overrides: Partial<GitResolvers> = {}): GitResolvers {
   return {
