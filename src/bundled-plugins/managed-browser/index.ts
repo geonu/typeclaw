@@ -62,7 +62,11 @@ export function browserEnvOverlay(
     TYPECLAW_BROWSER_CDP_URL: managed.cdpUrl,
     TYPECLAW_BROWSER_FILES: managed.filesDir,
   }
-  for (const id of browser.engines) Object.assign(env, BROWSER_ENGINES[id].env(managed.cdpUrl))
+  // agent-browser is in every image and bundled skills (qa, PDF) call it
+  // directly, so it always joins the shared browser while one is running.
+  for (const id of new Set(['agent-browser' as const, ...browser.engines])) {
+    Object.assign(env, BROWSER_ENGINES[id].env(managed.cdpUrl))
+  }
   if (managed.bskRelay !== undefined) {
     Object.assign(env, { TYPECLAW_BSK_RELAY: managed.bskRelay, TYPECLAW_BSK_TOKEN: managed.token })
   }
