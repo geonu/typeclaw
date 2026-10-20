@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, posix } from 'node:path'
 
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
@@ -20,12 +20,47 @@ import {
   planStart,
   refreshDockerfile,
   refreshGitignore,
+  resolveHostFontMounts,
   shouldMirrorDevSource,
   shouldMountWindowsDevSource,
   start,
   type HostDaemonRegisterPayload,
 } from './start'
 import { stop } from './stop'
+
+describe('resolveHostFontMounts', () => {
+  const all = () => true
+
+  test('macOS maps user and /Library font folders read-only under /usr/share/fonts', () => {
+    expect(resolveHostFontMounts({ platform: 'darwin', home: '/home/alice', exists: all })).toEqual([
+      { src: '/home/alice/Library/Fonts', dst: '/usr/share/fonts/host-user', readonly: true },
+      { src: '/Library/Fonts', dst: '/usr/share/fonts/host-system', readonly: true },
+    ])
+  })
+
+  test('never mounts macOS /System/Library/Fonts', () => {
+    const srcs = resolveHostFontMounts({ platform: 'darwin', home: '/home/alice', exists: all }).map((m) => m.src)
+    expect(srcs).not.toContain('/System/Library/Fonts')
+  })
+
+  test('Linux maps ~/.local/share/fonts and /usr/share/fonts', () => {
+    expect(resolveHostFontMounts({ platform: 'linux', home: '/home/alice', exists: all }).map((m) => m.src)).toEqual([
+      '/home/alice/.local/share/fonts',
+      '/usr/share/fonts',
+    ])
+  })
+
+  test('skips folders that do not exist on the host', () => {
+    const exists = (p: string) => p === '/Library/Fonts'
+    expect(resolveHostFontMounts({ platform: 'darwin', home: '/home/alice', exists }).map((m) => m.dst)).toEqual([
+      '/usr/share/fonts/host-system',
+    ])
+  })
+
+  test('mounts nothing on unsupported platforms', () => {
+    expect(resolveHostFontMounts({ platform: 'win32', home: 'C:\\Users\\alice', exists: all })).toEqual([])
+  })
+})
 
 type ParsedBindMount = { src: string; dst: string; readonly: boolean }
 
@@ -129,6 +164,7 @@ type GitignoreBlock = { append?: string[] }
 
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
+  hostFonts?: boolean
   docker?: { file?: DockerfileBlock }
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
@@ -148,6 +184,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
     mounts: overrides.mounts ?? [],
+    ...(overrides.hostFonts !== undefined ? { hostFonts: overrides.hostFonts } : {}),
     ...(overrides.docker ? { docker: overrides.docker } : {}),
     ...(overrides.git ? { git: overrides.git } : {}),
     ...(overrides.network ? { network: overrides.network } : {}),
@@ -777,6 +814,31 @@ describe('planStart mounts', () => {
       expect(hasBindMount(plan.runArgs, { src: notesDir, dst: '/agent/mounts/notes', readonly: true })).toBe(true)
     } finally {
       await rm(notesDir, { recursive: true, force: true })
+    }
+  })
+
+  test('adds host font mounts only when hostFonts is true', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const fontMounts = (args: readonly string[]) =>
+      bindMounts(args).filter((m) => m.dst.startsWith('/usr/share/fonts/'))
+
+    await writeTypeclawConfig(root, {})
+    const off = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'darwin' })
+    expect(fontMounts(off.runArgs)).toEqual([])
+
+    const hostHome = await mkdtemp(join(tmpdir(), 'typeclaw-font-home-'))
+    try {
+      await mkdir(join(hostHome, 'Library', 'Fonts'), { recursive: true })
+      await writeTypeclawConfig(root, { hostFonts: true })
+      const on = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'darwin', hostHome })
+      expect(fontMounts(on.runArgs)).toContainEqual({
+        src: posix.join(hostHome, 'Library', 'Fonts'),
+        dst: '/usr/share/fonts/host-user',
+        readonly: true,
+      })
+    } finally {
+      await rm(hostHome, { recursive: true, force: true })
     }
   })
 

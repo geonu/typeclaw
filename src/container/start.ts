@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import { accessSync, constants as fsConstants, existsSync, realpathSync } from 'node:fs'
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { migrateAgentMessengerConfigDir, resolveAgentMessengerConfigPolicy } from '@/agent-messenger/config-dir'
 import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config, type PortForward } from '@/config'
@@ -87,6 +87,35 @@ const CONTAINER_HOSTD_HOST = 'host.docker.internal'
 const HOST_GATEWAY_ALIAS = `${CONTAINER_HOSTD_HOST}:host-gateway`
 
 const MOUNT_TARGET_PREFIX = '/agent/mounts'
+const HOST_FONTS_TARGET_PREFIX = '/usr/share/fonts/host'
+
+// Only user-installed folders: macOS `/System/Library/Fonts` is licensed for
+// macOS only and mostly holds system UI fonts no document needs.
+export function resolveHostFontMounts({
+  platform,
+  home,
+  exists = existsSync,
+}: {
+  platform: NodeJS.Platform
+  home: string
+  exists?: (path: string) => boolean
+}): Array<{ src: string; dst: string; readonly: true }> {
+  const sources: Array<[string, string]> =
+    platform === 'darwin'
+      ? [
+          ['user', posix.join(home, 'Library', 'Fonts')],
+          ['system', '/Library/Fonts'],
+        ]
+      : platform === 'linux'
+        ? [
+            ['user', posix.join(home, '.local', 'share', 'fonts')],
+            ['system', '/usr/share/fonts'],
+          ]
+        : []
+  return sources
+    .filter(([, src]) => exists(src))
+    .map(([name, src]) => ({ src, dst: `${HOST_FONTS_TARGET_PREFIX}-${name}`, readonly: true }))
+}
 
 export type StartPlan = {
   containerName: string
@@ -121,6 +150,7 @@ export type PlanStartOptions = {
   // rather than from os.totalmem(). Omitted by callers that have no exec (and
   // by tests), in which case the default applies unclamped.
   totalMemoryBytes?: number | undefined
+  hostHome?: string
 }
 
 export type HostDaemonControl = {
@@ -957,6 +987,7 @@ export async function planStart({
   hostIdentity = currentHostIdentity(),
   gitIdentity,
   totalMemoryBytes,
+  hostHome = homedir(),
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -1195,6 +1226,12 @@ export async function planStart({
     const hostPath = expandMountPath(mount.path, cwd)
     const target = `${MOUNT_TARGET_PREFIX}/${mount.name}`
     runArgs.push(...dockerBindMount({ src: hostPath, dst: target, readonly: mount.readOnly }))
+  }
+
+  if (cfg.hostFonts) {
+    for (const fontMount of resolveHostFontMounts({ platform, home: hostHome })) {
+      runArgs.push(...dockerBindMount(fontMount))
+    }
   }
 
   // Shared model cache mount for embeddings. Vector memory is always on, and
