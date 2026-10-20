@@ -39,6 +39,10 @@ export const CORE_PERMISSIONS = {
   // permissions.ts), not the guest role, which is now grantable.
   fsSeePrivate: 'fs.see.private',
   fsSeeSecrets: 'fs.see.secrets',
+  // Drives the TypeClaw-managed shared browser (its logins span sessions and
+  // channels). Granted with fsSeePrivate because the browser's file exchange
+  // lives under workspace/, which that same tier already sees.
+  browserShared: 'browser.shared',
 } as const
 
 // Sentinel that `expandOwnerWildcard` swaps for the concrete union of
@@ -87,6 +91,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.subagentSpawnOperator,
       CORE_PERMISSIONS.fsSeePrivate,
+      CORE_PERMISSIONS.browserShared,
       CORE_PERMISSIONS.fsSeeSecrets,
       'security.bypass.low',
       'security.bypass.medium',
@@ -106,6 +111,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.subagentSpawnOperator,
       CORE_PERMISSIONS.fsSeePrivate,
+      CORE_PERMISSIONS.browserShared,
       CORE_PERMISSIONS.fsSeeSecrets,
       'security.bypass.low',
       'security.bypass.medium',
@@ -120,6 +126,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.fsSeePrivate,
+      CORE_PERMISSIONS.browserShared,
       'security.bypass.low',
     ],
   },

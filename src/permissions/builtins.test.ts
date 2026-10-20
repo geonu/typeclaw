@@ -28,6 +28,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
   test('trusted has empty default match and core perms + fs grants + medium-tier operator capabilities', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
+      'browser.shared',
       'channel.respond',
       'cron.schedule',
       'fs.see.private',
@@ -50,6 +51,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
   test('member has empty default match and channel.respond + fs.see.private + bypass.low + subagent perms (no operator-specific spawn, no fs.see.secrets)', () => {
     expect(BUILTIN_ROLES.member.match).toEqual([])
     expect([...BUILTIN_ROLES.member.permissions].sort()).toEqual([
+      'browser.shared',
       'channel.respond',
       'fs.see.private',
       'security.bypass.low',
