@@ -27,6 +27,7 @@ import { resolveBaseImageVersion, resolveTypeclawSpec, typeclawCheckoutRoot } fr
 import { buildDockerfile, classifyDockerfileAppend, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
+import { localSourceFingerprint, readLocalSourceStamp, writeLocalSourceStamp } from '@/init/local-source-stamp'
 import { refreshPackageJson } from '@/init/packagejson'
 import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
@@ -530,7 +531,14 @@ async function runStart({
     // version bump (dir already present) or a removal (stale dir left behind)
     // would otherwise leave bun.lock/node_modules out of sync with the
     // reconciled package.json.
+    //
+    // A `file:` dep is a snapshot copy taken at install time, so pulling or
+    // editing the checkout leaves the agent running old code until something
+    // re-copies it. Fingerprint the checkout and force a reinstall only when it
+    // moved since the last install, so routine restarts stay fast.
+    const staleLocalFingerprint = await staleLocalTypeclawCopyFingerprint(cwd)
     const forceDepsReinstall =
+      staleLocalFingerprint !== null ||
       (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) ||
       pluginReconcile.changed ||
       outcomeRequiresForceInstall(upgrade) ||
@@ -539,6 +547,7 @@ async function runStart({
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
     }
+    if (staleLocalFingerprint !== null) await writeLocalSourceStamp(cwd, staleLocalFingerprint)
     await commitSystemFile(cwd, DEPENDENCY_FILES, upgradeCommitMessage ?? 'Update dependencies')
     // Probe buildx up front so the Dockerfile we write matches the builder we
     // will use. buildx present -> emit the BuildKit Dockerfile and build with
@@ -1722,6 +1731,24 @@ export function shouldMountWindowsDevSource(
 async function hasLocallyLinkedTypeclawDep(cwd: string): Promise<boolean> {
   const spec = await readTypeclawDepSpec(cwd)
   return spec !== null && (spec.startsWith('file:') || spec.startsWith('link:'))
+}
+
+// Returns the checkout's current fingerprint when the agent's `file:` copy of
+// typeclaw no longer matches it, else null. An install that resolves to the
+// checkout itself is live and never stale. A symlink alone does not prove that:
+// bun's isolated linker symlinks into its own store, which is still a copy.
+async function staleLocalTypeclawCopyFingerprint(cwd: string): Promise<string | null> {
+  if (!(await readTypeclawDepSpec(cwd))?.startsWith('file:')) return null
+  const source = await detectDevSource(cwd)
+  if (source === null) return null
+  try {
+    if (realpathSync(join(cwd, 'node_modules', TYPECLAW_PACKAGE)) === realpathSync(source)) return null
+  } catch {
+    // Not installed yet, or the checkout is missing: fall through to the fingerprint.
+  }
+  const fingerprint = await localSourceFingerprint(source)
+  if (fingerprint === null || fingerprint === (await readLocalSourceStamp(cwd))) return null
+  return fingerprint
 }
 
 async function readTypeclawDepSpec(cwd: string): Promise<string | null> {
