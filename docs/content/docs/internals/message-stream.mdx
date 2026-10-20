@@ -82,6 +82,33 @@ A confirmed block aborts the active SDK run because returning a tool error alone
 
 `src/bundled-plugins/memory/` ships with TypeClaw and is auto-loaded before user `plugins[]`. Statically imported by `startAgent` and passed via `LoadPluginsOptions.bundled`. Not copied into agent folders, not user-listable. `memory` config block (`{ idleMs, dreaming: { schedule } }`) is restart-required (read once at factory time). **`session.idle` is the prompt-end signal** fired synchronously after every `session.prompt()` in `src/server/index.ts` `drain()`.
 
+## Idle compaction
+
+`src/agent/idle-compaction.ts`, attached by `createSessionWithDispose`, listens to
+pi's `agent_settled` after its queued continuations and automatic compaction have
+finished. This shared boundary covers TUI, channel, cron, and subagent sessions.
+A cancellable next-tick task lets immediately disposed sessions skip the work.
+At 90% of `compactionTriggerTokens(model)` (normally 57,600 tokens against the
+64,000-token cap), it generates a summary during the idle gap. There is no new
+configuration field; disabling pi auto-compaction also disables idle warmup.
+
+Pi's live `session.compact()` rejects concurrent prompts, so warmup calls that
+API on an isolated, in-memory copy of the current branch with a separate session
+ID. Pi still owns preparation, recent-context retention, summary generation,
+provider authentication, and transient retries (at most two retries per summary
+request). The copy has no tools or extension handlers. It captures TypeClaw's
+provider stream before turn drivers add reply-only output caps.
+
+On success, warmup synchronously checks that the live session is still idle,
+with the same branch leaf, model, and thinking level, then appends the checkpoint
+and calls pi's public `refreshContext()`. Original transcript entries remain
+intact. Starting a prompt, resuming the agent, manual/automatic compaction, or
+disposal cancels the generation; late results are discarded even if the provider
+ignores cancellation. Appended context also invalidates a result. Failed warmups
+leave foreground compaction available and log only to the operator, not chats.
+Each unchanged leaf is attempted once, preventing repeated idle events from
+starting duplicate work.
+
 ## Wire protocol contract
 
 TUI ↔ WS depends on the stream-driven drain loop:

@@ -145,7 +145,7 @@ describe('parent subagent cache keepalive', () => {
     h.keepalive.close()
   })
 
-  for (const stop of ['turn', 'completion', 'unregister', 'clear', 'close'] as const) {
+  for (const stop of ['turn', 'completion', 'unregister', 'clear', 'close', 'invalidate'] as const) {
     test(`cancels the scheduled ping on ${stop}`, async () => {
       const h = harness()
       h.capture()
@@ -156,6 +156,7 @@ describe('parent subagent cache keepalive', () => {
       if (stop === 'unregister') h.registry.unregister('child')
       if (stop === 'clear') h.registry.clear()
       if (stop === 'close') h.keepalive.close()
+      if (stop === 'invalidate') h.keepalive.invalidate()
       await h.clock.tickAsync(INTERVAL)
       expect(h.requests).toHaveLength(0)
       expect(h.clock.countTimers()).toBe(0)
