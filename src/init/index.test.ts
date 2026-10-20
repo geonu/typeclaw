@@ -1428,7 +1428,7 @@ describe('writeDockerAssets', () => {
     // since `agent-browser install` would fail (no upstream linux/arm64 binary).
     expect(dockerfile).toMatch(/\$TARGETARCH.*=.*["']?arm64["']?/)
     expect(dockerfile).toMatch(/apt-get install[^\n]*\bchromium\b/)
-    expect(dockerfile).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome')
+    expect(dockerfile).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome-bin')
   })
 
   test('returns devMode true when typeclaw dep is a file: spec', async () => {

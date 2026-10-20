@@ -769,7 +769,7 @@ function addCustomModel(
 // Must match the Dockerfile Layer 4 global install (dockerfile.ts); they are
 // two installs of the same CLI and a skew is silent. Enforced by a guard test
 // in packagejson.test.ts.
-export const AGENT_BROWSER_VERSION = '^0.33.0'
+export const AGENT_BROWSER_VERSION = '^0.39.1'
 function buildPackageJson(root: string, name: string, platform: NodeJS.Platform): Record<string, unknown> {
   return {
     name,
