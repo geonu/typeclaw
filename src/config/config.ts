@@ -863,6 +863,10 @@ export const configSchema = z
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
     mounts: z.array(mountSchema).default([]),
+    // Read-only bind mounts of the host's user-installed font folders under
+    // the container's `/usr/share/fonts`, so fontconfig (and Chromium-rendered
+    // PDFs) picks them up with no setup. Off by default.
+    hostFonts: z.boolean().default(false),
     mcpServers: mcpServersArraySchema,
     plugins: z.array(z.string().min(1)).default([]),
     // Additional names the agent answers to in channel engagement, on top
@@ -1148,6 +1152,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   customModels: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
+  hostFonts: 'restart-required',
   mcpServers: 'restart-required',
   plugins: 'restart-required',
   alias: 'applied',
@@ -1250,6 +1255,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'modelOverrides',
     'customModels',
     'mounts',
+    'hostFonts',
     'plugins',
     'alias',
     'compose',

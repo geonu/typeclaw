@@ -13,6 +13,7 @@ JSON Schema–validated. `typeclaw init` scaffolds a `$schema` pointer at `./nod
 | `models`                   | `Record<string, ref \| ref[] \| ProfileObject>` | live                                         | model profile → ref, fallback chain, or object with a per-profile `thinkingLevel`                |
 | `port`                     | `number`                                        | restart-required                             | preferred host port; CLI falls back to ephemeral on conflict                                     |
 | `mounts`                   | `Mount[]`                                       | restart-required                             | host files or directories exposed inside the container                                           |
+| `hostFonts`                | `boolean`                                       | restart-required                             | mount the host's installed font folders read-only so rendered output can use them                |
 | `plugins`                  | `string[]`                                      | restart-required                             | plugin module specifiers                                                                         |
 | `alias`                    | `string[]`                                      | live                                         | additional names the agent answers to in channels                                                |
 | `channels`                 | `Record<adapter, AdapterConfig>`                | live                                         | per-adapter config                                                                               |
@@ -203,6 +204,14 @@ typeclaw mount remove downloads
 
 For canonical host paths worth mounting per use case — voice memos, screenshots, notes vaults, mail, and the paths to keep out — see [Recommended mounts](/docs/reference/recommended-mounts).
 
+## `hostFonts`
+
+```json
+{ "hostFonts": true }
+```
+
+Defaults to `false`. When `true`, `typeclaw start` bind-mounts the host's installed font folders **read-only** under `/usr/share/fonts/host-*`, where fontconfig finds them without setup, so Chromium-rendered pages and PDFs can use your fonts. On macOS it mounts `~/Library/Fonts` and `/Library/Fonts`; on Linux, `~/.local/share/fonts` and `/usr/share/fonts`. Missing folders are skipped. macOS `/System/Library/Fonts` is never mounted, so built-in Apple CJK fonts are not shared; use `docker.file.cjkFonts` for those. `.dfont` files are ignored by Linux fontconfig. Restart-required.
+
 ## `docker.file`
 
 | Toggle        | Default  | Effect                                                                                                                                                       |
@@ -244,7 +253,7 @@ Enabling any other engine or any extension starts one TypeClaw-managed Chrome at
 typeclaw reload
 ```
 
-Re-reads `typeclaw.json` and applies hot-reloadable fields. Boot-only fields (`port`, `mounts`, `plugins`, `portForward`, `network`, `tunnels`) are captured once at container start; reload reports which changes require a restart.
+Re-reads `typeclaw.json` and applies hot-reloadable fields. Boot-only fields (`port`, `mounts`, `hostFonts`, `plugins`, `portForward`, `network`, `tunnels`) are captured once at container start; reload reports which changes require a restart.
 
 ## Auto-migration
 
