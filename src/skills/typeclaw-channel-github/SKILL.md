@@ -10,9 +10,9 @@ GitHub renders normal Markdown in issues, PRs, discussions, and review comments.
 - For PR review threads, keep `thread` set to reply in-place. Omit `thread` for a top-level PR/issue comment.
 - When a review comment **you authored** has been addressed, resolve its thread by replying with `channel_reply({ …, resolve_review_thread: true })` — see "Resolving review threads you authored" below. The base principle is **whoever opened the thread closes it**: you resolve only the threads you started, never a human's (the runtime enforces this).
 
-## Mid-turn status replies need `more_work_this_turn: true`
+## Mid-turn status replies need `continue_after_reply: true`
 
-A successful `channel_reply` ends your turn by default — the runtime stops the model right after the reply lands. That is correct for a final answer, but it will **silently truncate** a turn that still has work to do. If you post a status line like "Reviewing now, I'll be back with findings" and then expect to keep working (fetch the diff, spawn the reviewer, post the review) in the **same** turn, you must call `channel_reply({ text: "…", more_work_this_turn: true })`. Without `more_work_this_turn: true`, the turn ends at that status reply and the review never runs. Reserve `more_work_this_turn: true` for genuine multi-step turns; the final reply that wraps up the turn sets `more_work_this_turn: false`. The field is required — every `channel_reply` must set it explicitly, so never omit it.
+A successful `channel_reply` ends your turn by default — the runtime stops the model right after the reply lands. That is correct for a final answer, but it will **silently truncate** a turn that still has work to do. If you post a status line like "Reviewing now, I'll be back with findings" and then expect to keep working (fetch the diff, spawn the reviewer, post the review) in the **same** turn, you must call `channel_reply({ text: "…", continue_after_reply: true })`. Without `continue_after_reply: true`, the turn ends at that status reply and the review never runs. Reserve `continue_after_reply: true` for genuine multi-step turns; the final reply that wraps up the turn sets `continue_after_reply: false`. The field is required — every `channel_reply` must set it explicitly, so never omit it.
 
 ## Inbound triage — do this first, every time
 
@@ -265,10 +265,10 @@ If the author merely **replied** without pushing (e.g. "this is intentional beca
 Once you have verified the fix, **acknowledge and resolve in one call**: pass `resolve_review_thread: true` to your `channel_reply`. The runtime resolves the thread you're replying in **before** it posts your acknowledgement, then posts the reply:
 
 ```
-channel_reply({ text: "Verified — the fix addresses the concern. Thanks!", more_work_this_turn: false, resolve_review_thread: true })
+channel_reply({ text: "Verified — the fix addresses the concern. Thanks!", continue_after_reply: false, resolve_review_thread: true })
 ```
 
-This is the correct path and it removes a footgun. A bare `channel_reply` ends your turn the moment it lands, so a resolve attempted _after_ the acknowledgement would never run — the thread would stay open even though you "handled" it. The flag resolves first, so a normal final reply still closes the thread. You do **not** need `more_work_this_turn: true` for this: resolution happens inside the same call, before the turn ends.
+This is the correct path and it removes a footgun. A bare `channel_reply` ends your turn the moment it lands, so a resolve attempted _after_ the acknowledgement would never run — the thread would stay open even though you "handled" it. The flag resolves first, so a normal final reply still closes the thread. You do **not** need `continue_after_reply: true` for this: resolution happens inside the same call, before the turn ends.
 
 Two guarantees make the flag safe to use as your default:
 

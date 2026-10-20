@@ -220,7 +220,7 @@ export function createChannelSendTool({
         chat: params.chat,
         thread: params.thread ?? null,
         text: bodyText,
-        moreWorkThisTurn: false,
+        continueAfterReply: false,
         resolveReviewThread: wantsResolve,
       })
       if (falseReceipt.kind === 'block') {
@@ -242,7 +242,7 @@ export function createChannelSendTool({
         thread: params.thread ?? null,
         text: bodyText,
         wantsResolve,
-        moreWorkThisTurn: false,
+        continueAfterReply: false,
         getReviewState: (req) => router.getReviewState(req),
         ...(origin !== undefined &&
         origin.adapter === adapter &&

@@ -208,21 +208,21 @@ describe('channel_reply failure logging', () => {
       origin,
       logger,
     })
-    await tool.execute('id', { text: 'hi', more_work_this_turn: false }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { text: 'hi', continue_after_reply: false }, undefined, undefined, fakeCtx)
     expect(logger.warnings).toEqual(['[channels] channel_reply failed: slack-bot:T0/C0: channel_not_found'])
   })
 
   test('logs early validation when text and attachments are both missing', async () => {
     const logger = captureLogger()
     const tool = createChannelReplyTool({ router: fakeRouter(), origin, logger })
-    await tool.execute('id', { more_work_this_turn: false }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { continue_after_reply: false }, undefined, undefined, fakeCtx)
     expect(logger.warnings).toEqual(['[channels] channel_reply failed: missing text and attachments'])
   })
 
   test('does NOT log on a successful reply', async () => {
     const logger = captureLogger()
     const tool = createChannelReplyTool({ router: fakeRouter({ send: async () => ({ ok: true }) }), origin, logger })
-    await tool.execute('id', { text: 'ok', more_work_this_turn: false }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { text: 'ok', continue_after_reply: false }, undefined, undefined, fakeCtx)
     expect(logger.warnings).toEqual([])
   })
 })

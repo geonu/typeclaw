@@ -145,23 +145,23 @@ type ChannelReplyParams = {
   text?: string
   attachments?: { path: string; filename?: string }[]
   link_previews?: boolean
-  more_work_this_turn: boolean
+  continue_after_reply: boolean
   resolve_review_thread?: boolean
 }
 
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[4]
 
-// `more_work_this_turn` is schema-required; this helper defaults it to `false` (terminal) so
-// tests not exercising the more_work_this_turn path stay terse. Keep the divergence.
+// `continue_after_reply` is schema-required; this helper defaults it to `false` (terminal) so
+// tests not exercising the continue_after_reply path stay terse. Keep the divergence.
 async function runTool(
   tool: ReturnType<typeof createChannelReplyTool>,
-  params: Omit<ChannelReplyParams, 'more_work_this_turn'> & {
-    more_work_this_turn?: boolean
+  params: Omit<ChannelReplyParams, 'continue_after_reply'> & {
+    continue_after_reply?: boolean
   },
 ) {
   return tool.execute(
     'id',
-    { ...params, more_work_this_turn: params.more_work_this_turn ?? false },
+    { ...params, continue_after_reply: params.continue_after_reply ?? false },
     undefined,
     undefined,
     fakeCtx,
@@ -239,7 +239,7 @@ describe('createChannelReplyTool', () => {
       }),
       origin: slackThreadOrigin,
     })
-    await runTool(tool, { text: 'https://example.org', link_previews: false, more_work_this_turn: false })
+    await runTool(tool, { text: 'https://example.org', link_previews: false, continue_after_reply: false })
     expect(calls[0]?.link_previews).toBe(false)
   })
 
@@ -284,13 +284,18 @@ describe('createChannelReplyTool', () => {
     expect(result.details).toMatchObject({ ok: true })
   })
 
-  test('combines more_work_this_turn with messageId when a mid-turn ack carries an id', async () => {
+  test('combines continue_after_reply with messageId when a mid-turn ack carries an id', async () => {
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true, messageId: 'ts9', messageIds: ['ts9'] })),
       origin: slackThreadOrigin,
     })
-    const result = await runTool(tool, { text: 'working on it', more_work_this_turn: true })
-    expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true, messageId: 'ts9', messageIds: ['ts9'] })
+    const result = await runTool(tool, { text: 'working on it', continue_after_reply: true })
+    expect(result.details).toMatchObject({
+      ok: true,
+      continue_after_reply: true,
+      messageId: 'ts9',
+      messageIds: ['ts9'],
+    })
   })
 
   test('passes thread=null verbatim when origin is a channel-root session', async () => {
@@ -505,31 +510,31 @@ describe('createChannelReplyTool', () => {
     expect(text).not.toContain('consecutive')
   })
 
-  describe('more_work_this_turn flag (mid-turn status reply)', () => {
-    test('surfaces more_work_this_turn: true in details so the router keeps the turn alive', async () => {
+  describe('continue_after_reply flag (mid-turn status reply)', () => {
+    test('surfaces continue_after_reply: true in details so the router keeps the turn alive', async () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: true })),
         origin: slackThreadOrigin,
       })
-      const result = await runTool(tool, { text: 'working on it…', more_work_this_turn: true })
-      expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true })
+      const result = await runTool(tool, { text: 'working on it…', continue_after_reply: true })
+      expect(result.details).toMatchObject({ ok: true, continue_after_reply: true })
     })
 
-    test('a denied reply never carries more_work_this_turn (no turn to keep alive)', async () => {
+    test('a denied reply never carries continue_after_reply (no turn to keep alive)', async () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' })),
         origin: slackThreadOrigin,
       })
-      const result = await runTool(tool, { text: 'nope', more_work_this_turn: true })
+      const result = await runTool(tool, { text: 'nope', continue_after_reply: true })
       expect(result.details).toMatchObject({ ok: false, error: 'denied by allow rules' })
     })
 
-    test('more_work_this_turn is the one required parameter (so the schema rejects a reply that omits it)', () => {
+    test('continue_after_reply is the one required parameter (so the schema rejects a reply that omits it)', () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: true })),
         origin: slackThreadOrigin,
       })
-      expect((tool.parameters as { required?: readonly string[] }).required).toEqual(['more_work_this_turn'])
+      expect((tool.parameters as { required?: readonly string[] }).required).toEqual(['continue_after_reply'])
     })
   })
 
@@ -1156,7 +1161,7 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
     expect(result.details).toMatchObject({ ok: true })
   })
 
-  test('exempts a mid-turn status reply (more_work_this_turn:true) when it makes no close-out choice', async () => {
+  test('exempts a mid-turn status reply (continue_after_reply:true) when it makes no close-out choice', async () => {
     const calls: OutboundMessage[] = []
     const tool = createChannelReplyTool({
       router: fakeRouter(async (msg) => {
@@ -1166,10 +1171,10 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
       origin: githubThreadOrigin,
     })
 
-    const result = await runTool(tool, { text: 'On it — checking the diff now.', more_work_this_turn: true })
+    const result = await runTool(tool, { text: 'On it — checking the diff now.', continue_after_reply: true })
 
     expect(calls).toHaveLength(1)
-    expect(result.details).toMatchObject({ ok: true, more_work_this_turn: true })
+    expect(result.details).toMatchObject({ ok: true, continue_after_reply: true })
   })
 
   for (const resolveReviewThread of [true, false]) {
@@ -1185,13 +1190,13 @@ describe('channel_reply resolve_review_thread required-choice enforcement', () =
 
       const result = await runTool(tool, {
         text: 'Still checking.',
-        more_work_this_turn: true,
+        continue_after_reply: true,
         resolve_review_thread: resolveReviewThread,
       })
 
       expect(calls).toHaveLength(0)
       expect(result.details).toMatchObject({ ok: false })
-      expect((result.details as { error: string }).error).toContain('more_work_this_turn')
+      expect((result.details as { error: string }).error).toContain('continue_after_reply')
     })
   }
 

@@ -734,7 +734,7 @@ async function debtFixture(
       )
       session.finish(text, 'aborted')
     },
-    // channel_reply({ more_work_this_turn: true }): a progress reply that keeps the turn alive.
+    // channel_reply({ continue_after_reply: true }): a progress reply that keeps the turn alive.
     continueReply: async (session: ParentSession, text: string, sessionId = 'parent-1') => {
       const backgroundCoverage = await router.captureBackgroundResultCoverage!(sessionId)
       const inboundCoverage = await router.captureInboundResultCoverage!(sessionId)
@@ -742,8 +742,8 @@ async function debtFixture(
       await afterTool(
         session,
         'channel_reply',
-        { text, more_work_this_turn: true },
-        { content: [], details: { ok: true, more_work_this_turn: true, backgroundCoverage, inboundCoverage } },
+        { text, continue_after_reply: true },
+        { content: [], details: { ok: true, continue_after_reply: true, backgroundCoverage, inboundCoverage } },
       )
     },
     accept: (taskId: string, parentSessionId = 'parent-1') =>
@@ -1734,8 +1734,8 @@ test('/stop leaves a reload handoff that holds only observed context alone', asy
 for (const progress of [
   { name: 'an English status send', text: "I'll check and get back to you.", continueReply: false },
   { name: 'a Korean status send', text: '확인해볼게요, 잠시만요.', continueReply: false },
-  { name: 'an English more_work_this_turn reply', text: 'Let me check that.', continueReply: true },
-  { name: 'a Korean more_work_this_turn reply', text: '확인해볼게요.', continueReply: true },
+  { name: 'an English continue_after_reply reply', text: 'Let me check that.', continueReply: true },
+  { name: 'a Korean continue_after_reply reply', text: '확인해볼게요.', continueReply: true },
 ] as const) {
   test(`${progress.name} then NO_REPLY ends the request with a live-turn-ended notice, never a restart`, async () => {
     const f = await debtFixture()

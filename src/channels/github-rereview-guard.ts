@@ -19,10 +19,10 @@ export type RereviewGuardInput = {
   thread: string | null
   text: string | undefined
   wantsResolve: boolean
-  // A mid-turn status reply (more_work_this_turn:true) is not the turn's receipt,
+  // A mid-turn status reply (continue_after_reply:true) is not the turn's receipt,
   // so it suppresses the warn-tier escalation below — but never the explicit
   // resolve, which is a real mutation. Mirrors the false-receipt guard's rule.
-  moreWorkThisTurn: boolean
+  continueAfterReply: boolean
   getReviewState: (req: { adapter: 'github'; workspace: string; chat: string }) => Promise<ReviewStateResult>
   workspace: string
   round?: GithubReviewFollowupRound
@@ -86,14 +86,14 @@ function matchingRound(input: RereviewGuardInput): GithubReviewFollowupRound | n
 // live CHANGES_REQUESTED, so casual approval-shaped chatter on an unblocked PR
 // still posts. Only POSITIVE warn phrases escalate — negative ones ("needs
 // changes", "still needs work") re-assert a block rather than strand it, so they
-// stay non-firing. `more_work_this_turn:true` exempts the warn escalation
+// stay non-firing. `continue_after_reply:true` exempts the warn escalation
 // (mid-turn planning, not the receipt), but never the explicit resolve action.
 // Plain `ignore` text never fires.
 function isCloseoutAttempt(input: RereviewGuardInput): boolean {
   if (input.wantsResolve && input.thread !== null) return true
   const claim = classifyReviewClaim(input.text ?? '')
   if (claim === 'block-resolve' || claim === 'block-approve') return true
-  return !input.moreWorkThisTurn && isPositiveWarnCloseout(input.text ?? '')
+  return !input.continueAfterReply && isPositiveWarnCloseout(input.text ?? '')
 }
 
 function unverifiableReason(error: string): string {

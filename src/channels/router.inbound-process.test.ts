@@ -74,14 +74,14 @@ const router=createChannelRouter({agentDir:dir,backgroundObligations:background,
     if(mode==='stale-reply'){
      releaseTransport.resolve();const result=await lateReply;
      if(JSON.stringify(result.details.inboundCoverage)!==JSON.stringify(oldCoverage))throw Error('late reply lost captured generation');
-     await lateCallback({assistantMessage:{usage:{totalTokens:1}},toolCall:{name:'channel_reply',arguments:{text:'Late answer.',more_work_this_turn:false}},args:{text:'Late answer.',more_work_this_turn:false},result,isError:false,context:{messages:[]}});
+     await lateCallback({assistantMessage:{usage:{totalTokens:1}},toolCall:{name:'channel_reply',arguments:{text:'Late answer.',continue_after_reply:false}},args:{text:'Late answer.',continue_after_reply:false},result,isError:false,context:{messages:[]}});
     }
     const after=journal.list();if(JSON.stringify(before)!==JSON.stringify(after))throw Error('stale reply settled newer ownership');
     await appendFile(dir+'/ownership',JSON.stringify({oldCoverage,oldOwner,before,after,sessionId:session.sessionId}));await boundary();
    }
    const r=await prompt(...args);
    if(['reload-move','stale-reply'].includes(mode)&&calls===1){
-    if(mode==='stale-reply'){lateCallback=session.agent.afterToolCall;lateReply=createChannelReplyTool({router,origin:key,sessionId:session.sessionId}).execute('late',{text:'Late answer.',more_work_this_turn:false});await transportStarted.promise;}
+    if(mode==='stale-reply'){lateCallback=session.agent.afterToolCall;lateReply=createChannelReplyTool({router,origin:key,sessionId:session.sessionId}).execute('late',{text:'Late answer.',continue_after_reply:false});await transportStarted.promise;}
     await router.tearDownAllLive();
    }
    return r;
@@ -105,7 +105,7 @@ globalThis.fetch=async(input,options)=>{
  // nor a fresh turn may close it, and losing the child must not strand it.
  if(lifecycle&&calls===1){
   const startedAt=clock();await router.acceptBackgroundResponse({parentSessionId:session.sessionId,key,taskId:'child',subagentName:'proof',startedAt,accountIdentity:'proof-account',triggeringAuthorId:'alice'});runningChild={parentSessionId:session.sessionId,startedAt};
-  return sse({type:'tool_use',name:'channel_reply',input:{text:mode==='idle-gc'?'I started a background check.':'백그라운드에서 확인하고 있어요.',more_work_this_turn:true}},'tool_use');
+  return sse({type:'tool_use',name:'channel_reply',input:{text:mode==='idle-gc'?'I started a background check.':'백그라운드에서 확인하고 있어요.',continue_after_reply:true}},'tool_use');
  }
  if(lifecycle)return sse({type:'text',text:'NO_REPLY'},'end_turn');
  if(['reload-move','stale-reply'].includes(mode)&&calls===1){
@@ -129,7 +129,7 @@ globalThis.fetch=async(input,options)=>{
  if(mode==='stop'){await router.route(event('stop','/stop'));throw Error('stop boundary missing')}
  if(mode==='skip'){await router.markTurnSkipped({parentSessionId:session.sessionId,reason:'intentional silence'});throw Error('skip boundary missing')}
  if(mode==='tool')return sse({type:'tool_use',name:'effect',input:{}},'tool_use');
- if(mode==='output')return sse({type:'tool_use',name:'channel_reply',input:{text:'Answer A.',more_work_this_turn:false}},'tool_use');
+ if(mode==='output')return sse({type:'tool_use',name:'channel_reply',input:{text:'Answer A.',continue_after_reply:false}},'tool_use');
  return sse({type:'text',text:'NO_REPLY'},'end_turn');
 };
 if(initial){

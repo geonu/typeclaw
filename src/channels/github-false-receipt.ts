@@ -19,7 +19,7 @@ export type FalseReceiptInput = {
   chat: string
   thread: string | null
   text: string | undefined
-  moreWorkThisTurn: boolean
+  continueAfterReply: boolean
   resolveReviewThread: boolean
 }
 
@@ -32,9 +32,9 @@ export function checkFalseReceipt(input: FalseReceiptInput): FalseReceiptDecisio
   if (claim === 'ignore') return { kind: 'allow' }
   if (claim === 'warn') return { kind: 'warn', notice: SOFT_NOTICE }
 
-  // A turn the agent explicitly keeps alive (more_work_this_turn:true) is not yet
+  // A turn the agent explicitly keeps alive (continue_after_reply:true) is not yet
   // a receipt — the real action may still be coming. Never block; nudge instead.
-  if (input.moreWorkThisTurn) return { kind: 'warn', notice: SOFT_NOTICE }
+  if (input.continueAfterReply) return { kind: 'warn', notice: SOFT_NOTICE }
 
   if (claim === 'block-resolve') {
     if (input.thread === null) return { kind: 'allow' }
