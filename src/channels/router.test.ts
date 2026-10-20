@@ -44,7 +44,7 @@ import {
 } from '@/channels/github-review-turn-ledger'
 import { RecoveryOutbox } from '@/channels/recovery-outbox'
 import type { PermissionService } from '@/permissions'
-import type { HookBus, SessionIdleEvent } from '@/plugin'
+import { createHookBus, type HookBus, type SessionIdleEvent } from '@/plugin'
 import { waitFor } from '@/test-helpers/wait-for'
 
 import { createDiscordHistoryCallback } from './adapters/discord'
@@ -561,6 +561,8 @@ function makeRouter(
     handoffRetryItemLimit?: number
     handoffRetryByteLimit?: number
     backgroundObligations?: BackgroundObligationStore
+    reviewOutbound?: CreateChannelRouterOptions['reviewOutbound']
+    outboundReviewerActive?: () => boolean
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -569,6 +571,8 @@ function makeRouter(
   let creationAttempts = 0
   const router = createChannelRouter({
     agentDir,
+    ...(options.reviewOutbound ? { reviewOutbound: options.reviewOutbound } : {}),
+    ...(options.outboundReviewerActive ? { outboundReviewerActive: options.outboundReviewerActive } : {}),
     ...(options.backgroundObligations !== undefined ? { backgroundObligations: options.backgroundObligations } : {}),
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
@@ -982,6 +986,7 @@ describe('ChannelRouter session lifecycle', () => {
     const nowRef = { value: 1000 }
     const events: string[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -2307,6 +2312,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const dir = await tempDir()
     const turnStartPrompts: string[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -2342,6 +2348,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const dir = await tempDir()
     const turnStartPrompts: string[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -11526,6 +11533,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
   ): { router: ChannelRouter; sessions: FakeSession[] } {
     const sessions: FakeSession[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -11583,6 +11591,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     const dir = await tempDir()
     const idleEvents: SessionIdleEvent[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -11656,6 +11665,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     const dir = await tempDir()
     const events: string[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -12291,6 +12301,7 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     const sessions: FakeSession[] = []
     const logs: string[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -14003,6 +14014,7 @@ describe('ChannelRouter idle session GC', () => {
     const nowRef = { value: 1000 }
     const sessions: FakeSession[] = []
     const hooks: HookBus = {
+      ...createHookBus(),
       registerAll: () => {},
       unregisterAll: () => {},
       runSessionStart: async () => {},
@@ -21850,5 +21862,95 @@ describe('ChannelRouter durable background response coverage', () => {
     })
     expect(f.sent).toEqual([])
     await rm(f.dir, { recursive: true, force: true })
+  })
+})
+
+describe('channel outbound hook accounting', () => {
+  test('a pending/nondeterministic reviewer cannot bypass the synchronous authored-text duplicate reservation', async () => {
+    const dir = await tempDir()
+    const promptStarted = Promise.withResolvers<void>()
+    const finishPrompt = Promise.withResolvers<void>()
+    const reviewStarted = Promise.withResolvers<void>()
+    const finishReview = Promise.withResolvers<{ text: string }>()
+    const bus = createHookBus()
+    bus.registerAll(
+      'copy-editor',
+      '/agent',
+      { info() {}, warn() {}, error() {} },
+      {
+        'channel.outbound.before': () => {
+          reviewStarted.resolve()
+          return finishReview.promise
+        },
+      },
+    )
+    const { router } = makeRouter(dir, {
+      reviewOutbound: (event) => bus.runChannelOutboundBefore(event),
+      onSessionCreated: (session) => {
+        session.onPrompt = () => {
+          promptStarted.resolve()
+          return finishPrompt.promise
+        }
+      },
+    })
+    const posted: string[] = []
+    router.registerOutbound('discord-bot', async (message) => {
+      posted.push(message.text!)
+      return { ok: true, messageId: 'example-post' }
+    })
+    try {
+      await router.route(inbound())
+      await promptStarted.promise
+      const message = { adapter: 'discord-bot' as const, workspace: 'g1', chat: 'c1', text: 'Authored reply' }
+      const first = router.send(message)
+      await reviewStarted.promise
+      expect(await router.send(message)).toMatchObject({ ok: false, code: 'duplicate' })
+      expect(posted).toEqual([])
+      finishReview.resolve({ text: 'Reviewed reply' })
+      expect(await first).toMatchObject({ ok: true, deliveredText: 'Reviewed reply' })
+      expect(posted).toEqual(['Reviewed reply'])
+      expect(router.getConsecutiveSendCount({ ...message, thread: null })).toBe(1)
+    } finally {
+      finishReview.resolve({ text: 'Reviewed reply' })
+      finishPrompt.resolve()
+      await router.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a rejected delivery restores authored-text reservations so the same reviewed reply can be retried', async () => {
+    const dir = await tempDir()
+    const promptStarted = Promise.withResolvers<void>()
+    const finishPrompt = Promise.withResolvers<void>()
+    let reviews = 0
+    const { router } = makeRouter(dir, {
+      reviewOutbound: async () => ({ text: `Reviewed attempt ${++reviews}` }),
+      onSessionCreated: (session) => {
+        session.onPrompt = () => {
+          promptStarted.resolve()
+          return finishPrompt.promise
+        }
+      },
+    })
+    const attempts: string[] = []
+    router.registerOutbound('discord-bot', async (message) => {
+      attempts.push(message.text!)
+      return attempts.length === 1 ? { ok: false, error: 'synthetic transport failure' } : { ok: true }
+    })
+    try {
+      await router.route(inbound())
+      await promptStarted.promise
+      const message = { adapter: 'discord-bot' as const, workspace: 'g1', chat: 'c1', text: 'Authored reply' }
+      expect(await router.send(message)).toMatchObject({ ok: false, code: 'callback-rejected' })
+      expect(router.getConsecutiveSendCount({ ...message, thread: null })).toBe(0)
+      expect(await router.send(message)).toMatchObject({ ok: true, deliveredText: 'Reviewed attempt 2' })
+      expect(await router.send(message)).toMatchObject({ ok: false, code: 'duplicate' })
+      expect(attempts).toEqual(['Reviewed attempt 1', 'Reviewed attempt 2'])
+      expect(router.getConsecutiveSendCount({ ...message, thread: null })).toBe(1)
+    } finally {
+      finishPrompt.resolve()
+      await router.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

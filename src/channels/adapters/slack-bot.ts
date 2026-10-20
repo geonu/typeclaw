@@ -16,7 +16,7 @@ import {
   type MembershipResolverResult,
 } from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
-import type { ChannelRouter } from '@/channels/router'
+import type { ChannelRouter, ExecuteCommandResult } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
@@ -41,6 +41,7 @@ import type {
   TypingTarget,
 } from '@/channels/types'
 import { chunkMarkdown } from '@/markdown'
+import type { ChannelMessageObservedEvent, ChannelOutboundBeforeEvent, SlackObservedMessage } from '@/plugin'
 
 import { describeError } from '../describe-error'
 import { addSlackMentionHints } from './mention-hints'
@@ -74,6 +75,7 @@ import {
   parseThreadCommand,
   SLACK_SLASH_REPLY_FAILED,
   type ThreadCommandInput,
+  type SlashAckPayload,
 } from './slack-bot-slash-commands'
 import { slackTsToMillis } from './slack-bot-time'
 import { toSlackMrkdwn } from './slack-format'
@@ -106,74 +108,80 @@ export type SlackBotAdapterLoggerLike = {
 }
 
 export type SlashCommandHandlerDeps = {
-  router: Pick<ChannelRouter, 'executeCommand'>
+  router: Pick<ChannelRouter, 'executeCommand'> & Partial<Pick<ChannelRouter, 'reviewOutbound' | 'hasOutboundReviewer'>>
   knownCommandNames: ReadonlySet<string>
   logger: SlackBotAdapterLoggerLike
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  postSlashResponse?: (url: string, payload: SlashAckPayload) => Promise<number>
 }
 
-// Ack-first invariant: the handler must call args.ack() exactly once on
-// every path AND must do so before any slow network work (resolver calls,
-// post-ack logging). Slack's 3s ack deadline starts when the slash command
-// envelope arrives on the WebSocket; missing it shows the user
-// "/stop didn't respond in time". The synchronous executeCommand happy
-// path is fast (in-memory map lookup + abort), so ack-after-execute is
-// safe; everything else (formatChannelTag, post-ack logging) runs after.
-//
-// Ack failure handling: a thrown ack on the happy path is logged but does
-// NOT trigger the catch-all error-ack below, which would attempt a second
-// ack call and break the exactly-once contract.
+// With a reviewer, acknowledge immediately and publish exactly one ephemeral
+// response through Slack's response_url. Slow review must not consume Slack's
+// three-second transport-ack budget. Without a safe response URL, fail open to
+// the original immediate ack rather than losing an authorized command response.
 export function createSlashCommandHandler(
   deps: SlashCommandHandlerDeps,
 ): (args: SlackSocketModeSlashCommandArgs) => Promise<void> {
   return async ({ ack, body }) => {
+    const responseUrl = safeSlashResponseUrl(body.response_url)
+    const deferred =
+      deps.router.hasOutboundReviewer?.() === true &&
+      deps.router.reviewOutbound !== undefined &&
+      deps.postSlashResponse !== undefined &&
+      responseUrl !== undefined
+    const acknowledge = (text?: string) => {
+      try {
+        if (text === undefined) ack()
+        else ack(buildSlashAckPayload(text))
+      } catch {
+        // Ack is attempted once, even if the transport throws.
+        deps.logger.warn('[slack-bot] slash command ack failed')
+      }
+    }
+    if (deferred) acknowledge()
+    const reply = async (text: string, workspace: string, chat: string) => {
+      if (!deferred) {
+        acknowledge(text)
+        return
+      }
+      const reviewed = await reviewControlReply(deps, {
+        adapter: 'slack-bot',
+        workspace,
+        chat,
+        text,
+        op: 'send',
+        source: 'system',
+        outputKind: 'meta',
+      })
+      try {
+        const status = await deps.postSlashResponse!(responseUrl!, buildSlashAckPayload(reviewed))
+        if (status < 200 || status >= 300) {
+          deps.logger.warn(`[slack-bot] slash response failed status=${status}`)
+        }
+      } catch {
+        // response_url is a credential; neither it nor the HTTP error is logged.
+        deps.logger.warn('[slack-bot] slash response transport failed')
+      }
+    }
     const parsed = parseSlashCommand(body, deps.knownCommandNames)
     if (parsed.kind === 'ignore') {
       deps.logger.warn(`[slack-bot] slash command dropped reason=${parsed.reason} command=${body.command}`)
-      try {
-        ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
-      } catch (err) {
-        deps.logger.warn(`[slack-bot] slash command ack (drop path) failed: ${describeError(err)}`)
-      }
+      await reply(SLACK_SLASH_REPLY_FAILED, body.team_id ?? '', body.channel_id ?? '')
       return
     }
     const { command } = parsed
-
-    // Pre-ACK log: bare ids only (no formatChannelTag — would burn ack budget
-    // on a slow Slack API minute via the channel-name resolver).
     deps.logger.info(
       `[slack-bot] slash /${command.name} invoker=${command.invokerId} team=${command.key.workspace} channel=${command.key.chat}`,
     )
-
-    let result: Awaited<ReturnType<typeof deps.router.executeCommand>>
+    let result: ExecuteCommandResult
     try {
-      result = await deps.router.executeCommand(command.key, command.name, {
-        invokerId: command.invokerId,
-      })
+      result = await deps.router.executeCommand(command.key, command.name, { invokerId: command.invokerId })
     } catch (err) {
       deps.logger.error(`[slack-bot] slash command handler failed: ${describeError(err)}`)
-      try {
-        ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
-      } catch (ackErr) {
-        deps.logger.warn(`[slack-bot] slash command error-ack failed: ${describeError(ackErr)}`)
-      }
+      await reply(SLACK_SLASH_REPLY_FAILED, command.key.workspace, command.key.chat)
       return
     }
-
-    const replyContent = commandResultReply(result)
-
-    // Final ack on the happy path: own try/catch so a thrown ack here does
-    // NOT cascade into the error-path ack above (which would violate the
-    // exactly-once contract). The abort already happened server-side; only
-    // the user-visible confirmation is lost.
-    try {
-      ack(buildSlashAckPayload(replyContent))
-    } catch (err) {
-      deps.logger.warn(`[slack-bot] slash command ack failed: ${describeError(err)}`)
-    }
-
-    // Decorative post-ack logging: resolve channel names now that the 3s
-    // budget is no longer a concern. Best-effort.
+    await reply(commandResultReply(result), command.key.workspace, command.key.chat)
     try {
       const inboundTag = await deps.formatChannelTag(command.key.workspace, command.key.chat)
       deps.logger.info(`[slack-bot] slash /${command.name} result=${result.kind} ${inboundTag}`)
@@ -183,6 +191,60 @@ export function createSlashCommandHandler(
       )
     }
   }
+}
+
+// Restart starts SIGTERM before its reply is posted; run's shutdown deadline is
+// eight seconds. A slow copy editor must not consume that entire delivery window.
+export const SLACK_CONTROL_REVIEW_TIMEOUT_MS = 1_000
+
+function reviewControlReply(
+  deps: Pick<SlashCommandHandlerDeps, 'router' | 'logger'>,
+  event: ChannelOutboundBeforeEvent,
+): Promise<string> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (text: string, failure?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (failure) {
+        try {
+          deps.logger.warn(`[slack-bot] control response review ${failure}; retaining original`)
+        } catch {
+          // Logging cannot turn review into a delivery gate.
+        }
+      }
+      resolve(text)
+    }
+    const timer = setTimeout(() => finish(event.text, 'timed out'), SLACK_CONTROL_REVIEW_TIMEOUT_MS)
+    Promise.resolve()
+      .then(() => deps.router.reviewOutbound!(event))
+      .then(
+        (text) => finish(text),
+        () => finish(event.text, 'failed'),
+      )
+  })
+}
+
+function safeSlashResponseUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const url = new URL(value)
+    if (
+      url.protocol === 'https:' &&
+      (url.hostname === 'hooks.slack.com' || url.hostname === 'hooks.slack-gov.com') &&
+      url.port === '' &&
+      url.username === '' &&
+      url.password === '' &&
+      url.pathname.startsWith('/commands/') &&
+      url.search === '' &&
+      url.hash === ''
+    )
+      return url.href
+  } catch {
+    // Malformed transport metadata is not permission to contact another host.
+  }
+  return undefined
 }
 
 export type ThreadCommandReplyPoster = (args: { chat: string; thread: string | null; text: string }) => Promise<void>
@@ -286,6 +348,11 @@ const consoleLogger: SlackBotAdapterLogger = {
   error: (m) => console.error(m),
 }
 
+export type SlackMessageObserver = {
+  readonly active: () => boolean
+  readonly observe: (event: ChannelMessageObservedEvent) => void
+}
+
 export type SlackBotAdapterOptions = {
   router: ChannelRouter
   configRef: () => ChannelAdapterConfig
@@ -297,6 +364,7 @@ export type SlackBotAdapterOptions = {
   // classifier behaves as before (no alias-driven thread anchoring), so
   // tests and ad-hoc adapter constructions stay backwards-compatible.
   selfAliasesRef?: () => readonly string[]
+  messageObserver?: SlackMessageObserver
   fetchImpl?: typeof fetch
   createClient?: () => SlackBotClient
   createListener?: (client: SlackBotClient, appToken: string) => SlackBotListener
@@ -1289,8 +1357,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
 
-  const authorResolver = createSlackAuthorResolver({ token: options.token })
-  const channelResolver = createSlackChannelResolver({ token: options.token })
+  const authorResolver = createSlackAuthorResolver({ token: options.token, fetchImpl })
+  const channelResolver = createSlackChannelResolver({ token: options.token, fetchImpl })
 
   // Slack mentions by id (`<@U…>`), so no username form. Read live off the
   // closure so a reconnect re-running auth.test stays reflected; one team
@@ -1377,6 +1445,18 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
     logger,
     formatChannelTag,
+    postSlashResponse: async (url, payload) => {
+      const response = await fetchImpl(url, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(5_000),
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify(payload),
+      })
+      // Consume no response text: it can contain private content.
+      await response.body?.cancel()
+      return response.status
+    },
   })
 
   const handleThreadCommand = createThreadCommandHandler({
@@ -1384,12 +1464,28 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
     logger,
     postReply: async ({ chat, thread, text }) => {
+      const workspace = teamId ?? 'unknown'
+      const reviewed = options.router.hasOutboundReviewer?.()
+        ? await reviewControlReply(
+            { router: options.router, logger },
+            {
+              adapter: 'slack-bot',
+              workspace,
+              chat,
+              ...(thread !== null ? { thread } : {}),
+              text,
+              op: 'send',
+              source: 'system',
+              outputKind: 'meta',
+            },
+          )
+        : text
       const result = await outboundCallback({
         adapter: 'slack-bot',
-        workspace: teamId ?? 'unknown',
+        workspace,
         chat,
         ...(thread !== null ? { thread } : {}),
-        text,
+        text: reviewed,
       })
       if (!result.ok) {
         throw new Error(result.error)
@@ -1573,6 +1669,20 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         // Ack first so Slack stops retrying; failure to ack causes duplicate
         // deliveries within seconds. Then process asynchronously.
         ack()
+        const observer = options.messageObserver
+        try {
+          if (observer?.active()) {
+            observer.observe({
+              adapter: 'slack-bot',
+              workspace: teamId,
+              selfUserId: botUserId,
+              receivedAt: Date.now(),
+              event: event as SlackObservedMessage,
+            })
+          }
+        } catch {
+          logger.warn('[slack-bot] raw message observer dispatch failed')
+        }
         // Cast at the SDK boundary: upstream types this event with a
         // `[key: string]: unknown` catchall for fields it does not
         // declare (parent_user_id, client_msg_id, files). The Slack

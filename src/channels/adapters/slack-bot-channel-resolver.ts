@@ -5,6 +5,7 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 export type SlackChannelResolverOptions = {
   token: string
+  fetchImpl?: typeof fetch
   now?: () => number
   ttlMs?: number
 }
@@ -44,8 +45,10 @@ export function createSlackChannelResolver(options: SlackChannelResolverOptions)
     if (key.workspace === '@dm') return {}
 
     const [chatName, workspaceName] = await Promise.all([
-      fetchCached(chatCache, key.chat, () => fetchChannelName(key.chat, options.token)),
-      fetchCached(teamCache, key.workspace, () => fetchTeamName(key.workspace, options.token)),
+      fetchCached(chatCache, key.chat, () => fetchChannelName(key.chat, options.token, options.fetchImpl ?? fetch)),
+      fetchCached(teamCache, key.workspace, () =>
+        fetchTeamName(key.workspace, options.token, options.fetchImpl ?? fetch),
+      ),
     ])
 
     const result: ResolvedChannelNames = {}
@@ -55,9 +58,9 @@ export function createSlackChannelResolver(options: SlackChannelResolverOptions)
   }
 }
 
-async function fetchChannelName(channelId: string, token: string): Promise<string | null> {
+async function fetchChannelName(channelId: string, token: string, fetchImpl: typeof fetch): Promise<string | null> {
   try {
-    const response = await fetch(`${SLACK_API_BASE}/conversations.info?channel=${encodeURIComponent(channelId)}`, {
+    const response = await fetchImpl(`${SLACK_API_BASE}/conversations.info?channel=${encodeURIComponent(channelId)}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!response.ok) return null
@@ -69,9 +72,9 @@ async function fetchChannelName(channelId: string, token: string): Promise<strin
   }
 }
 
-async function fetchTeamName(teamId: string, token: string): Promise<string | null> {
+async function fetchTeamName(teamId: string, token: string, fetchImpl: typeof fetch): Promise<string | null> {
   try {
-    const response = await fetch(`${SLACK_API_BASE}/team.info?team=${encodeURIComponent(teamId)}`, {
+    const response = await fetchImpl(`${SLACK_API_BASE}/team.info?team=${encodeURIComponent(teamId)}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!response.ok) return null

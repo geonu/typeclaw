@@ -154,6 +154,8 @@ export function commandResultReply(result: ExecuteCommandResult): string {
 // visible only to the invoker (vs. 'in_channel' which posts to everyone).
 // Control gestures should stay ephemeral — same rationale as Discord's
 // EPHEMERAL flag on interaction callbacks.
-export function buildSlashAckPayload(text: string): { response_type: 'ephemeral'; text: string } {
+export type SlashAckPayload = { response_type: 'ephemeral'; text: string }
+
+export function buildSlashAckPayload(text: string): SlashAckPayload {
   return { response_type: 'ephemeral', text }
 }

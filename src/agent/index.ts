@@ -28,6 +28,7 @@ import { createMcpDispatcherTools, MCP_DISPATCHER_TOOL_NAMES, resolveMcpCallPref
 import { noopPermissionService, type PermissionService, type RolesConfig } from '@/permissions'
 import type {
   BuiltinToolRef,
+  ChannelOutboundOrigin,
   HookBus,
   MaterializedSkills,
   PluginRegistry,
@@ -821,6 +822,10 @@ export function buildChannelTools(
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
+  const getOutboundOrigin = (): ChannelOutboundOrigin | undefined => {
+    const current = getOrigin ? getOrigin() : origin
+    return current ? { kind: current.kind, ...(current.kind === 'cron' ? { jobId: current.jobId } : {}) } : undefined
+  }
   if (origin?.kind === 'channel') {
     // adapter/workspace/chat/thread are session-key fields and never vary across
     // a session's turns, so they stay snapshotted. The review round does: it is
@@ -841,6 +846,7 @@ export function buildChannelTools(
       createChannelReplyTool({
         router: channelRouter,
         origin: channelOrigin,
+        getOutboundOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
       }),
     )
@@ -852,10 +858,11 @@ export function buildChannelTools(
       createChannelSendTool({
         router: channelRouter,
         origin: channelOrigin,
+        getOutboundOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
       }),
     )
-    tools.push(createChannelEditTool({ router: channelRouter }))
+    tools.push(createChannelEditTool({ router: channelRouter, getOutboundOrigin }))
     // Read the live turn origin, falling back to the static snapshot when no
     // getter is wired (composition tests). `reactionRef` is per-turn, so the
     // getter is what makes reactions work outside tests.
@@ -886,9 +893,9 @@ export function buildChannelTools(
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }
   } else {
-    tools.push(createChannelSendTool({ router: channelRouter }))
+    tools.push(createChannelSendTool({ router: channelRouter, getOutboundOrigin }))
     tools.push(createChannelReadTool({ router: channelRouter }))
-    tools.push(createChannelEditTool({ router: channelRouter }))
+    tools.push(createChannelEditTool({ router: channelRouter, getOutboundOrigin }))
   }
   return tools
 }

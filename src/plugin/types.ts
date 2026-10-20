@@ -256,6 +256,57 @@ export type HookContext = {
   logger: PluginLogger
 }
 
+// Raw Socket Mode message deliveries, not the router's admitted/wake events.
+// Edits, deletes, self/bot messages and duplicates are intentionally included.
+export type SlackObservedMessage = {
+  readonly type: 'message'
+  readonly channel: string
+  readonly ts?: string
+  readonly subtype?: string
+  readonly text?: string
+  readonly user?: string
+  readonly thread_ts?: string
+  readonly event_ts?: string
+  readonly deleted_ts?: string
+  readonly message?: Readonly<Record<string, unknown>>
+  readonly previous_message?: Readonly<Record<string, unknown>>
+  readonly [key: string]: unknown
+}
+
+// Deep-frozen snapshot after transport ack, before classification/deduplication.
+// Observe-only and best-effort: never awaited by routing, never starts a session.
+// This is a Slack-bot capability, not a cross-adapter or durable event journal.
+export type ChannelMessageObservedEvent = {
+  readonly adapter: 'slack-bot'
+  readonly workspace: string | null
+  readonly selfUserId: string | null
+  readonly receivedAt: number
+  readonly event: SlackObservedMessage
+}
+
+// Last-mile text transform for trusted, in-process plugins; not a delivery gate.
+// Only text can be replaced. Invalid/empty results, errors and timeouts retain
+// the previous text. An attachment-only send cannot acquire a caption.
+export type ChannelOutboundOrigin = {
+  readonly kind: SessionOrigin['kind']
+  readonly jobId?: string
+}
+
+export type ChannelOutboundBeforeEvent = {
+  readonly adapter: string
+  readonly workspace: string
+  readonly chat: string
+  readonly thread?: string
+  readonly text: string
+  readonly op: 'send' | 'edit'
+  readonly messageId?: string
+  readonly source: 'tool' | 'system'
+  readonly outputKind?: 'substantive' | 'status' | 'meta'
+  readonly origin?: ChannelOutboundOrigin
+}
+
+export type ChannelOutboundBeforeResult = { text: string } | undefined
+
 export type Hooks = {
   'session.start'?: (event: SessionStartEvent, ctx: HookContext) => Promise<void> | void
   'session.end'?: (event: SessionEndEvent, ctx: HookContext) => Promise<void> | void
@@ -265,6 +316,11 @@ export type Hooks = {
   'session.turn.end'?: (event: SessionTurnEndEvent, ctx: HookContext) => Promise<void> | void
   'tool.before'?: (event: ToolBeforeEvent, ctx: HookContext) => Promise<ToolBeforeResult> | ToolBeforeResult
   'tool.after'?: (event: ToolAfterEvent, ctx: HookContext) => Promise<void> | void
+  'channel.message.observed'?: (event: ChannelMessageObservedEvent, ctx: HookContext) => Promise<void> | void
+  'channel.outbound.before'?: (
+    event: ChannelOutboundBeforeEvent,
+    ctx: HookContext,
+  ) => Promise<ChannelOutboundBeforeResult> | ChannelOutboundBeforeResult
 }
 
 export type HookName = keyof Hooks

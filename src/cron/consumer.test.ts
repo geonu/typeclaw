@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { AgentSession } from '@/agent'
-import type { HookBus } from '@/plugin'
+import { createHookBus, type HookBus } from '@/plugin'
 import { createStream } from '@/stream'
 
 import { createCronConsumer, type CronConsumerLogger, type CronSession } from './consumer'
@@ -52,6 +52,7 @@ function stubAgentSession(promptImpl: (text: string) => Promise<void> = async ()
 
 function fakeHooks(events: string[]): HookBus {
   return {
+    ...createHookBus(),
     registerAll: () => {},
     unregisterAll: () => {},
     runSessionStart: async () => {},
@@ -1111,6 +1112,7 @@ describe('createCronConsumer model fallback', () => {
           const fail = ref === 'openai/gpt-5.4-nano'
           const sessionId = `sess:${ref}`
           const hooks: HookBus = {
+            ...createHookBus(),
             registerAll: () => {},
             unregisterAll: () => {},
             runSessionStart: async () => {},

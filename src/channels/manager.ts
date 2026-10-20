@@ -21,7 +21,7 @@ import { createInstagramAdapter, type InstagramAdapter } from './adapters/instag
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackAdapter, type SlackAdapter } from './adapters/slack'
-import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
+import { createSlackBotAdapter, type SlackBotAdapter, type SlackMessageObserver } from './adapters/slack-bot'
 import { createTeamsAdapter, type TeamsAdapter } from './adapters/teams'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import { createWebexAdapter, type WebexAdapter } from './adapters/webex'
@@ -36,6 +36,7 @@ import {
   type ChannelRouter,
   type ClaimHandler,
   type CreateSessionForChannel,
+  type ChannelOutboundReviewer,
   type RestartCommandContext,
 } from './router'
 import {
@@ -88,6 +89,9 @@ export type ChannelManagerOptions = {
   // cannot reply, which is fine for tests but a bug in production. See
   // src/run/index.ts where this is wired.
   createSessionForChannel?: CreateSessionForChannel
+  slackBotMessageObserver?: SlackMessageObserver
+  outboundReviewer?: ChannelOutboundReviewer
+  outboundReviewerActive?: () => boolean
   // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
   createDiscordUserAdapter?: typeof createDiscordAdapter
@@ -270,6 +274,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.cancelRunningSubagentsByWorkKey
       ? { cancelRunningSubagentsByWorkKey: options.cancelRunningSubagentsByWorkKey }
       : {}),
+    ...(options.outboundReviewer ? { reviewOutbound: options.outboundReviewer } : {}),
+    ...(options.outboundReviewerActive ? { outboundReviewerActive: options.outboundReviewerActive } : {}),
   })
   const createDiscordBot = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createDiscordUser = options.createDiscordUserAdapter ?? createDiscordAdapter
@@ -354,6 +360,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         appToken,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
+        ...(options.slackBotMessageObserver ? { messageObserver: options.slackBotMessageObserver } : {}),
       })
     }
     if (name === 'line') {

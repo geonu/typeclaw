@@ -391,7 +391,7 @@ export type SendErrorCode =
 // a later ReactionRequest reacts to. It is explicitly NOT the per-reaction
 // removal-instance ref returned by `ReactionResult.reactionRef` after an add.
 export type SendResult =
-  | { ok: true; messageId?: string; messageIds?: readonly string[]; reactionRef?: ReactionRef }
+  | { ok: true; messageId?: string; messageIds?: readonly string[]; reactionRef?: ReactionRef; deliveredText?: string }
   | { ok: false; error: string; code?: SendErrorCode; recoveryFailure?: RecoveryFailure }
 
 export type OutboundCallback = (msg: OutboundMessage) => Promise<SendResult>
@@ -423,7 +423,7 @@ export type EditMessageRequest = {
 // `permission-denied` is a hard refusal from the platform (e.g. editing a
 // message the bot does not own).
 export type EditMessageResult =
-  | { ok: true }
+  | { ok: true; deliveredText?: string }
   | {
       ok: false
       error: string
