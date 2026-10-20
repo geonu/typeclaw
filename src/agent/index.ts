@@ -10,6 +10,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@earendil-works/pi-coding-agent'
 
+import { adapterNamespace } from '@/channels/adapter-namespace'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import { createCodingAgentTool } from '@/coding-agent/tool'
@@ -731,7 +732,12 @@ export function buildRestartHandoffWiring(
 // session. Returns undefined for non-channel/no-author origins.
 export function currentChannelAuthor(getOrigin: () => SessionOrigin | undefined): string | undefined {
   const origin = getOrigin()
-  return origin?.kind === 'channel' ? origin.lastInboundAuthorId : undefined
+  if (origin?.kind !== 'channel') return undefined
+  // The legacy restart record carries only a target-local author ID. Foreign
+  // requesters must remain authorless there, matching their target role rules.
+  if (adapterNamespace(origin.lastInboundAuthorAdapter ?? origin.adapter) !== adapterNamespace(origin.adapter))
+    return undefined
+  return origin.lastInboundAuthorId
 }
 
 function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {
