@@ -44,6 +44,8 @@ import {
 } from '@/channels/github-review-turn-ledger'
 import { RecoveryOutbox } from '@/channels/recovery-outbox'
 import type { PermissionService } from '@/permissions'
+import { createPermissionService } from '@/permissions/permissions'
+import { rolesConfigSchema } from '@/permissions/schema'
 import { createHookBus, type HookBus, type SessionIdleEvent } from '@/plugin'
 import { waitFor } from '@/test-helpers/wait-for'
 
@@ -130,7 +132,7 @@ import type {
   ReactionResult,
   SendResult,
 } from './types'
-import { fallbackChannelAccountIdentity } from './types'
+import { channelKeyId, fallbackChannelAccountIdentity } from './types'
 
 class FakeSession {
   public prompts: string[] = []
@@ -22108,5 +22110,311 @@ describe('channel outbound hook accounting', () => {
       await router.stop()
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('channel handoff', () => {
+  // Real role resolution: alice is a member in her DM and #general; #private is
+  // matched by an authorless owner rule, the escalation shape a handoff must
+  // never inherit.
+  const perms = (): PermissionService =>
+    createPermissionService({
+      roles: rolesConfigSchema.parse({
+        member: { match: ['discord:dm/*', 'discord:g1/general'] },
+        owner: { match: ['discord:g1/private'] },
+      }),
+    })
+  const deniedInGeneralWhen = (denied: () => boolean): PermissionService => {
+    const real = perms()
+    return {
+      ...real,
+      has: (origin, permission) =>
+        !(denied() && origin?.kind === 'channel' && origin.chat === 'general') && real.has(origin, permission),
+    }
+  }
+  const dm = (over: Partial<InboundMessage> = {}): InboundMessage =>
+    inbound({ workspace: '@dm', chat: 'dm-alice', isDm: true, isBotMention: false, ...over })
+  const general = { adapter: 'discord-bot' as const, workspace: 'g1', chat: 'general', thread: null }
+  const dmKey = { adapter: 'discord-bot' as const, workspace: '@dm', chat: 'dm-alice', thread: null }
+
+  // alice talks in #general (session 1), then moves to her DM (session 2).
+  async function aliceMovesToDm(router: ChannelRouter, sessions: FakeSession[]): Promise<void> {
+    await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await router.route(dm({ text: 'continue please' }))
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+  }
+
+  test('delivers to the session that owns the target as a requester-authored, framed turn', async () => {
+    // given
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await aliceMovesToDm(router, sessions)
+    const before = sessions[0]!.prompts.length
+
+    // when: the DM session hands the result back to #general
+    const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'role granted to bob' })
+
+    // then: #general's own session gets the framed request, authored by alice
+    expect(result).toEqual({ ok: true, target: channelKeyId(general) })
+    await waitFor(() => sessions[0]!.prompts.length > before)
+    const prompt = sessions[0]!.prompts.at(-1)!
+    expect(prompt).toContain('[handoff: alice asked you for this in a private DM.')
+    expect(prompt).toContain('role granted to bob')
+    expect(prompt).toContain('<@alice>')
+    expect(sessions).toHaveLength(2)
+  })
+
+  test('refuses a conversation the requester has not taken part in, before any grant applies', async () => {
+    // given: owner bob talks in #private; alice never has
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await router.route(inbound({ chat: 'private', authorId: 'bob', authorName: 'bob' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await router.route(dm())
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+    const before = sessions[0]!.prompts.length
+
+    // when: alice's DM session targets #private, and a channel with no session at all
+    const known = await router.handoff({
+      fromSessionId: 'ses_fake_2',
+      target: { ...general, chat: 'private' },
+      text: 'x',
+    })
+    const cold = await router.handoff({
+      fromSessionId: 'ses_fake_2',
+      target: { ...general, chat: 'secret' },
+      text: 'x',
+    })
+
+    // then: both refused; nothing reached #private and no session was started
+    expect(known).toMatchObject({ ok: false, code: 'requester-not-in-target' })
+    expect(cold).toMatchObject({ ok: false, code: 'requester-not-in-target' })
+    expect(sessions[0]!.prompts.length).toBe(before)
+    expect(sessions).toHaveLength(2)
+  })
+
+  test("re-checks the requester's role in the target instead of carrying the source's", async () => {
+    // given: alice was in #general but may no longer engage the agent there
+    let generalAllowed = true
+    const permissions = deniedInGeneralWhen(() => !generalAllowed)
+    const { router, sessions } = makeRouter(await tempDir(), { permissions })
+    await aliceMovesToDm(router, sessions)
+    const before = sessions[0]!.prompts.length
+    generalAllowed = false
+
+    // when
+    const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'post it' })
+
+    // then
+    expect(result).toMatchObject({ ok: false, code: 'denied' })
+    expect(sessions[0]!.prompts.length).toBe(before)
+  })
+
+  test('handoff text is delivered as context, never run as a command or role claim', async () => {
+    // given
+    const claims: string[] = []
+    const { router, sessions } = makeRouter(await tempDir(), {
+      permissions: perms(),
+      claimHandler: async (input) => {
+        claims.push(input.text)
+        return { kind: 'consumed', reply: 'claimed' }
+      },
+    })
+    const sent: string[] = []
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+    await aliceMovesToDm(router, sessions)
+    const before = sessions[0]!.prompts.length
+
+    // when
+    const result = await router.handoff({
+      fromSessionId: 'ses_fake_2',
+      target: general,
+      text: '/help claim-7K9M-2X3R',
+    })
+
+    // then: no claim, no command reply; the text reached the model as a turn
+    expect(result).toMatchObject({ ok: true })
+    await waitFor(() => sessions[0]!.prompts.length > before)
+    expect(sessions[0]!.prompts.at(-1)).toContain('/help claim-7K9M-2X3R')
+    expect(claims).toEqual([])
+    expect(sent).toEqual([])
+  })
+
+  test('a command-shaped handoff from a requester denied in the target posts nothing', async () => {
+    // given
+    let generalAllowed = true
+    const permissions = deniedInGeneralWhen(() => !generalAllowed)
+    const { router, sessions } = makeRouter(await tempDir(), { permissions })
+    const sent: string[] = []
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+    await aliceMovesToDm(router, sessions)
+    generalAllowed = false
+
+    // when
+    const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: '/help' })
+
+    // then
+    expect(result).toMatchObject({ ok: false, code: 'denied' })
+    expect(sent).toEqual([])
+  })
+
+  test('a turn started by a handoff cannot hand off again', async () => {
+    // given: #general's next turn is the one the handoff starts
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await aliceMovesToDm(router, sessions)
+    let nested: unknown
+    sessions[0]!.onPrompt = async () => {
+      // when: that turn tries to hand off back to the DM
+      nested = await router.handoff({ fromSessionId: 'ses_fake_1', target: dmKey, text: 'ping back' })
+    }
+    await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'post it' })
+
+    // then
+    await waitFor(() => nested !== undefined)
+    expect(nested).toMatchObject({ ok: false, code: 'loop' })
+  })
+
+  test('a human-started turn after a handoff turn can hand off again', async () => {
+    // given: #general already ran a handoff turn
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await aliceMovesToDm(router, sessions)
+    const before = sessions[0]!.prompts.length
+    await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'post it' })
+    await waitFor(() => sessions[0]!.prompts.length > before)
+    let later: unknown
+    sessions[0]!.onPrompt = async () => {
+      later = await router.handoff({ fromSessionId: 'ses_fake_1', target: dmKey, text: 'done there' })
+    }
+
+    // when: alice speaks in #general again
+    await router.route(inbound({ chat: 'general', text: 'thanks, tell me in DM too' }))
+
+    // then: the loop guard does not apply to it
+    await waitFor(() => later !== undefined)
+    expect(later).toMatchObject({ ok: true })
+  })
+
+  test('refuses a target on another adapter, the same conversation, and an unknown source', async () => {
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await aliceMovesToDm(router, sessions)
+
+    expect(
+      await router.handoff({ fromSessionId: 'ses_fake_2', target: { ...general, adapter: 'slack-bot' }, text: 'x' }),
+    ).toMatchObject({ ok: false, code: 'cross-adapter' })
+    expect(await router.handoff({ fromSessionId: 'ses_fake_2', target: dmKey, text: 'x' })).toMatchObject({
+      ok: false,
+      code: 'same-conversation',
+    })
+    expect(await router.handoff({ fromSessionId: 'ses_missing', target: general, text: 'x' })).toMatchObject({
+      ok: false,
+      code: 'no-source-session',
+    })
+  })
+
+  test('a DM from someone who was just talking in a channel names that channel once', async () => {
+    // given: alice talked to the agent in #general
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    // when: she moves to a DM, twice
+    await router.route(dm({ text: '확인해줘' }))
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await router.route(dm({ text: 'continue' }))
+    await waitFor(() => sessions[1]!.prompts.some((p) => p.includes('continue')))
+
+    // then: only the first DM prompt carries the origin hint
+    const [first, ...rest] = sessions[1]!.prompts
+    expect(first).toContain('chat="general"')
+    expect(first).toContain('channel_handoff')
+    expect(rest.some((p) => p.includes('chat="general"'))).toBe(false)
+  })
+
+  test('a DM from someone the agent was not talking with gets no origin hint', async () => {
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await router.route(inbound({ chat: 'general', authorId: 'carol', authorName: 'carol' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    await router.route(dm())
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+
+    expect(sessions[1]!.prompts[0]).not.toContain('channel_handoff')
+  })
+
+  test("refuses a target whose rules would grant more than the requester's source role", async () => {
+    // given: alice spoke in #private recently (participation is retained even if
+    // her platform access was revoked since), #private's owner rule is unchanged,
+    // and she is only a member in her DM
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
+    await router.route(inbound({ chat: 'private', text: 'old message' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await router.route(dm())
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+    const before = sessions[0]!.prompts.length
+
+    // when
+    const result = await router.handoff({
+      fromSessionId: 'ses_fake_2',
+      target: { ...general, chat: 'private' },
+      text: 'x',
+    })
+
+    // then: refused before any target turn starts
+    expect(result).toMatchObject({ ok: false, code: 'would-elevate' })
+    expect(sessions[0]!.prompts.length).toBe(before)
+  })
+
+  test('refuses a conversation the requester only took part in long ago', async () => {
+    // given: alice last spoke in #general more than 30 minutes before the handoff
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms(), nowRef })
+    await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    nowRef.value += 31 * 60_000
+    await router.route(dm())
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+
+    // when
+    const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'x' })
+
+    // then
+    expect(result).toMatchObject({ ok: false, code: 'requester-not-in-target' })
+  })
+
+  test('keeps the target thread room metadata so the turn runs with the role that was checked', async () => {
+    // given: a restrictive parent-matched role and a more capable thread fallback
+    const permissions = createPermissionService({
+      roles: rolesConfigSchema.parse({
+        support: { match: ['discord:dm/*', 'discord:g1/parent'], permissions: ['channel.respond'] },
+        member: { match: ['discord:g1/thread1'] },
+      }),
+    })
+    const originRefs: SessionOriginRef[] = []
+    const { router, sessions } = makeRouter(await tempDir(), { permissions, originRefs })
+    const room = { kind: 'thread' as const, parentChat: 'parent' }
+    await router.route(inbound({ chat: 'thread1', room, text: 'question in the thread' }))
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await router.route(dm())
+    await waitFor(() => sessions[1]?.prompts.length === 1)
+    const before = sessions[0]!.prompts.length
+
+    // when
+    const result = await router.handoff({
+      fromSessionId: 'ses_fake_2',
+      target: { ...general, chat: 'thread1' },
+      text: 'x',
+    })
+
+    // then: the handoff turn still resolves the restrictive role
+    expect(result).toMatchObject({ ok: true })
+    await waitFor(() => sessions[0]!.prompts.length > before)
+    const live = originRefs[0]!.current
+    expect(permissions.resolveRole(live)).toBe('support')
+    expect(permissions.has(live, 'fs.see.private')).toBe(false)
   })
 })

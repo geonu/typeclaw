@@ -102,6 +102,14 @@ export type InboundMessage = {
   // the thread. Absent ⇒ not a thread room (or the adapter cannot tell).
   room?: { kind: 'thread'; parentChat?: string; parentChatName?: string }
   text: string
+  // Prompt-only runtime note rendered above this message's author line (never
+  // part of `text`, so engagement and quote anchors ignore it). Set by the
+  // router for cross-session handoffs and DM origin hints.
+  routingNote?: string
+  // Set only on a synthetic inbound created by `router.handoff`: the requester's
+  // own session in another chat delegated this work here. The turn it starts
+  // cannot hand off again (loop guard) and is never a reply-anchor target.
+  handoff?: true
   // Prompt-only context for replied-to / quoted / linked messages. Kept out
   // of `text` so the engagement gate sees only the human-authored body.
   referenceContext?: InboundReferenceContext

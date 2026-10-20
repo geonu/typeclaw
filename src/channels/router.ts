@@ -755,6 +755,26 @@ export type CreateSessionForChannel = (params: {
 
 export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapterConfig | undefined
 
+export type ChannelHandoffResult =
+  | { ok: true; target: string }
+  | {
+      ok: false
+      code:
+        | 'no-source-session'
+        | 'loop'
+        | 'cross-adapter'
+        | 'same-conversation'
+        | 'no-requester'
+        | 'requester-not-in-target'
+        | 'would-elevate'
+        | 'denied'
+        | 'not-engaged'
+      error: string
+    }
+
+const DM_ORIGIN_WINDOW_MS = 30 * 60_000
+const HANDOFF_RECENT_PARTICIPATION_MS = 30 * 60_000
+
 type QueuedInbound = {
   inputId: string
   text: string
@@ -780,6 +800,8 @@ type QueuedInbound = {
   ts: number
   githubReviewRound?: GithubReviewFollowupRound
   githubReviewThreadCloseout?: GithubReviewThreadCloseout
+  routingNote?: string
+  handoff?: true
 }
 
 type ObservedInbound = {
@@ -1007,6 +1029,15 @@ type LiveSession = {
   // and target cannot disagree. Reset with `currentTurnReactionRef` in the drain
   // finally; preserved across reminder-only iterations exactly like it.
   currentTurnExplicitlyAddressed: boolean
+  // True when THIS turn's batch carries a cross-session handoff inbound. The
+  // handoff loop guard: a handoff-started turn cannot hand off again.
+  currentTurnHandoff: boolean
+  // Whether the most recent inbound routed to this session was a DM. Lets a
+  // DM inbound find the non-DM conversation its author just came from.
+  lastInboundIsDm: boolean
+  // Origin channel keys already hinted to this DM session, so the hint is
+  // rendered once per origin instead of on every DM message.
+  dmOriginHintedKeys: Set<string>
   // Typing-status anchor of the inbound that triggered THIS turn (last item in
   // the drained batch, mirroring `currentTurnReactionRef`). Adapter-opaque ts
   // carried only to the typing path; null when the triggering inbound supplied
@@ -1666,6 +1697,11 @@ export type ChannelRouter = {
   // session was found and the reminder was queued, `no-live-session`
   // otherwise. Used by the subagent-completion bridge in
   // src/run/index.ts; safe for tests to call directly via a fake router.
+  // Delegate work to the session that owns `target` (same adapter) instead of
+  // posting there blind. Routed as a synthetic inbound authored by the source
+  // turn's requester, so it queues behind any running turn, cold-starts with
+  // history prefetch, and re-checks the requester's role in the target.
+  handoff: (args: { fromSessionId: string; target: ChannelKey; text: string }) => Promise<ChannelHandoffResult>
   injectSubagentCompletionReminder: (args: {
     parentSessionId: string
     subagent: string
@@ -3279,6 +3315,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
         currentTurnExplicitlyAddressed: false,
+        currentTurnHandoff: false,
+        lastInboundIsDm: false,
+        dmOriginHintedKeys: new Set(),
         currentTurnTypingThread: null,
         dirtyTypingThreads: new Set(),
         currentTurnEngageReactions: [],
@@ -5463,6 +5502,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           }
           live.currentTurnExplicitlyAddressed =
             trigger.isDm || trigger.isBotMention || trigger.replyToBotMessageId !== null
+          live.currentTurnHandoff = batch.some((m) => m.handoff === true)
           live.currentTurnTypingThread = batch[batch.length - 1]!.typingThread ?? null
           live.currentTurnEngageReactions = batch.flatMap((m) =>
             m.engageReaction !== undefined ? [m.engageReaction] : [],
@@ -5470,7 +5510,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.lastSendLeafId = null
-          live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
+          live.pendingQuoteCandidate = captureQuoteCandidate(
+            live.key.adapter,
+            // A handoff inbound has no platform message to quote or reply to.
+            batch.filter((m) => m.handoff !== true),
+            observed,
+          )
           // A real user batch starts a fresh logical turn → restore the full
           // empty-turn retry budget and drop any raised output-token budget left
           // over from a prior turn's length-retry. Reset here (batch.length > 0)
@@ -5813,6 +5858,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
       live.currentTurnExplicitlyAddressed = false
+      live.currentTurnHandoff = false
       live.currentTurnEngageReactions = []
       // Drop any still-held reactions if the loop exited without running the
       // per-turn finally (e.g. session destroyed mid-drain): never leave a
@@ -6083,7 +6129,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // Claims are accepted from any chat (DM, group, thread) because the
     // resulting match rule is platform-wide + author-scoped — see
     // src/role-claim/match-rule.ts.
-    if (claimHandler !== undefined && extractClaimCode(event.text) !== null) {
+    // A handoff's text is delegated context, never control traffic: it must not
+    // claim roles or run commands on the requester's behalf.
+    if (event.handoff !== true && claimHandler !== undefined && extractClaimCode(event.text) !== null) {
       const outcome = await claimHandler({
         adapter: event.adapter,
         workspace: event.workspace,
@@ -6117,7 +6165,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     // Parse once, here, so the public-command fast path (below) and the
     // post-gate command block share one parse and lookup.
-    const parsedCommand = commands.parse(event.text)
+    const parsedCommand = event.handoff === true ? null : commands.parse(event.text)
     const commandInfo = parsedCommand === null ? undefined : commands.get(parsedCommand.name)
 
     // Public-command fast path: a known command that is both ungated
@@ -6324,7 +6372,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       updateLoopGuard(live, event)
 
-      enqueue(live, event, engageReaction, admission.inputId)
+      const dmOriginNote = event.isDm && event.handoff !== true ? takeDmOriginNote(live, event) : undefined
+      live.lastInboundIsDm = event.isDm
+      enqueue(
+        live,
+        dmOriginNote !== undefined
+          ? { ...event, routingNote: [event.routingNote, dmOriginNote].filter((n) => n !== undefined).join('\n') }
+          : event,
+        engageReaction,
+        admission.inputId,
+      )
 
       // Start showing "typing..." the moment we know we're going to engage,
       // so users see the indicator during the debounce window — not just
@@ -6470,6 +6527,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(event.githubReviewThreadCloseout !== undefined
         ? { githubReviewThreadCloseout: event.githubReviewThreadCloseout }
         : {}),
+      ...(event.routingNote !== undefined ? { routingNote: event.routingNote } : {}),
+      ...(event.handoff === true ? { handoff: true as const } : {}),
       receivedAt: now(),
       ts: event.ts,
     })
@@ -8977,6 +9036,174 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'delivered', keyId: live.keyId }
   }
 
+  // A user who moved from a channel into a DM (e.g. to do a role grant in
+  // private) usually wants the result back where they came from. Point the DM
+  // session at that origin once, so "continue" becomes a handoff to the session
+  // that owns the channel instead of a blind channel_send from stale context.
+  const takeDmOriginNote = (dm: LiveSession, event: InboundMessage): string | undefined => {
+    let origin: LiveSession | undefined
+    for (const s of liveSessions.values()) {
+      if (s === dm || s.destroyed || s.lastInboundIsDm || s.key.adapter !== event.adapter) continue
+      if (now() - s.lastInboundAt > DM_ORIGIN_WINDOW_MS) continue
+      if (!s.lastTurnAuthorIds.has(event.authorId) && !s.currentTurnAuthorIds.has(event.authorId)) continue
+      if (origin === undefined || s.lastInboundAt > origin.lastInboundAt) origin = s
+    }
+    if (origin === undefined || dm.dmOriginHintedKeys.has(origin.keyId)) return undefined
+    dm.dmOriginHintedKeys.add(origin.keyId)
+    const k = origin.key
+    const thread = k.thread !== null ? ` thread="${k.thread}"` : ''
+    return (
+      `[runtime note: this user was just talking with you in another conversation ` +
+      `(adapter="${k.adapter}" workspace="${k.workspace}" chat="${k.chat}"${thread}). ` +
+      'If they ask you to continue there or to deliver a result there, use `channel_handoff` with that target ' +
+      'instead of `channel_send`, so the session that owns that conversation answers with its current context.]'
+    )
+  }
+
+  const handoff = async (args: {
+    fromSessionId: string
+    target: ChannelKey
+    text: string
+  }): Promise<ChannelHandoffResult> => {
+    let source: LiveSession | undefined
+    for (const s of liveSessions.values()) {
+      if (s.sessionId === args.fromSessionId && !s.destroyed) source = s
+    }
+    if (source === undefined) {
+      return { ok: false, code: 'no-source-session', error: 'handoff is only available from a live channel session' }
+    }
+    if (source.currentTurnHandoff) {
+      return {
+        ok: false,
+        code: 'loop',
+        error: 'this turn was itself started by a handoff; answer here with channel_reply instead of handing off again',
+      }
+    }
+    if (args.target.adapter !== source.key.adapter) {
+      return {
+        ok: false,
+        code: 'cross-adapter',
+        error: `handoff target must be on the same adapter (${source.key.adapter}); the requester has no identity on ${args.target.adapter}`,
+      }
+    }
+    if (channelKeyId(args.target) === source.keyId) {
+      return { ok: false, code: 'same-conversation', error: 'target is this conversation; use channel_reply' }
+    }
+    const requesterId = source.currentTurnAuthorId ?? source.lastTurnAuthorId
+    if (requesterId === null) {
+      return { ok: false, code: 'no-requester', error: 'no human requester in this turn to act on behalf of' }
+    }
+    // Only deliver to a live conversation the requester spoke in recently.
+    // Persisted participants span days, so this is scoped to recent activity.
+    const targetLive = liveSessions.get(channelKeyId(args.target))
+    if (
+      targetLive === undefined ||
+      targetLive.destroyed ||
+      !targetLive.participants.some(
+        (p) => p.authorId === requesterId && now() - p.lastMessageAt <= HANDOFF_RECENT_PARTICIPATION_MS,
+      )
+    ) {
+      return {
+        ok: false,
+        code: 'requester-not-in-target',
+        error:
+          'the requester has not recently taken part in that conversation; handoff only reaches conversations they are in',
+      }
+    }
+    // Participation is not proof of CURRENT platform access, and the target
+    // coordinates are caller-chosen while conversation-scoped role rules trust
+    // them. So the turn may never carry authority the requester does not
+    // already hold where the platform just authenticated them (the source):
+    // every permission they would have in the target must already be theirs in
+    // the source. Unknown roles fail closed.
+    const sourceRole = permissions.resolveRole({
+      kind: 'channel',
+      adapter: source.key.adapter,
+      workspace: source.key.workspace,
+      chat: source.key.chat,
+      thread: source.key.thread,
+      ...(source.room?.parentChat !== undefined ? { parentChat: source.room.parentChat } : {}),
+      lastInboundAuthorId: requesterId,
+    })
+    const targetRole = permissions.resolveRole({
+      kind: 'channel',
+      adapter: args.target.adapter,
+      workspace: args.target.workspace,
+      chat: args.target.chat,
+      thread: args.target.thread,
+      ...(targetLive.room?.parentChat !== undefined ? { parentChat: targetLive.room.parentChat } : {}),
+      lastInboundAuthorId: requesterId,
+    })
+    const sourcePermissions = permissions.permissionsForRole(sourceRole)
+    const targetPermissions = permissions.permissionsForRole(targetRole)
+    if (sourcePermissions === undefined || targetPermissions === undefined) {
+      logger.warn(
+        `[channels] handoff ${source.keyId} -> ${channelKeyId(args.target)} author=${requesterId}: refused, unknown role (source ${sourceRole}, target ${targetRole})`,
+      )
+      return { ok: false, code: 'would-elevate', error: "the requester's role could not be resolved; handoff refused" }
+    }
+    if (targetPermissions.some((p) => !sourcePermissions.includes(p))) {
+      logger.info(
+        `[channels] handoff ${source.keyId} -> ${channelKeyId(args.target)} author=${requesterId}: refused, target role ${targetRole} exceeds source role ${sourceRole}`,
+      )
+      return {
+        ok: false,
+        code: 'would-elevate',
+        error: `the requester's role there (${targetRole}) grants more than their role here (${sourceRole}); ask them to make the request in that conversation directly`,
+      }
+    }
+    const requester = source.participants.find((p) => p.authorId === requesterId)
+    const requesterName = requester?.authorName ?? requesterId
+    const fromWhere = source.lastInboundIsDm ? 'a private DM' : `another conversation (${source.keyId})`
+    // Authored by the requester so the target channel re-resolves THEIR role:
+    // the handoff can never act with more authority than the requester has there.
+    const event: InboundMessage = {
+      adapter: args.target.adapter,
+      workspace: args.target.workspace,
+      chat: args.target.chat,
+      thread: args.target.thread,
+      // Keep the target's trusted room metadata: route() overwrites live.room
+      // from the event, and role resolution for the turn depends on parentChat.
+      ...(targetLive.room !== undefined ? { room: targetLive.room } : {}),
+      routingNote:
+        `[handoff: ${requesterName} asked you for this in ${fromWhere}. It was NOT posted in this conversation and nobody ` +
+        "here has seen it. Read this conversation's latest messages first: if someone has since asked for something newer " +
+        'or the result below is outdated, act on the current state instead of repeating it, or stay silent if nothing is ' +
+        'needed. Share only what this conversation needs, not private DM details.]',
+      handoff: true,
+      text: args.text,
+      externalMessageId: `handoff:${randomUUID()}`,
+      eventKind: 'handoff',
+      authorId: requesterId,
+      authorName: requesterName,
+      authorIsBot: false,
+      isBotMention: true,
+      suppressSticky: true,
+      replyToBotMessageId: null,
+      mentionsOthers: false,
+      replyToOtherMessageId: null,
+      isDm: args.target.workspace === '@dm',
+      ts: now(),
+    }
+    const receipt = await route(event)
+    const targetId = channelKeyId(args.target)
+    logger.info(`[channels] handoff ${source.keyId} -> ${targetId} author=${requesterId}: ${receipt.kind}`)
+    switch (receipt.kind) {
+      case 'accepted':
+      case 'duplicate':
+        return { ok: true, target: targetId }
+      case 'denied':
+        return {
+          ok: false,
+          code: 'denied',
+          error: `the requester is not allowed to engage you in ${targetId}, or that adapter is not configured`,
+        }
+      case 'observed':
+      case 'control':
+        return { ok: false, code: 'not-engaged', error: `${targetId} did not accept the handoff` }
+    }
+  }
+
   const injectSubagentCompletionReminder = async (args: {
     parentSessionId: string
     subagent: string
@@ -9635,6 +9862,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     hasOutstandingGithubReviewThreadCloseout,
     markTurnSkipped,
     clearSticky,
+    handoff,
     reserveRestartHandoff,
     resumeRestartHandoff,
     stop,
@@ -10051,11 +10279,13 @@ function formatInboundPromptLines(
     authorIsBot: boolean
     text: string
     referenceContext?: InboundReferenceContext
+    routingNote?: string
   },
   adapter: AdapterId,
   maxTextChars?: number,
 ): string {
-  const lines = inbound.referenceContext?.sources.map(renderQuoteAnchor) ?? []
+  const lines = inbound.routingNote !== undefined ? [inbound.routingNote] : []
+  lines.push(...(inbound.referenceContext?.sources.map(renderQuoteAnchor) ?? []))
   lines.push(
     formatAuthorLine(
       inbound.ts,
