@@ -3990,6 +3990,58 @@ describe('start (composition)', () => {
     expect(ensureCalls).toEqual([{ force: false }])
   })
 
+  test('file: typeclaw dep -> ensureDeps forced only when the checkout moved since the last install', async () => {
+    // given: an agent whose file: dep points at a real git checkout
+    const checkout = await mkdtemp(join(tmpdir(), 'typeclaw-local-src-'))
+    try {
+      await Bun.$`git init -q && git -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init`.cwd(
+        checkout,
+      )
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: `file:${checkout}` })
+      // and: bun's isolated linker symlinks node_modules/typeclaw into its own store (still a copy)
+      const store = join(root, 'node_modules', '.bun', 'typeclaw@file', 'node_modules', 'typeclaw')
+      await mkdir(store, { recursive: true })
+      await symlink(store, join(root, 'node_modules', 'typeclaw'))
+      const ensureCalls: Array<{ force?: boolean } | undefined> = []
+      const runStart = () =>
+        start({
+          cwd: root,
+          preferredHostPort: 8973,
+          forceBuild: false,
+          exec: fakeDockerExec({ imageExists: true, container: { exists: false } }).exec,
+          allocatePort: deterministicAllocator,
+          ensureDeps: async (_cwd, opts) => {
+            ensureCalls.push(opts)
+            return { ok: true, installed: false }
+          },
+          autoUpgrade: noAutoUpgrade,
+          ...bypassVerify,
+        })
+
+      // when: first start, an unchanged restart, a new commit, an uncommitted edit
+      expect((await runStart()).ok).toBe(true)
+      expect((await runStart()).ok).toBe(true)
+      await Bun.$`git -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m next`.cwd(checkout)
+      expect((await runStart()).ok).toBe(true)
+      await writeFile(join(checkout, 'edited.ts'), 'export {}\n')
+      expect((await runStart()).ok).toBe(true)
+      await writeFile(join(checkout, 'edited.ts'), 'export const changed = 1\n')
+      expect((await runStart()).ok).toBe(true)
+
+      // then
+      expect(ensureCalls).toEqual([
+        { force: true },
+        { force: false },
+        { force: true },
+        { force: true },
+        { force: true },
+      ])
+    } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
   test('forceBuild + missing package.json -> ensureDeps called with force=false (no crash)', async () => {
     // given: a malformed agent folder with no package.json (defensive case).
     // The gate must degrade to "no force" rather than crash — the underlying
