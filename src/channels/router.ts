@@ -7793,6 +7793,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return
       }
       if (branchLeafEntry(live.session)?.id === live.lastSendLeafId) return
+      // A fresh post-send prose leaf while this turn's background child is still
+      // running is the model narrating its own spawn ("Researcher spawned, I'll
+      // report back"), written as invisible console text, often in the tool
+      // result's language rather than the user's. The ack already landed and the
+      // child's completion turn owns the real answer, so do not post it.
+      if (isAwaitingBackgroundChild(live, 'post_send_prose')) {
+        logger.info(
+          `[channels] ${live.keyId} post_send_prose_suppressed cause=awaiting_background_child text_len=${trailing.text.length}`,
+        )
+        return
+      }
     }
 
     if (unfinishedToolUseWithoutReply) {
