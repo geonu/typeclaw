@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import { adapterNamespace } from '@/channels/adapter-namespace'
 import { getConfig, resolveModel } from '@/config'
 import { KNOWN_PROVIDERS } from '@/config/providers'
 import type { PermissionService } from '@/permissions'
@@ -474,7 +475,12 @@ function principal(origin: SessionOrigin | undefined): string {
   for (let depth = 0; root?.kind === 'subagent' && depth < 8; depth++) root = root.spawnedByOrigin
   if (root?.kind === 'tui') return JSON.stringify(['tui', root.sessionId])
   if (root?.kind === 'channel' && root.lastInboundAuthorId) {
-    return JSON.stringify([root.adapter, root.workspace, root.chat, root.thread, root.lastInboundAuthorId])
+    const fields = [root.adapter, root.workspace, root.chat, root.thread, root.lastInboundAuthorId]
+    const authorNamespace = adapterNamespace(root.lastInboundAuthorAdapter ?? root.adapter)
+    // Legacy keys implicitly belong to the target platform. Preserve native
+    // and shared-account owners, but never let a foreign ID match those keys.
+    if (authorNamespace !== adapterNamespace(root.adapter)) fields.push(authorNamespace)
+    return JSON.stringify(fields)
   }
   throw new Error('Coding delegation requires an attributable interactive caller.')
 }
