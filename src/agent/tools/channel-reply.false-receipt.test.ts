@@ -11,7 +11,9 @@ const WS = 'acme/widgets'
 
 afterEach(() => resetReviewTurn(SESSION))
 
-function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: true })): ChannelRouter {
+function fakeRouter(
+  onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: true }),
+): ChannelRouter & { searchSessions: () => [] } {
   return {
     route: async () => ({ kind: 'observed' }),
     registerMissedInbound: () => {},
@@ -103,6 +105,7 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
+    searchSessions: () => [],
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},
