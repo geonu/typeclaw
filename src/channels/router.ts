@@ -112,6 +112,12 @@ import {
   type WriteCapability,
 } from './schema'
 import { createSessionHandoff, type ChannelHandoffResult } from './session-handoff'
+import {
+  createSessionSearch,
+  type SessionActivity,
+  type SessionSearchArgs,
+  type SessionSearchTarget,
+} from './session-search'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -991,6 +997,7 @@ type LiveSession = {
   // leaks a timer that fires past the turn's end.
   promptInFlight: boolean
   lastInboundAt: number
+  recentMessages: SessionActivity[]
   // Transcript-file size (bytes) captured immediately after cold-start, before
   // any user turn — a proxy for the fixed base-context rebuild cost (rendered
   // system prompt + injected memory + prefetched channel context). Read by the
@@ -1693,6 +1700,7 @@ export type ChannelRouter = {
   // turn's requester, so it queues behind any running turn, cold-starts with
   // history prefetch, and re-checks the requester's role in the target.
   handoff: (args: { fromSessionId: string; target: ChannelKey; text: string }) => Promise<ChannelHandoffResult>
+  searchSessions: (args: SessionSearchArgs) => SessionSearchTarget[]
   injectSubagentCompletionReminder: (args: {
     parentSessionId: string
     subagent: string
@@ -3307,6 +3315,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         baseContextBytes: 0,
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
+        recentMessages: [],
         currentTurnAuthorAdapter: key.adapter,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
@@ -6291,6 +6300,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         event.authorIsBot,
       )
       void persistParticipants(live)
+      live.recentMessages.push({ text: event.text.slice(0, 2000), at: now() })
+      if (live.recentMessages.length > 20) live.recentMessages.shift()
     }
 
     // A previously-unseen author just spoke. The cached membership count
@@ -9071,6 +9082,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const handoff = createSessionHandoff({ sessions: liveSessions, permissions, route, logger, now })
+  const searchSessions = createSessionSearch({
+    sessions: liveSessions,
+    permissions,
+    configForAdapter: options.configForAdapter,
+  })
 
   const injectSubagentCompletionReminder = async (args: {
     parentSessionId: string
@@ -9731,6 +9747,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     markTurnSkipped,
     clearSticky,
     handoff,
+    searchSessions,
     reserveRestartHandoff,
     resumeRestartHandoff,
     stop,
