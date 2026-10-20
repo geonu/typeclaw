@@ -22137,26 +22137,33 @@ describe('channel handoff', () => {
   const general = { adapter: 'discord-bot' as const, workspace: 'g1', chat: 'general', thread: null }
   const dmKey = { adapter: 'discord-bot' as const, workspace: '@dm', chat: 'dm-alice', thread: null }
 
+  async function flushHandoff(router: ChannelRouter): Promise<void> {
+    const testing = router.__testing
+    if (testing === undefined) throw new Error('router test controls unavailable')
+    for (const key of [general, dmKey, { ...general, chat: 'private' }, { ...general, chat: 'thread1' }]) {
+      await testing.flushDebounce(key)
+    }
+  }
+
   // alice talks in #general (session 1), then moves to her DM (session 2).
-  async function aliceMovesToDm(router: ChannelRouter, sessions: FakeSession[]): Promise<void> {
+  async function aliceMovesToDm(router: ChannelRouter): Promise<void> {
     await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
     await router.route(dm({ text: 'continue please' }))
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
   }
 
   test('delivers to the session that owns the target as a requester-authored, framed turn', async () => {
     // given
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
-    await aliceMovesToDm(router, sessions)
-    const before = sessions[0]!.prompts.length
+    await aliceMovesToDm(router)
 
     // when: the DM session hands the result back to #general
     const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'role granted to bob' })
 
     // then: #general's own session gets the framed request, authored by alice
     expect(result).toEqual({ ok: true, target: channelKeyId(general) })
-    await waitFor(() => sessions[0]!.prompts.length > before)
+    await flushHandoff(router)
     const prompt = sessions[0]!.prompts.at(-1)!
     expect(prompt).toContain('[handoff: alice asked you for this in a private DM.')
     expect(prompt).toContain('role granted to bob')
@@ -22168,9 +22175,9 @@ describe('channel handoff', () => {
     // given: owner bob talks in #private; alice never has
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
     await router.route(inbound({ chat: 'private', authorId: 'bob', authorName: 'bob' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
     await router.route(dm())
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
     const before = sessions[0]!.prompts.length
 
     // when: alice's DM session targets #private, and a channel with no session at all
@@ -22186,8 +22193,8 @@ describe('channel handoff', () => {
     })
 
     // then: both refused; nothing reached #private and no session was started
-    expect(known).toMatchObject({ ok: false, code: 'requester-not-in-target' })
-    expect(cold).toMatchObject({ ok: false, code: 'requester-not-in-target' })
+    expect(known).toMatchObject({ ok: false, code: 'would-elevate' })
+    expect(cold).toMatchObject({ ok: false, code: 'target-not-live' })
     expect(sessions[0]!.prompts.length).toBe(before)
     expect(sessions).toHaveLength(2)
   })
@@ -22197,7 +22204,7 @@ describe('channel handoff', () => {
     let generalAllowed = true
     const permissions = deniedInGeneralWhen(() => !generalAllowed)
     const { router, sessions } = makeRouter(await tempDir(), { permissions })
-    await aliceMovesToDm(router, sessions)
+    await aliceMovesToDm(router)
     const before = sessions[0]!.prompts.length
     generalAllowed = false
 
@@ -22224,8 +22231,7 @@ describe('channel handoff', () => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
-    await aliceMovesToDm(router, sessions)
-    const before = sessions[0]!.prompts.length
+    await aliceMovesToDm(router)
 
     // when
     const result = await router.handoff({
@@ -22236,7 +22242,7 @@ describe('channel handoff', () => {
 
     // then: no claim, no command reply; the text reached the model as a turn
     expect(result).toMatchObject({ ok: true })
-    await waitFor(() => sessions[0]!.prompts.length > before)
+    await flushHandoff(router)
     expect(sessions[0]!.prompts.at(-1)).toContain('/help claim-7K9M-2X3R')
     expect(claims).toEqual([])
     expect(sent).toEqual([])
@@ -22246,13 +22252,13 @@ describe('channel handoff', () => {
     // given
     let generalAllowed = true
     const permissions = deniedInGeneralWhen(() => !generalAllowed)
-    const { router, sessions } = makeRouter(await tempDir(), { permissions })
+    const { router } = makeRouter(await tempDir(), { permissions })
     const sent: string[] = []
     router.registerOutbound('discord-bot', async (msg) => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
-    await aliceMovesToDm(router, sessions)
+    await aliceMovesToDm(router)
     generalAllowed = false
 
     // when
@@ -22266,7 +22272,7 @@ describe('channel handoff', () => {
   test('a turn started by a handoff cannot hand off again', async () => {
     // given: #general's next turn is the one the handoff starts
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
-    await aliceMovesToDm(router, sessions)
+    await aliceMovesToDm(router)
     let nested: unknown
     sessions[0]!.onPrompt = async () => {
       // when: that turn tries to hand off back to the DM
@@ -22275,17 +22281,16 @@ describe('channel handoff', () => {
     await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'post it' })
 
     // then
-    await waitFor(() => nested !== undefined)
+    await flushHandoff(router)
     expect(nested).toMatchObject({ ok: false, code: 'loop' })
   })
 
   test('a human-started turn after a handoff turn can hand off again', async () => {
     // given: #general already ran a handoff turn
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
-    await aliceMovesToDm(router, sessions)
-    const before = sessions[0]!.prompts.length
+    await aliceMovesToDm(router)
     await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'post it' })
-    await waitFor(() => sessions[0]!.prompts.length > before)
+    await flushHandoff(router)
     let later: unknown
     sessions[0]!.onPrompt = async () => {
       later = await router.handoff({ fromSessionId: 'ses_fake_1', target: dmKey, text: 'done there' })
@@ -22295,17 +22300,17 @@ describe('channel handoff', () => {
     await router.route(inbound({ chat: 'general', text: 'thanks, tell me in DM too' }))
 
     // then: the loop guard does not apply to it
-    await waitFor(() => later !== undefined)
+    await flushHandoff(router)
     expect(later).toMatchObject({ ok: true })
   })
 
-  test('refuses a target on another adapter, the same conversation, and an unknown source', async () => {
-    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
-    await aliceMovesToDm(router, sessions)
+  test('refuses a missing target, the same conversation, and an unknown source', async () => {
+    const { router } = makeRouter(await tempDir(), { permissions: perms() })
+    await aliceMovesToDm(router)
 
     expect(
       await router.handoff({ fromSessionId: 'ses_fake_2', target: { ...general, adapter: 'slack-bot' }, text: 'x' }),
-    ).toMatchObject({ ok: false, code: 'cross-adapter' })
+    ).toMatchObject({ ok: false, code: 'target-not-live' })
     expect(await router.handoff({ fromSessionId: 'ses_fake_2', target: dmKey, text: 'x' })).toMatchObject({
       ok: false,
       code: 'same-conversation',
@@ -22320,13 +22325,13 @@ describe('channel handoff', () => {
     // given: alice talked to the agent in #general
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
     await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
 
     // when: she moves to a DM, twice
     await router.route(dm({ text: '확인해줘' }))
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
     await router.route(dm({ text: 'continue' }))
-    await waitFor(() => sessions[1]!.prompts.some((p) => p.includes('continue')))
+    await flushHandoff(router)
 
     // then: only the first DM prompt carries the origin hint
     const [first, ...rest] = sessions[1]!.prompts
@@ -22338,10 +22343,10 @@ describe('channel handoff', () => {
   test('a DM from someone the agent was not talking with gets no origin hint', async () => {
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
     await router.route(inbound({ chat: 'general', authorId: 'carol', authorName: 'carol' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
 
     await router.route(dm())
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
 
     expect(sessions[1]!.prompts[0]).not.toContain('channel_handoff')
   })
@@ -22352,9 +22357,9 @@ describe('channel handoff', () => {
     // and she is only a member in her DM
     const { router, sessions } = makeRouter(await tempDir(), { permissions: perms() })
     await router.route(inbound({ chat: 'private', text: 'old message' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
     await router.route(dm())
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
     const before = sessions[0]!.prompts.length
 
     // when
@@ -22369,21 +22374,21 @@ describe('channel handoff', () => {
     expect(sessions[0]!.prompts.length).toBe(before)
   })
 
-  test('refuses a conversation the requester only took part in long ago', async () => {
+  test('accepts nonelevating work after the requester participation window expires', async () => {
     // given: alice last spoke in #general more than 30 minutes before the handoff
     const nowRef = { value: 1000 }
-    const { router, sessions } = makeRouter(await tempDir(), { permissions: perms(), nowRef })
+    const { router } = makeRouter(await tempDir(), { permissions: perms(), nowRef })
     await router.route(inbound({ chat: 'general', text: 'grant bob a role' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
     nowRef.value += 31 * 60_000
     await router.route(dm())
-    await waitFor(() => sessions[1]?.prompts.length === 1)
+    await flushHandoff(router)
 
     // when
     const result = await router.handoff({ fromSessionId: 'ses_fake_2', target: general, text: 'x' })
 
     // then
-    expect(result).toMatchObject({ ok: false, code: 'requester-not-in-target' })
+    expect(result).toMatchObject({ ok: true })
   })
 
   test('keeps the target thread room metadata so the turn runs with the role that was checked', async () => {
@@ -22395,13 +22400,12 @@ describe('channel handoff', () => {
       }),
     })
     const originRefs: SessionOriginRef[] = []
-    const { router, sessions } = makeRouter(await tempDir(), { permissions, originRefs })
+    const { router } = makeRouter(await tempDir(), { permissions, originRefs })
     const room = { kind: 'thread' as const, parentChat: 'parent' }
     await router.route(inbound({ chat: 'thread1', room, text: 'question in the thread' }))
-    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await flushHandoff(router)
     await router.route(dm())
-    await waitFor(() => sessions[1]?.prompts.length === 1)
-    const before = sessions[0]!.prompts.length
+    await flushHandoff(router)
 
     // when
     const result = await router.handoff({
@@ -22412,7 +22416,7 @@ describe('channel handoff', () => {
 
     // then: the handoff turn still resolves the restrictive role
     expect(result).toMatchObject({ ok: true })
-    await waitFor(() => sessions[0]!.prompts.length > before)
+    await flushHandoff(router)
     const live = originRefs[0]!.current
     expect(permissions.resolveRole(live)).toBe('support')
     expect(permissions.has(live, 'fs.see.private')).toBe(false)
