@@ -1111,7 +1111,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \\
 const renderAgentBrowserInstallLayer = (buildKit: boolean): string =>
   `# Layer 4 (volatile): install agent-browser under /usr so it survives the
 # runtime bind-mount over /agent/node_modules and stays visible in bwrap.
-RUN ${bunCacheMount(buildKit)}BUN_INSTALL=${AGENT_BROWSER_ROOT} BUN_INSTALL_BIN=${AGENT_BROWSER_ROOT}/bin BUN_INSTALL_CACHE_DIR=/root/.bun/install/cache bun install -g agent-browser@^0.33.0 \\
+RUN ${bunCacheMount(buildKit)}BUN_INSTALL=${AGENT_BROWSER_ROOT} BUN_INSTALL_BIN=${AGENT_BROWSER_ROOT}/bin BUN_INSTALL_CACHE_DIR=/root/.bun/install/cache bun install -g agent-browser@^0.39.1 \\
  && chmod 0755 ${AGENT_BROWSER_PACKAGE}/bin/agent-browser-linux-* \\
  && printf '%s\\n' '#!/bin/sh' ': "\${AGENT_BROWSER_EXECUTABLE_PATH:=${AGENT_BROWSER_CHROME}}"' 'export AGENT_BROWSER_EXECUTABLE_PATH' 'exec /usr/local/bin/bun ${AGENT_BROWSER_PACKAGE}/bin/agent-browser.js "$@"' > /usr/local/bin/agent-browser \\
  && chmod 0755 /usr/local/bin/agent-browser \\

@@ -89,7 +89,7 @@ To depend on a workspace package from the **agent root** (e.g. so cron `exec` jo
 {
   "dependencies": {
     "typeclaw": "file:../typeclaw",
-    "agent-browser": "^0.33.0",
+    "agent-browser": "^0.39.1",
     "my-utility": "workspace:*"
   }
 }

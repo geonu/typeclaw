@@ -388,7 +388,7 @@ describe('Chrome runtime deps (amd64)', () => {
   test('Chrome runtime deps are installed in Layer 2 (before agent-browser CLI install in Layer 4) — nothing else in the image installs them', () => {
     const out = buildDockerfile()
     const layer2Idx = out.indexOf('libglib2.0-0t64')
-    const layer4Idx = out.indexOf('bun install -g agent-browser@^0.33.0')
+    const layer4Idx = out.indexOf('bun install -g agent-browser@^0.39.1')
     expect(layer2Idx).toBeGreaterThan(-1)
     expect(layer4Idx).toBeGreaterThan(-1)
     expect(layer2Idx).toBeLessThan(layer4Idx)
@@ -592,7 +592,7 @@ describe('curl-impersonate layer', () => {
     const out = buildDockerfile()
     const aptIdx = out.indexOf('libglib2.0-0t64') // marker for Layer 2's else-branch (last apt thing in that block)
     const curlImpersonateIdx = out.indexOf('curl-impersonate.tar.gz')
-    const agentBrowserIdx = out.indexOf('bun install -g agent-browser@^0.33.0')
+    const agentBrowserIdx = out.indexOf('bun install -g agent-browser@^0.39.1')
     expect(aptIdx).toBeGreaterThan(-1)
     expect(curlImpersonateIdx).toBeGreaterThan(-1)
     expect(agentBrowserIdx).toBeGreaterThan(-1)
@@ -666,7 +666,7 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
 
   test('base Dockerfile installs the agent-browser CLI to the same global location the per-agent Dockerfile expects', () => {
     const base = buildBaseDockerfile()
-    expect(base).toContain('bun install -g agent-browser@^0.33.0')
+    expect(base).toContain('bun install -g agent-browser@^0.39.1')
   })
 
   test('base Dockerfile downloads Chrome for Testing on amd64 — without it the per-agent image would FROM a base that lacks the browser binary and `agent-browser install` would have to redo it', () => {
@@ -780,7 +780,7 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
     // gated by docker.file.cloudflared; the per-agent versioned Dockerfile still emits
     // it when the toggle is on, so this regex deliberately excludes its sha256sum line)
     expect(countRunBlocksMatching(out, /curl-impersonate/)).toBe(0)
-    expect(countRunBlocksMatching(out, /bun install -g agent-browser@\^0\.33\.0/)).toBe(0)
+    expect(countRunBlocksMatching(out, /bun install -g agent-browser@\^0\.39\.1/)).toBe(0)
     expect(countRunBlocksMatching(out, /agent-browser install/)).toBe(0)
     expect(countRunBlocksMatching(out, /apt-keep-cache|Keep-Downloaded-Packages/)).toBe(0)
     // and: no apt-get install line that also installs baseline packages
@@ -1764,7 +1764,7 @@ async function symlinkHostBinaries(targetDir: string, names: string[]): Promise<
 describe('agent-browser headed-mode wrapper (Layer 4.5)', () => {
   test('per-agent inline Dockerfile installs the wrapper after the agent-browser bun install — pre-close depends on the real binary existing at the path the wrapper mv-aliases', () => {
     const out = buildDockerfile()
-    const installIdx = out.indexOf('bun install -g agent-browser@^0.33.0')
+    const installIdx = out.indexOf('bun install -g agent-browser@^0.39.1')
     const wrapperIdx = out.indexOf('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
     expect(installIdx).toBeGreaterThan(-1)
     expect(wrapperIdx).toBeGreaterThan(-1)
@@ -1775,7 +1775,7 @@ describe('agent-browser headed-mode wrapper (Layer 4.5)', () => {
     const base = buildBaseDockerfile()
     expect(base).toContain('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
     expect(base).toContain('TYPECLAW_AGENT_BROWSER_WRAPPER_EOF')
-    const installIdx = base.indexOf('bun install -g agent-browser@^0.33.0')
+    const installIdx = base.indexOf('bun install -g agent-browser@^0.39.1')
     const wrapperIdx = base.indexOf('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
     expect(installIdx).toBeLessThan(wrapperIdx)
   })
