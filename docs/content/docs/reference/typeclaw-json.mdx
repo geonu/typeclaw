@@ -123,7 +123,7 @@ Per-channel model selection. Each named entry layers a partial `models` block ov
 - **Resolution is per profile.** For each profile, the most specific matching rule across all entries wins: a chat beats a workspace or DM bucket, which beats a platform, which beats `*`. On a tie the later-declared entry wins. Profiles no matching entry defines use the global `models`. In the example, chat `C0ABCDE` gets Opus for `default` and the override's `fast`; every other Slack chat gets gpt-5.4-mini for `default` and the global `fast`.
 - **Subagents** spawned from a chat (directly or through other subagents) resolve profiles the same way, so a chat's `fast` or `deep` also applies to its workers. TUI and cron sessions use the global `models`.
 
-Run `typeclaw reload` after editing; new sessions pick up the change.
+Run `typeclaw reload` after editing. Channel sessions, including running ones, use the new model selection from their next turn; a changed `thinkingLevel` applies to newly created sessions.
 
 ```sh
 typeclaw model set default anthropic/claude-opus-4-5 --override support --match 'slack:T0123/C0ABCDE'
