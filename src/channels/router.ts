@@ -35,7 +35,7 @@ import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { getConfig, resolveModel } from '@/config'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
-import type { HookBus } from '@/plugin'
+import type { ChannelOutboundBeforeEvent, ChannelOutboundOrigin, HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
@@ -1460,7 +1460,12 @@ export type SendOptions = TransportSendOptions & {
   // set it explicitly because recovery prose fulfills promised work whereas
   // provider/fallback/control notices are meta output and must not.
   outputKind?: 'substantive' | 'status' | 'meta'
+  // Runtime-owned provenance; never populated from model tool arguments.
+  origin?: ChannelOutboundOrigin
 }
+
+export type EditMessageOptions = { origin?: ChannelOutboundOrigin }
+export type ChannelOutboundReviewer = (event: ChannelOutboundBeforeEvent) => Promise<{ text: string }>
 
 export const DUPLICATE_SEND_ERROR =
   'Duplicate not sent. Do not call channel_send/channel_reply again this turn. ' +
@@ -1601,7 +1606,11 @@ export type ChannelRouter = {
   // send()'s flood/cap/dup/sticky guards.
   registerEditMessage: (adapter: ChannelKey['adapter'], cb: EditMessageCallback) => void
   unregisterEditMessage: (adapter: ChannelKey['adapter'], cb: EditMessageCallback) => void
-  editMessage: (req: EditMessageRequest) => Promise<EditMessageResult>
+  editMessage: (req: EditMessageRequest, opts?: EditMessageOptions) => Promise<EditMessageResult>
+  // Direct adapter control responses use the same transform without entering
+  // send accounting, sticky engagement or turn-completion bookkeeping.
+  reviewOutbound: (event: ChannelOutboundBeforeEvent) => Promise<string>
+  hasOutboundReviewer: () => boolean
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
@@ -1929,6 +1938,8 @@ export type CreateChannelRouterOptions = {
     workKey: string,
     reason: string,
   ) => Promise<{ matched: number; cancelled: number; failures: number }>
+  reviewOutbound?: ChannelOutboundReviewer
+  outboundReviewerActive?: () => boolean
 }
 
 export type RestartCommandContext = {
@@ -6886,7 +6897,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     editMessageCallbacks.get(adapter)?.delete(cb)
   }
 
-  const editMessage = async (req: EditMessageRequest): Promise<EditMessageResult> => {
+  const hasOutboundReviewer = (): boolean =>
+    options.reviewOutbound !== undefined && (options.outboundReviewerActive?.() ?? true)
+
+  const reviewOutbound = async (event: ChannelOutboundBeforeEvent): Promise<string> => {
+    if (!hasOutboundReviewer()) return event.text
+    try {
+      const result = await options.reviewOutbound!(event)
+      // A transform cannot undo the normal reasoning/flood protections or
+      // synthesize a caption on an attachment-only delivery.
+      const text = normalizeSendText(result.text)
+      if (event.text.trim().length === 0) return event.text
+      if (text !== undefined && text.trim().length > 0 && checkOutboundFlood(text).ok) return text
+    } catch {
+      // Plugin failures are categorical: never log message-bearing errors.
+    }
+    logger.warn('[channels] outbound transform failed or returned invalid text; retaining original')
+    return event.text
+  }
+
+  const editMessage = async (req: EditMessageRequest, opts?: EditMessageOptions): Promise<EditMessageResult> => {
     // Strip leaked `<think>` blocks before the edit reaches any adapter, exactly
     // as the send path does via normalizeSendText — an edit is another way text
     // reaches the chat, so it must not become a hole that writes raw reasoning a
@@ -6896,7 +6926,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (normalized === undefined) {
       return { ok: false, error: 'message-edit-empty-after-normalization', code: 'not-found' }
     }
-    const normalizedReq = normalized === req.text ? req : { ...req, text: normalized }
+    let normalizedReq = normalized === req.text ? req : { ...req, text: normalized }
     const callbacks = editMessageCallbacks.get(req.adapter)
     if (!callbacks || callbacks.size === 0) {
       return isWriteCapabilityUnavailable(req.adapter, 'message-edit')
@@ -6907,6 +6937,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           }
         : { ok: false, error: 'message-edit-not-supported', code: 'not-supported' }
     }
+    const reviewed = hasOutboundReviewer()
+    if (reviewed) {
+      const text = await reviewOutbound({
+        adapter: req.adapter,
+        workspace: req.workspace,
+        chat: req.chat,
+        ...(req.thread != null ? { thread: req.thread } : {}),
+        text: normalized,
+        op: 'edit',
+        messageId: req.messageId,
+        source: 'tool',
+        ...(opts?.origin ? { origin: opts.origin } : {}),
+      })
+      normalizedReq = { ...normalizedReq, text }
+    }
     const snapshot = Array.from(callbacks)
     let lastError: EditMessageResult & { ok: false } = { ok: false, error: 'message-edit-not-supported' }
     for (const cb of snapshot) {
@@ -6916,7 +6961,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           fetchHistoryTimeoutMs,
           `[channels] ${req.adapter} edit message`,
         )
-        if (result.ok) return result
+        if (result.ok) return reviewed ? { ...result, deliveredText: normalizedReq.text } : result
         lastError = result
       } catch (err) {
         logger.warn(`[channels] edit message threw for ${req.adapter}: ${describeError(err)}`)
@@ -7155,9 +7200,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // Recovery is a transport-only operation. Do not even look up the live
     // session: doing so would let a delayed notice alter a newer logical turn.
     if (opts?.accounting === 'recovery') {
+      const reviewed = hasOutboundReviewer()
+      if (reviewed) {
+        const text = await reviewOutbound({
+          adapter: msg.adapter,
+          workspace: msg.workspace,
+          chat: msg.chat,
+          ...(msg.thread != null ? { thread: msg.thread } : {}),
+          text: msg.text ?? '',
+          op: 'send',
+          source,
+          outputKind: opts.outputKind ?? 'meta',
+          ...(opts.origin ? { origin: opts.origin } : {}),
+        })
+        if (msg.text !== undefined) msg = { ...msg, text }
+      }
       for (const callback of Array.from(callbacks)) {
         const result = await callback({ ...msg, sendOptions: opts })
-        if (result.ok) return result
+        if (result.ok) return reviewed && msg.text !== undefined ? { ...result, deliveredText: msg.text } : result
         return result
       }
       return { ok: false, error: 'no recovery transport available', code: 'no-adapter' }
@@ -7342,7 +7402,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     let messageId: string | undefined
     let messageIds: readonly string[] | undefined
     let reactionRef: ReactionRef | undefined
+    let deliveredText: string | undefined
     try {
+      if (hasOutboundReviewer()) {
+        const reviewed = await reviewOutbound({
+          adapter: msg.adapter,
+          workspace: msg.workspace,
+          chat: msg.chat,
+          ...(msg.thread != null ? { thread: msg.thread } : {}),
+          text: msg.text ?? '',
+          op: 'send',
+          source,
+          outputKind,
+          ...(opts?.origin ? { origin: opts.origin } : {}),
+        })
+        // Admission, duplicate reservations and output-kind decisions stay based
+        // on the authored text. A nondeterministic reviewer cannot evade them.
+        if (msg.text !== undefined) {
+          msg = { ...msg, text: reviewed }
+          deliveredText = reviewed
+        }
+      }
       for (const cb of snapshot) {
         if (dependentLiveSend && !inboundJournal.health().available) {
           lastError = 'continuity persistence unavailable'
@@ -7491,6 +7571,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(messageId !== undefined ? { messageId } : {}),
       ...(messageIds !== undefined ? { messageIds } : {}),
       ...(reactionRef !== undefined ? { reactionRef } : {}),
+      ...(deliveredText !== undefined ? { deliveredText } : {}),
     }
   }
 
@@ -9512,6 +9593,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerEditMessage,
     unregisterEditMessage,
     editMessage,
+    reviewOutbound,
+    hasOutboundReviewer,
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,

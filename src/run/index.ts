@@ -484,6 +484,14 @@ async function startAgentRuntime(
     onRecoveryReady: () => {
       void recoveryDispatcher?.wake().catch((error) => console.warn(`[run] recovery wake failed: ${error}`))
     },
+    // Resolve the live bus at delivery time so plugin reloads take effect
+    // without rebuilding adapters, and no subscribers means no snapshot work.
+    slackBotMessageObserver: {
+      active: () => pluginRuntime.get().hooks.count('channel.message.observed') > 0,
+      observe: (event) => pluginRuntime.get().hooks.runChannelMessageObserved(event),
+    },
+    outboundReviewer: (event) => pluginRuntime.get().hooks.runChannelOutboundBefore(event),
+    outboundReviewerActive: () => pluginRuntime.get().hooks.count('channel.outbound.before') > 0,
     tunnelUrlForChannel: (name) => resolveTunnelUrlForChannel(name, tunnelManager),
     tunnelConfiguredForChannel: (name) => isTunnelConfiguredForChannel(name),
     createSessionForChannel: buildChannelSessionFactory({

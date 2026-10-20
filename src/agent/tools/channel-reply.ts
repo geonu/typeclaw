@@ -15,6 +15,7 @@ import {
 } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import type { GithubReviewFollowupRound } from '@/channels/types'
+import type { ChannelOutboundOrigin } from '@/plugin'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { fenceRuntimeNotice, fenceToolResult } from './runtime-notice'
@@ -30,6 +31,7 @@ export type ChannelReplyOrigin = {
 export type CreateChannelReplyToolOptions = {
   router: ChannelRouter
   origin: ChannelReplyOrigin
+  getOutboundOrigin?: () => ChannelOutboundOrigin | undefined
   // Scopes the per-turn false-receipt ledger. Defaults to '' when a caller (e.g.
   // a focused test) has no session; the guard then simply finds no recorded
   // action and falls back to its safe default.
@@ -49,6 +51,7 @@ export type CreateChannelReplyToolOptions = {
 export function createChannelReplyTool({
   router,
   origin,
+  getOutboundOrigin,
   sessionId = '',
   logger = consoleChannelLogger,
 }: CreateChannelReplyToolOptions) {
@@ -301,15 +304,19 @@ export function createChannelReplyTool({
 
       const backgroundCoverage = (await router.captureBackgroundResultCoverage?.(sessionId)) ?? []
       const inboundCoverage = (await router.captureInboundResultCoverage?.(sessionId)) ?? []
-      const result = await router.send({
-        adapter: origin.adapter,
-        workspace: origin.workspace,
-        chat: origin.chat,
-        thread: origin.thread,
-        ...(text !== undefined ? { text } : {}),
-        ...(params.link_previews !== undefined ? { link_previews: params.link_previews } : {}),
-        ...(attachments !== undefined ? { attachments } : {}),
-      })
+      const outboundOrigin = getOutboundOrigin?.()
+      const result = await router.send(
+        {
+          adapter: origin.adapter,
+          workspace: origin.workspace,
+          chat: origin.chat,
+          thread: origin.thread,
+          ...(text !== undefined ? { text } : {}),
+          ...(params.link_previews !== undefined ? { link_previews: params.link_previews } : {}),
+          ...(attachments !== undefined ? { attachments } : {}),
+        },
+        outboundOrigin ? { origin: outboundOrigin } : undefined,
+      )
 
       if (!result.ok) {
         logger.warn(
@@ -372,7 +379,7 @@ export function createChannelReplyTool({
       // answering its own echo and looping (PR #481). Denials carry no echoed
       // prose (just machine error text), so they keep the lighter prefix.
       if (result.ok) {
-        const echo = renderOutboundEcho(text, attachments)
+        const echo = renderOutboundEcho(result.deliveredText ?? text, attachments)
         const receipt =
           `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}: ${echo}` +
           (result.messageId !== undefined ? `\nmessage_id=${JSON.stringify(result.messageId)}` : '') +

@@ -76,6 +76,8 @@ function fakeRouter(
     registerEditMessage: () => {},
     unregisterEditMessage: () => {},
     editMessage: async () => ({ ok: false, error: 'message-edit-not-supported', code: 'not-supported' }),
+    reviewOutbound: async ({ text }) => text,
+    hasOutboundReviewer: () => false,
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment callback registered for "slack-bot"' }),

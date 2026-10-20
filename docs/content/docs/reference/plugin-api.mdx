@@ -180,6 +180,11 @@ type Hooks = {
   'session.turn.end'?: (event: SessionTurnEndEvent, ctx: HookContext) => void | Promise<void>
   'tool.before'?: (event: ToolBeforeEvent, ctx: HookContext) => ToolBeforeResult | Promise<ToolBeforeResult>
   'tool.after'?: (event: ToolAfterEvent, ctx: HookContext) => void | Promise<void>
+  'channel.message.observed'?: (event: ChannelMessageObservedEvent, ctx: HookContext) => void | Promise<void>
+  'channel.outbound.before'?: (
+    event: ChannelOutboundBeforeEvent,
+    ctx: HookContext,
+  ) => ChannelOutboundBeforeResult | Promise<ChannelOutboundBeforeResult>
 }
 
 type HookContext = { agentDir: string; pluginName: string; logger: PluginLogger }
@@ -196,6 +201,62 @@ Return nothing (or `undefined`) to allow; return `{ block: true, reason }` to bl
 `tool.after` is read-only; use it for logging, metrics, and side-channel cleanup.
 
 `session.prompt` brackets system-prompt assembly — mutate near the **end** of `event.prompt` to preserve provider prompt-cache hits; mutations near the start invalidate the cache on every call. `session.turn.start` / `session.turn.end` bracket every `session.prompt(...)` turn (distinct from `session.start` / `session.end`, which bracket session lifetime). `session.idle` carries an `idleMs` window; plugins wanting delayed reactions install their own `setTimeout`.
+
+#### Channel edge hooks
+
+These are optional interfaces for trusted, in-process plugins. They keep application-specific collection and copy-editing policy outside the runtime. Existing `tool.before` is not equivalent: it neither sees discarded inbound events nor covers text generated outside a tool call.
+
+**Synthetic use cases.** The following examples are invented, not redacted production conversations:
+
+- In `#operations-example`, a person asks another person to change `EXAMPLE-042` from 12 units to 10, then edits and deletes the message. The bot is never mentioned. A private collection plugin needs the received original/edit/delete envelopes without opening a model session. A history poll cannot reconstruct every removed revision or preserve receipt order.
+- A copy-editing plugin changes “The report will been ready at 15:00” to “The report will be ready at 15:00”. The same organization wants its existing runtime notices and `!help`/`/help` responses reviewed, not only `channel_reply`. The plugin owns factual/identifier preservation; the runtime owns routing, authorization and delivery accounting.
+
+**`channel.message.observed` — observe, do not admit or wake.**
+
+```ts
+type ChannelMessageObservedEvent = {
+  readonly adapter: 'slack-bot'
+  readonly workspace: string | null
+  readonly selfUserId: string | null
+  readonly receivedAt: number
+  readonly event: SlackObservedMessage
+}
+```
+
+- Slack-bot Socket Mode `message` deliveries only, after transport ack and before edit filtering, classification, command handling and deduplication. Normal messages, non-mentions, edits, deletes, self/bot messages and duplicate deliveries are included. `app_mention`-only deliveries are not included.
+- `event` preserves the received fields, including nested `message`/`previous_message`, `deleted_ts` and opaque timestamp strings. It is a deep-frozen snapshot shared by the observers for that receipt. Workspace/self identity can be null before authentication.
+- Handlers are scheduled without awaiting them on the routing path. Each has a 10-second asynchronous ceiling. A throw, rejection, timeout or snapshot failure cannot change admission or prevent ordinary routing; runtime diagnostics contain the plugin and failure category, not the payload or thrown value.
+- No subscribers means no snapshot or observer work. Reloads affect subsequent receipts; a handler already scheduled belongs to the registration set at receipt.
+- This is best-effort observation, not a durable journal, replay API, permission grant or exactly-once stream. Slack scopes/membership still bound what arrives. Plugins own deduplication, retention, persistence and access controls, including deletion policy. Asynchronous completion order is not receipt order.
+
+**`channel.outbound.before` — transform text, do not authorize or gate delivery.**
+
+```ts
+type ChannelOutboundBeforeEvent = {
+  readonly adapter: string
+  readonly workspace: string
+  readonly chat: string
+  readonly thread?: string
+  readonly text: string
+  readonly op: 'send' | 'edit'
+  readonly messageId?: string
+  readonly source: 'tool' | 'system'
+  readonly outputKind?: 'substantive' | 'status' | 'meta'
+  readonly origin?: { readonly kind: SessionOrigin['kind']; readonly jobId?: string }
+}
+type ChannelOutboundBeforeResult = { text: string } | undefined
+```
+
+- Runs once per logical operation, immediately before handing application text to the adapter. Adapter markdown rendering, chunking and platform delivery happen afterward. Hooks compose in registration order; each receives frozen input containing the previous valid replacement.
+- Only an own `{ text: nonEmptyString }` result replaces text. `undefined`, malformed/empty results, exceptions and a 30-second per-handler timeout retain the preceding text and continue. Late results cannot replace a delivery. These ceilings do not preempt synchronous plugin code or cancel a plugin's external work.
+- Covers router sends/replies, attachment captions, edits, and existing router-generated system output, including recovery transport calls. Slack-bot thread-control replies use the same transform without entering tool-send accounting. Native slash responses acknowledge immediately, then publish one reviewed **ephemeral** response via the validated Slack `response_url`; no reviewer preserves the existing ack-with-text behavior. If that URL is absent/unsafe, the response fails open to the original ack without contacting another host.
+- Slack-bot control responses additionally have a one-second **total** review budget, retaining the original response when it expires. This leaves room under the runtime's eight-second shutdown deadline after an authorized restart has already begun. Slow asynchronous reviewers may finish later, but cannot send a second response.
+- Attachment-only sends expose `text: ''` but cannot gain a caption. Reactions, typing indicators, rich-block internals, other adapters' native control responses and network writes made directly by external tools/plugins are outside this contract. No previously suppressed runtime notice is enabled by installing a hook.
+- Hooks cannot return destinations, permissions, attachments, blocking/drop flags or turn-completion flags. Runtime-owned `source`, `outputKind` and optional session-kind/job provenance are not model arguments and grant no authority. Tool provenance is resolved at execution time, not cached from an earlier session origin.
+- Existing admission, duplicate reservations, send caps, sticky engagement and work-completion decisions remain based on the authored operation. Review cannot make a duplicate eligible by rewriting it nondeterministically. Replacements pass the existing reasoning/flood protections; an invalid replacement retains the original text.
+- Successful reviewed router sends/edits return `deliveredText`, the post-hook application text handed to the adapter, so channel-tool receipts echo that text rather than the draft. It is not a platform-byte receipt; message IDs and platform errors keep their existing meaning.
+
+These hooks are **not** a sandbox or fail-closed DLP boundary. Plugins already run with runtime trust, and raw events may include private-channel/DM content. Do not feed raw observations into model prompts, logs or third-party services without the operator's own policy. The runtime does not start a model, persist a transcript, or add a network destination merely because a hook is registered.
 
 ### Doctor checks
 

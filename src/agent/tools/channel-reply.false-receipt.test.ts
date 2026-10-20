@@ -75,6 +75,8 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
     registerEditMessage: () => {},
     unregisterEditMessage: () => {},
     editMessage: async () => ({ ok: false, error: 'message-edit-not-supported', code: 'not-supported' }),
+    reviewOutbound: async ({ text }) => text,
+    hasOutboundReviewer: () => false,
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'x' }),

@@ -15,6 +15,7 @@ import {
 } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 import type { GithubReviewFollowupRound } from '@/channels/types'
+import type { ChannelOutboundOrigin } from '@/plugin'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { renderOutboundEcho, TOOL_RESULT_PREFIX } from './channel-reply'
@@ -36,6 +37,7 @@ export type CreateChannelSendToolOptions = {
   // the model can self-correct on its next turn. Absent for sessions whose
   // origin isn't a channel (e.g. cron prompts that send to channels).
   origin?: ChannelSendOrigin
+  getOutboundOrigin?: () => ChannelOutboundOrigin | undefined
   // Scopes the per-turn false-receipt ledger for github resolve close-outs.
   // Defaults to '' when absent (cron / non-channel sessions); the guard then
   // finds no recorded action and falls back to its safe default.
@@ -46,6 +48,7 @@ export type CreateChannelSendToolOptions = {
 export function createChannelSendTool({
   router,
   origin,
+  getOutboundOrigin,
   sessionId = '',
   logger = consoleChannelLogger,
 }: CreateChannelSendToolOptions) {
@@ -331,15 +334,19 @@ export function createChannelSendTool({
         ? ((await router.captureBackgroundResultCoverage?.(sessionId)) ?? [])
         : []
       const inboundCoverage = settlesOrigin ? ((await router.captureInboundResultCoverage?.(sessionId)) ?? []) : []
-      const result = await router.send({
-        adapter,
-        workspace: params.workspace,
-        chat: params.chat,
-        ...(params.thread !== undefined ? { thread: params.thread } : {}),
-        ...(bodyText !== undefined ? { text: bodyText } : {}),
-        ...(params.link_previews !== undefined ? { link_previews: params.link_previews } : {}),
-        ...(attachments !== undefined ? { attachments } : {}),
-      })
+      const outboundOrigin = getOutboundOrigin?.()
+      const result = await router.send(
+        {
+          adapter,
+          workspace: params.workspace,
+          chat: params.chat,
+          ...(params.thread !== undefined ? { thread: params.thread } : {}),
+          ...(bodyText !== undefined ? { text: bodyText } : {}),
+          ...(params.link_previews !== undefined ? { link_previews: params.link_previews } : {}),
+          ...(attachments !== undefined ? { attachments } : {}),
+        },
+        outboundOrigin ? { origin: outboundOrigin } : undefined,
+      )
 
       if (!result.ok) {
         logger.warn(
@@ -386,7 +393,7 @@ export function createChannelSendTool({
       // denials keep the lighter prefix. See channel-reply.ts for the full
       // rationale (PR #481 self-reply loop).
       if (result.ok) {
-        const echo = renderOutboundEcho(bodyText, attachments)
+        const echo = renderOutboundEcho(result.deliveredText ?? bodyText, attachments)
         const receipt =
           `posted to ${params.adapter}:${params.workspace}/${params.chat}: ${echo}` +
           (result.messageId !== undefined ? `\nmessage_id=${JSON.stringify(result.messageId)}` : '') +

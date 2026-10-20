@@ -3,7 +3,7 @@ import { describe, expect, spyOn, test } from 'bun:test'
 import { z } from 'zod'
 
 import { noopPermissionService } from '@/permissions'
-import type { HookBus, PluginRegistry } from '@/plugin'
+import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
 
 import * as agentIndex from './index'
@@ -21,6 +21,7 @@ import {
 
 function makeFakeHookBus(events: string[]): HookBus {
   return {
+    ...createHookBus(),
     registerAll: () => {},
     unregisterAll: () => {},
     runSessionStart: async () => {},

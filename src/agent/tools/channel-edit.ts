@@ -10,6 +10,7 @@ import {
 } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 import type { EditMessageResult } from '@/channels/types'
+import type { ChannelOutboundOrigin } from '@/plugin'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { renderOutboundEcho, TOOL_RESULT_PREFIX } from './channel-reply'
@@ -17,10 +18,15 @@ import { fenceToolResult } from './runtime-notice'
 
 export type CreateChannelEditToolOptions = {
   router: ChannelRouter
+  getOutboundOrigin?: () => ChannelOutboundOrigin | undefined
   logger?: ChannelToolLogger
 }
 
-export function createChannelEditTool({ router, logger = consoleChannelLogger }: CreateChannelEditToolOptions) {
+export function createChannelEditTool({
+  router,
+  getOutboundOrigin,
+  logger = consoleChannelLogger,
+}: CreateChannelEditToolOptions) {
   return defineTool({
     name: 'channel_edit',
     label: 'Channel Edit',
@@ -96,20 +102,24 @@ export function createChannelEditTool({ router, logger = consoleChannelLogger }:
       const text = stripThinkBlocks(params.text)
       if (text === '') return deny('the replacement text is empty after removing reasoning blocks')
 
-      const result = await router.editMessage({
-        adapter,
-        workspace: params.workspace,
-        chat: params.chat,
-        ...(params.thread !== undefined ? { thread: params.thread } : {}),
-        messageId: params.message_id,
-        text,
-      })
+      const outboundOrigin = getOutboundOrigin?.()
+      const result = await router.editMessage(
+        {
+          adapter,
+          workspace: params.workspace,
+          chat: params.chat,
+          ...(params.thread !== undefined ? { thread: params.thread } : {}),
+          messageId: params.message_id,
+          text,
+        },
+        outboundOrigin ? { origin: outboundOrigin } : undefined,
+      )
 
       if (!result.ok) {
         return deny(`${adapter}:${params.workspace}/${params.chat}: ${result.error}`, result.code)
       }
 
-      const echo = renderOutboundEcho(text, undefined)
+      const echo = renderOutboundEcho(result.deliveredText ?? text, undefined)
       const receipt = `edited ${adapter}:${params.workspace}/${params.chat} message ${params.message_id}: ${echo}`
       return {
         content: [{ type: 'text' as const, text: fenceToolResult(receipt) }],

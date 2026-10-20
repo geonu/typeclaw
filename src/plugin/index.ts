@@ -17,6 +17,10 @@ export {
 
 export type {
   BuiltinToolRef,
+  ChannelMessageObservedEvent,
+  ChannelOutboundBeforeEvent,
+  ChannelOutboundBeforeResult,
+  ChannelOutboundOrigin,
   CommandExecResult,
   CommandStreams,
   ContainerCommand,
@@ -54,6 +58,7 @@ export type {
   SessionTurnEndEvent,
   SessionTurnStartEvent,
   SpawnSubagentOptions,
+  SlackObservedMessage,
   Subagent,
   SubagentContext,
   Tool,

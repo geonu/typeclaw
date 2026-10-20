@@ -1,4 +1,6 @@
 import type {
+  ChannelMessageObservedEvent,
+  ChannelOutboundBeforeEvent,
   HookContext,
   Hooks,
   PluginLogger,
@@ -45,6 +47,11 @@ export const END_HANDLER_TIMEOUT_MS = 60_000
 // inline, AND regressions that re-introduce expensive inline prompt work.
 export const PROMPT_HANDLER_TIMEOUT_MS = 20_000
 
+// Observers should enqueue and return. These bounds abandon asynchronous work;
+// they cannot preempt synchronous code in a full-trust, in-process plugin.
+export const OBSERVED_HANDLER_TIMEOUT_MS = 10_000
+export const OUTBOUND_HANDLER_TIMEOUT_MS = 30_000
+
 export type RegisteredHook<K extends keyof Hooks> = {
   pluginName: string
   agentDir: string
@@ -61,6 +68,8 @@ export type HookBus = {
   runSessionPrompt: (event: SessionPromptEvent) => Promise<void>
   runSessionTurnStart: (event: SessionTurnStartEvent) => Promise<void>
   runSessionTurnEnd: (event: SessionTurnEndEvent) => Promise<void>
+  runChannelMessageObserved: (event: ChannelMessageObservedEvent) => void
+  runChannelOutboundBefore: (event: ChannelOutboundBeforeEvent) => Promise<{ text: string }>
   runToolBefore: (
     event: ToolBeforeEvent,
     guards?: readonly {
@@ -90,6 +99,8 @@ export type CreateHookBusOptions = {
   endHandlerTimeoutMs?: number
   // Test seam: per-handler ceiling for session.prompt invocations.
   promptHandlerTimeoutMs?: number
+  observedHandlerTimeoutMs?: number
+  outboundHandlerTimeoutMs?: number
 }
 
 type Registries = {
@@ -101,12 +112,16 @@ type Registries = {
   'session.turn.end': RegisteredHook<'session.turn.end'>[]
   'tool.before': Array<RegisteredHook<'tool.before'> | { pluginName: string; guardOwner: true; logger: PluginLogger }>
   'tool.after': RegisteredHook<'tool.after'>[]
+  'channel.message.observed': RegisteredHook<'channel.message.observed'>[]
+  'channel.outbound.before': RegisteredHook<'channel.outbound.before'>[]
 }
 
 export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
   const idleHandlerTimeoutMs = options.idleHandlerTimeoutMs ?? IDLE_HANDLER_TIMEOUT_MS
   const endHandlerTimeoutMs = options.endHandlerTimeoutMs ?? END_HANDLER_TIMEOUT_MS
   const promptHandlerTimeoutMs = options.promptHandlerTimeoutMs ?? PROMPT_HANDLER_TIMEOUT_MS
+  const observedHandlerTimeoutMs = options.observedHandlerTimeoutMs ?? OBSERVED_HANDLER_TIMEOUT_MS
+  const outboundHandlerTimeoutMs = options.outboundHandlerTimeoutMs ?? OUTBOUND_HANDLER_TIMEOUT_MS
   const r: Registries = {
     'session.start': [],
     'session.end': [],
@@ -116,6 +131,8 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
     'session.turn.end': [],
     'tool.before': [],
     'tool.after': [],
+    'channel.message.observed': [],
+    'channel.outbound.before': [],
   }
 
   function ctx(reg: { pluginName: string; agentDir: string; logger: PluginLogger }): HookContext {
@@ -134,6 +151,12 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
       if (hooks['session.turn.end']) r['session.turn.end'].push({ ...base, handler: hooks['session.turn.end'] })
       if (hooks['tool.before']) r['tool.before'].push({ ...base, handler: hooks['tool.before'] })
       if (hooks['tool.after']) r['tool.after'].push({ ...base, handler: hooks['tool.after'] })
+      if (hooks['channel.message.observed']) {
+        r['channel.message.observed'].push({ ...base, handler: hooks['channel.message.observed'] })
+      }
+      if (hooks['channel.outbound.before']) {
+        r['channel.outbound.before'].push({ ...base, handler: hooks['channel.outbound.before'] })
+      }
     },
 
     unregisterAll(pluginName) {
@@ -145,6 +168,8 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
       r['session.turn.end'] = r['session.turn.end'].filter((h) => h.pluginName !== pluginName)
       r['tool.before'] = r['tool.before'].filter((h) => h.pluginName !== pluginName)
       r['tool.after'] = r['tool.after'].filter((h) => h.pluginName !== pluginName)
+      r['channel.message.observed'] = r['channel.message.observed'].filter((h) => h.pluginName !== pluginName)
+      r['channel.outbound.before'] = r['channel.outbound.before'].filter((h) => h.pluginName !== pluginName)
     },
 
     async runSessionStart(event) {
@@ -268,6 +293,68 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
       }
     },
 
+    runChannelMessageObserved(event) {
+      const regs = r['channel.message.observed']
+      if (regs.length === 0) return
+      let snapshot: ChannelMessageObservedEvent
+      try {
+        snapshot = deepFreeze(structuredClone(event))
+      } catch {
+        for (const reg of regs) reportChannelHookFailure(reg, 'channel.message.observed', 'snapshot failed')
+        return
+      }
+      for (const reg of regs) {
+        // Capture the registration set at receipt, even if a handler reloads it.
+        queueMicrotask(() => {
+          void runChannelHandler(
+            reg,
+            'channel.message.observed',
+            () => reg.handler(snapshot, ctx(reg)),
+            observedHandlerTimeoutMs,
+          )
+        })
+      }
+    },
+
+    async runChannelOutboundBefore(event) {
+      const regs = r['channel.outbound.before']
+      if (regs.length === 0) return { text: event.text }
+      let text = event.text
+      // Capture registrations before awaiting: a reload/addition belongs to the
+      // next logical delivery, not the chain currently being transformed.
+      const registrations = regs.slice()
+      for (const reg of registrations) {
+        const snapshot = Object.freeze({
+          ...event,
+          text,
+          ...(event.origin ? { origin: Object.freeze({ ...event.origin }) } : {}),
+        })
+        const result = await runChannelHandler(
+          reg,
+          'channel.outbound.before',
+          () => reg.handler(snapshot, ctx(reg)),
+          outboundHandlerTimeoutMs,
+        )
+        if (result === undefined) continue
+        try {
+          if (typeof result === 'object' && result !== null) {
+            const keys = Reflect.ownKeys(result)
+            if (keys.length === 1 && keys[0] === 'text') {
+              const replacement = result.text
+              if (typeof replacement === 'string' && replacement.trim().length > 0) {
+                if (event.text.trim().length > 0) text = replacement
+                continue
+              }
+            }
+          }
+        } catch {
+          // Invalid accessors cannot turn a fail-open transform into a failure.
+        }
+        reportChannelHookFailure(reg, 'channel.outbound.before', 'invalid result')
+      }
+      return { text }
+    },
+
     count(name) {
       if (name === 'tool.before') return r[name].filter((entry) => !('guardOwner' in entry)).length
       return r[name].length
@@ -278,6 +365,51 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
 function reportHookError(reg: { logger: PluginLogger }, hook: keyof Hooks, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err)
   reg.logger.error(`hook ${hook} threw: ${message}`)
+}
+
+function reportChannelHookFailure(
+  reg: { pluginName: string; logger: PluginLogger },
+  hook: 'channel.message.observed' | 'channel.outbound.before',
+  kind: string,
+): void {
+  try {
+    // Rejected/thrown values may contain message bodies or credentials.
+    reg.logger.error(`hook ${hook} ${kind} (plugin ${reg.pluginName})`)
+  } catch {
+    // Diagnostics must not break routing or fail-open delivery.
+  }
+}
+
+function runChannelHandler<T>(
+  reg: { pluginName: string; logger: PluginLogger },
+  hook: 'channel.message.observed' | 'channel.outbound.before',
+  invoke: () => T | Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value?: T, failure?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (failure) reportChannelHookFailure(reg, hook, failure)
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(undefined, 'timed out'), timeoutMs)
+    Promise.resolve()
+      .then(invoke)
+      .then(
+        (value) => finish(value),
+        () => finish(undefined, 'failed'),
+      )
+  })
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const key of Object.keys(value)) deepFreeze((value as Record<string, unknown>)[key])
+  return value
 }
 
 async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {

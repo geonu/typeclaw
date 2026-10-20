@@ -95,6 +95,12 @@ The bot responds to a Slack message at most once. If it engaged the original, la
 
 Suppressed retries still associate their timestamp and client-message identities with the same cached delivery, so a resend under another timestamp cannot trigger a second mentioned delivery.
 
+## Plugin edge hooks
+
+[`channel.message.observed`](/docs/reference/plugin-api#channel-edge-hooks) gives trusted plugins a deep-frozen snapshot of raw Socket Mode `message` receipts after ack, before wake filtering or deduplication. It includes non-mentions, edits, deletes, bot/self messages and duplicates; `app_mention`-only events are excluded. Observation is best-effort, does not open a model session and adds no Slack scopes or durable storage.
+
+[`channel.outbound.before`](/docs/reference/plugin-api#channel-edge-hooks) transforms application text on sends, captions, edits and existing runtime output. Thread `!cmd` responses also pass through it. When a reviewer is installed, native slash commands ack immediately and return the reviewed response ephemerally via a validated Slack response URL; unavailable/unsafe URLs retain the original ack response. Hook failures/timeouts retain the previous text. No hook can change destinations, permissions or turn accounting, and no hook re-enables suppressed notices.
+
 ## Slash commands
 
 `/help`, `/stop`, `/reload`, `/restart`. Thread `!cmd` syntax also works.

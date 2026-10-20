@@ -3,6 +3,7 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000
 
 export type SlackAuthorResolverOptions = {
   token: string
+  fetchImpl?: typeof fetch
   now?: () => number
   ttlMs?: number
 }
@@ -39,7 +40,7 @@ export function createSlackAuthorResolver(options: SlackAuthorResolverOptions): 
     const existing = inflight.get(userId)
     if (existing) return existing
 
-    const promise = fetchUserName(userId, options.token)
+    const promise = fetchUserName(userId, options.token, options.fetchImpl ?? fetch)
       .then((name) => {
         if (name !== userId) {
           cache.set(userId, { name, expiresAt: now() + ttlMs })
@@ -57,9 +58,9 @@ export function createSlackAuthorResolver(options: SlackAuthorResolverOptions): 
   return { resolve }
 }
 
-async function fetchUserName(userId: string, token: string): Promise<string> {
+async function fetchUserName(userId: string, token: string, fetchImpl: typeof fetch): Promise<string> {
   try {
-    const response = await fetch(`${SLACK_API_BASE}/users.info?user=${encodeURIComponent(userId)}`, {
+    const response = await fetchImpl(`${SLACK_API_BASE}/users.info?user=${encodeURIComponent(userId)}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!response.ok) return userId

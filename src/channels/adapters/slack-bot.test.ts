@@ -14,6 +14,7 @@ import { channelsSchema, defaultHistoryConfig } from '@/channels/schema'
 import type { ChannelKey, FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 import { SLACK_APP_MANIFEST } from '@/cli/ui'
 import { noopPermissionService } from '@/permissions'
+import { createHookBus, type ChannelMessageObservedEvent } from '@/plugin'
 
 import {
   createOutboundCallback,
@@ -31,6 +32,7 @@ import {
   SLACK_HISTORY_LIMIT_MAX,
   SLACK_SLASH_COMMAND_NAMES,
   type SlackBotAdapter,
+  type SlackMessageObserver,
 } from './slack-bot'
 import { classifyInbound, type SlackInboundAppMentionEvent } from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
@@ -1076,6 +1078,7 @@ function editIngressAdapter(
   router: ChannelRouter,
   listener: FakeSlackBotListener,
   posted: string[] = [],
+  messageObserver?: SlackMessageObserver,
 ): SlackBotAdapter {
   return createSlackBotAdapter({
     router,
@@ -1083,6 +1086,7 @@ function editIngressAdapter(
     token: 'xoxb-test',
     appToken: 'xapp-test',
     logger: { info: () => {}, warn: () => {}, error: () => {} },
+    ...(messageObserver ? { messageObserver } : {}),
     createClient: () =>
       ({
         login: async () => {},
@@ -3051,5 +3055,147 @@ describe('createThreadCommandHandler', () => {
     const kinds = [a.kind, b.kind].sort()
     expect(kinds).toEqual(['duplicate', 'executed'])
     expect(executions).toBe(1)
+  })
+})
+
+describe('Slack channel edge hooks', () => {
+  test('raw normal, duplicate, edit, delete and self/bot deliveries are observed after ack without waking a session', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'slack-observed-'))
+    const listener = new FakeSlackBotListener()
+    const bus = createHookBus()
+    const observations: ChannelMessageObservedEvent[] = []
+    const ready = Promise.withResolvers<void>()
+    let acknowledgements = 0
+    let sessions = 0
+    let active = true
+    const base = { ...EDITED_MESSAGE, text: '확인 부탁드립니다, <@U_OTHER>.' }
+    const events = [
+      base,
+      { ...base },
+      messageChanged('이전 요청', '수정된 요청', base),
+      {
+        type: 'message',
+        subtype: 'message_deleted',
+        channel: base.channel,
+        deleted_ts: base.ts,
+        event_ts: '1700000099.000002',
+        previous_message: base,
+      },
+      { ...base, user: 'UBOT', ts: '1700000000.000200' },
+      { ...base, user: 'U_PEER_BOT', bot_id: 'B_EXAMPLE', subtype: 'bot_message', ts: '1700000000.000300' },
+    ]
+    const expected = structuredClone(events)
+    bus.registerAll(
+      'observer',
+      '/agent',
+      { info() {}, warn() {}, error() {} },
+      {
+        'channel.message.observed': (event) => {
+          expect(acknowledgements).toBeGreaterThan(0)
+          observations.push(event)
+          if (observations.length === events.length) ready.resolve()
+        },
+      },
+    )
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => ({
+        enabled: true,
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        history: defaultHistoryConfig(),
+      }),
+      permissions: noopPermissionService,
+      logger: { info() {}, warn() {}, error() {} },
+      createSessionForChannel: async () => {
+        sessions++
+        throw new Error('Observation must not create a model session')
+      },
+    })
+    const adapter = editIngressAdapter(router, listener, [], {
+      active: () => active && bus.count('channel.message.observed') > 0,
+      observe: (event) => bus.runChannelMessageObserved(event),
+    })
+    try {
+      await adapter.start()
+      for (const event of events)
+        listener.emit('message', {
+          ack: () => {
+            acknowledgements++
+          },
+          event,
+        })
+      base.text = 'later transport mutation'
+      await ready.promise
+      active = false
+      listener.emit('message', {
+        ack: () => {
+          acknowledgements++
+        },
+        event: { ...base, ts: '1700000000.000400' },
+      })
+      listener.emit('app_mention', {
+        ack: () => {
+          acknowledgements++
+        },
+        event: appMention({ ...EDITED_MESSAGE, user: 'UBOT' }, '<@UBOT> synthetic', false),
+      })
+      await adapter.stop()
+      const received: unknown[] = observations.map((event) => event.event)
+      expect(received).toEqual(expected)
+      expect(observations.every((event) => event.workspace === 'T0ACME' && event.selfUserId === 'UBOT')).toBe(true)
+      expect(Object.isFrozen(observations[2]!.event.message)).toBe(true)
+      expect(acknowledgements).toBe(8)
+      expect(sessions).toBe(0)
+    } finally {
+      await adapter.stop()
+      await router.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('thread control replies use the outbound hook exactly once without consuming a tool-send slot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'slack-control-review-'))
+    const listener = new FakeSlackBotListener()
+    const bus = createHookBus()
+    const posted: string[] = []
+    const reviews: Array<{ source: string; outputKind?: string }> = []
+    bus.registerAll(
+      'copy-editor',
+      '/agent',
+      { info() {}, warn() {}, error() {} },
+      {
+        'channel.outbound.before': (event) => {
+          reviews.push({ source: event.source, outputKind: event.outputKind })
+          return { text: 'Reviewed control response' }
+        },
+      },
+    )
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => channelsSchema.parse({ 'slack-bot': {} })['slack-bot']!,
+      logger: { info() {}, warn() {}, error() {} },
+      reviewOutbound: (event) => bus.runChannelOutboundBefore(event),
+      outboundReviewerActive: () => bus.count('channel.outbound.before') > 0,
+    })
+    const adapter = editIngressAdapter(router, listener, posted)
+    try {
+      await adapter.start()
+      emitTo(listener)('message', { ...EDITED_MESSAGE, text: '!help', thread_ts: '1700000000.000001' })
+      await adapter.stop()
+      expect(posted).toEqual(['Reviewed control response'])
+      expect(reviews).toEqual([{ source: 'system', outputKind: 'meta' }])
+      expect(
+        router.getConsecutiveSendCount({
+          adapter: 'slack-bot',
+          workspace: 'T0ACME',
+          chat: EDITED_MESSAGE.channel,
+          thread: '1700000000.000001',
+        }),
+      ).toBe(0)
+    } finally {
+      await adapter.stop()
+      await router.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
