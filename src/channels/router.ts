@@ -40,6 +40,7 @@ import type { ChannelOutboundBeforeEvent, ChannelOutboundOrigin, HookBus } from 
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
+import { adapterNamespace } from './adapter-namespace'
 import { extractMentionedUserIds } from './adapters/mention-hints'
 import {
   BackgroundObligationStore,
@@ -111,7 +112,7 @@ import {
   type ReadCapability,
   type WriteCapability,
 } from './schema'
-import { createSessionHandoff, type ChannelHandoffResult } from './session-handoff'
+import { checkHandoffAccess, createSessionHandoff, type ChannelHandoffResult } from './session-handoff'
 import {
   createSessionSearch,
   type SessionActivity,
@@ -764,7 +765,7 @@ export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapte
 
 export type { ChannelHandoffResult } from './session-handoff'
 
-const DM_ORIGIN_WINDOW_MS = 30 * 60_000
+const CONVERSATION_ORIGIN_WINDOW_MS = 30 * 60_000
 
 type QueuedInbound = {
   inputId: string
@@ -1028,12 +1029,10 @@ type LiveSession = {
   // True when THIS turn's batch carries a cross-session handoff inbound. The
   // handoff loop guard: a handoff-started turn cannot hand off again.
   currentTurnHandoff: boolean
-  // Whether the most recent inbound routed to this session was a DM. Lets a
-  // DM inbound find the non-DM conversation its author just came from.
+  // Whether the most recent inbound was private, for handoff context framing.
   lastInboundIsDm: boolean
-  // Origin channel keys already hinted to this DM session, so the hint is
-  // rendered once per origin instead of on every DM message.
-  dmOriginHintedKeys: Set<string>
+  // Hint each recently visited conversation only once in this session.
+  originHintedKeys: Set<string>
   // Typing-status anchor of the inbound that triggered THIS turn (last item in
   // the drained batch, mirroring `currentTurnReactionRef`). Adapter-opaque ts
   // carried only to the typing path; null when the triggering inbound supplied
@@ -3322,7 +3321,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnExplicitlyAddressed: false,
         currentTurnHandoff: false,
         lastInboundIsDm: false,
-        dmOriginHintedKeys: new Set(),
+        originHintedKeys: new Set(),
         currentTurnTypingThread: null,
         dirtyTypingThreads: new Set(),
         currentTurnEngageReactions: [],
@@ -6391,12 +6390,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       updateLoopGuard(live, event)
 
-      const dmOriginNote = event.isDm && event.handoff !== true ? takeDmOriginNote(live, event) : undefined
+      const originNote = event.handoff !== true ? takeConversationOriginNote(live, event) : undefined
       live.lastInboundIsDm = event.isDm
       enqueue(
         live,
-        dmOriginNote !== undefined
-          ? { ...event, routingNote: [event.routingNote, dmOriginNote].filter((n) => n !== undefined).join('\n') }
+        originNote !== undefined
+          ? { ...event, routingNote: [event.routingNote, originNote].filter((n) => n !== undefined).join('\n') }
           : event,
         engageReaction,
         admission.inputId,
@@ -9057,20 +9056,35 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'delivered', keyId: live.keyId }
   }
 
-  // A user who moved from a channel into a DM (e.g. to do a role grant in
-  // private) usually wants the result back where they came from. Point the DM
-  // session at that origin once, so "continue" becomes a handoff to the session
-  // that owns the channel instead of a blind channel_send from stale context.
-  const takeDmOriginNote = (dm: LiveSession, event: InboundMessage): string | undefined => {
+  // Only shared namespaces identify the same person across conversations.
+  // Check the NEW inbound author, not the session's previous turn owner.
+  const takeConversationOriginNote = (live: LiveSession, event: InboundMessage): string | undefined => {
     let origin: LiveSession | undefined
     for (const s of liveSessions.values()) {
-      if (s === dm || s.destroyed || s.lastInboundIsDm || s.key.adapter !== event.adapter) continue
-      if (now() - s.lastInboundAt > DM_ORIGIN_WINDOW_MS) continue
-      if (!s.lastTurnAuthorIds.has(event.authorId) && !s.currentTurnAuthorIds.has(event.authorId)) continue
+      if (s === live || s.destroyed || adapterNamespace(s.key.adapter) !== adapterNamespace(event.adapter)) continue
+      if (!options.configForAdapter(s.key.adapter)?.enabled) continue
+      if (
+        !s.participants.some(
+          (p) => p.authorId === event.authorId && now() - p.lastMessageAt <= CONVERSATION_ORIGIN_WINDOW_MS,
+        )
+      )
+        continue
+      const access = checkHandoffAccess({
+        source: {
+          ...live,
+          currentTurnAuthorId: event.authorId,
+          currentTurnAuthorAdapter: event.adapter,
+          currentTurnHandoff: false,
+          lastTurnHandoff: false,
+        },
+        target: s,
+        permissions,
+      })
+      if (!access.ok) continue
       if (origin === undefined || s.lastInboundAt > origin.lastInboundAt) origin = s
     }
-    if (origin === undefined || dm.dmOriginHintedKeys.has(origin.keyId)) return undefined
-    dm.dmOriginHintedKeys.add(origin.keyId)
+    if (origin === undefined || live.originHintedKeys.has(origin.keyId)) return undefined
+    live.originHintedKeys.add(origin.keyId)
     const k = origin.key
     const thread = k.thread !== null ? ` thread="${k.thread}"` : ''
     return (
