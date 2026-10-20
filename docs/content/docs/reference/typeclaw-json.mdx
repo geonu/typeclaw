@@ -223,6 +223,21 @@ Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `ap
 
 All three installation toggles support the same brokered `coding_agent` tool. Claude uses `providers.anthropic`; Codex uses ChatGPT subscription OAuth in `providers.openai-codex`, not an OpenAI API key. OmO selects either provider from its task model and pins internal model calls to that brokered model. Provider credentials remain runtime-private; per-task CLI state contains no exported auth profile. No global TypeClaw Stop/SessionStart hooks or runtime-HOME seeds are installed. See [Delegate coding](/docs/guides/delegate-coding) for setup, explicit resume, and read-only planning. The pinned versions are compatibility candidates; live subscription and production Linux bwrap qualification are release gates, not implied by successful installation.
 
+## browser
+
+```json
+{ "browser": { "engines": ["agent-browser", "omowright", "browser-use"], "extensions": ["browserskill"] } }
+```
+
+| Field        | Default             | Values                                      |
+| ------------ | ------------------- | ------------------------------------------- |
+| `engines`    | `["agent-browser"]` | `agent-browser`, `omowright`, `browser-use` |
+| `extensions` | `[]`                | `browserskill`                              |
+
+**Restart-required.** Each enabled engine or extension adds a pinned, checksum-verified image layer and a bundled skill. The default keeps today's behavior: agent-browser launches its own per-session Chrome.
+
+Enabling any other engine or any extension starts one TypeClaw-managed Chrome at boot, shared by every engine. Its tabs and logins persist across bash calls and sessions until the container restarts. Chrome runs in its own network-isolated bwrap sandbox with no view of the agent folder. It reaches the internet through a runtime SOCKS proxy that is still subject to `network.blockInternal`. Bash reaches it only through a loopback relay that requires a per-boot token. The token is injected (`TYPECLAW_BROWSER_CDP_URL`, plus each engine's own variable such as `AGENT_BROWSER_CDP`, `OMOWRIGHT_CDP_URL`, `BU_CDP_WS`) only for roles holding `browser.shared`. Downloads and uploads go through `workspace/.typeclaw-browser/files` (`$TYPECLAW_BROWSER_FILES`). Chrome runs headed when `docker.file.xvfb` is on and headless otherwise. Extensions load into the shared Chrome. For `browserskill`, TypeClaw also supervises the `bsk` daemon and logs to the operator log whether the extension connected. Crashes restart with backoff; see `typeclaw logs`.
+
 ## Hot reload
 
 ```sh
