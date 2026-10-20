@@ -82,7 +82,7 @@ export function createOperatorSubagent(): Subagent<OperatorPayload> {
     payloadSchema: operatorPayloadSchema,
     visibility: 'public',
     rosterDescription:
-      'write-capable: bash-with-side-effects, write, edit, coding_agent — for browser sessions, refactors, deploys, batch ops, and brokered Claude Code/Codex delegation; runs at YOUR role',
+      'write-capable: bash-with-side-effects, write, edit, coding_agent — for refactors, deploys, batch ops, and brokered Claude Code/Codex delegation; runs at YOUR role',
     // No `requiresSpecificPermission`: a subagent inherits `spawnedByRole`, and
     // main sessions are never narrowed to a subset of the builtin tools, so a
     // caller already holds every tool listed above. Gating the spawn bought no
