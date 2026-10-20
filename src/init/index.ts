@@ -812,6 +812,7 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     await writeFile(
       join(root, DOCKERFILE),
       buildDockerfile(typeclawConfig.docker.file, {
+        browser: typeclawConfig.browser,
         // A local-spec dev install must inline the heavy stack: its unreleased
         // version has no published `typeclaw-base` tag, so resolving a base
         // image version would pin a nonexistent `FROM ghcr.io/...:<version>`.

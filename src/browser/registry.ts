@@ -39,6 +39,11 @@ export const BROWSER_ROOT = '/usr/local/lib/typeclaw-browser'
 // because Chrome's own sandbox cannot run inside bwrap.
 export const CHROME_LAUNCHER = '/usr/local/lib/typeclaw-agent-browser/chrome'
 
+export const BSK_BIN = `${BROWSER_ROOT}/bsk/bsk`
+export const BSK_SHIM = `${BROWSER_ROOT}/bsk/shim.mjs`
+// BrowserSkill's extension dials its daemon here, inside the browser sandbox.
+export const BSK_DAEMON_PORT = 52800
+
 export const OMOWRIGHT_MODULE = `${BROWSER_ROOT}/omowright/index.js`
 
 const OMOWRIGHT_COMMIT = 'a3f0c2b54fc41804beca7eb6ab26ee54804742a9'
