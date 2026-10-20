@@ -12,8 +12,10 @@ import { ClaudeStreamParser, claudeArguments, claudeEnvironment, type CodingMode
 import { CodexStreamParser, codexArguments, codexConfig, codexEnvironment } from './codex'
 import { omoArguments, omoConfiguration, omoEnvironment, type OmoModel } from './omo'
 import { hasOmoSession, prepareOmoDirectories } from './omo-state'
-import { OmoStreamParser } from './omo-stream'
+import { OmoDeltaFilter, OmoStreamParser } from './omo-stream'
 import type { CodingWorkspace } from './worktree'
+
+const OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024
 
 export type CodingRunResult = {
   readonly state: 'completed' | 'incomplete' | 'failed' | 'cancelled'
@@ -70,6 +72,7 @@ export async function runCodingAgent(
   let exitCode: number | null = null
   let failure = false
   let missingSession = false
+  let outputCapExceeded = false
   const oom = readOomEvents()
   try {
     signal.throwIfAborted()
@@ -160,16 +163,20 @@ export async function runCodingAgent(
     const consume = async (stream: NodeJS.ReadableStream, output: boolean): Promise<void> => {
       const decoder = new TextDecoder()
       const scrubber = new SecretScrubber([broker?.capability ?? ''])
+      const deltas = output && engine === 'omo' ? new OmoDeltaFilter() : undefined
       let total = 0
       for await (const chunk of stream) {
+        if (outputCapExceeded) continue
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
-        total += bytes.length
-        if (total > 16 * 1024 * 1024) {
+        const scrubbed = scrubber.push(decoder.decode(bytes, { stream: true }))
+        const text = deltas ? deltas.push(scrubbed) : scrubbed
+        total += Buffer.byteLength(text)
+        if (total > OUTPUT_LIMIT_BYTES) {
+          outputCapExceeded = true
           failure = true
           kill()
           continue
         }
-        const text = scrubber.push(decoder.decode(bytes, { stream: true }))
         if (output) {
           stdout += text
           try {
@@ -180,7 +187,15 @@ export async function runCodingAgent(
           }
         } else stderr += text
       }
-      const final = scrubber.push(decoder.decode(), true)
+      const flushed = scrubber.push(decoder.decode(), true)
+      const final = deltas ? deltas.push(flushed) + deltas.flush() : flushed
+      if (outputCapExceeded) return
+      total += Buffer.byteLength(final)
+      if (total > OUTPUT_LIMIT_BYTES) {
+        outputCapExceeded = true
+        failure = true
+        return
+      }
       if (output) {
         stdout += final
         stdoutTail = final
@@ -256,8 +271,10 @@ export async function runCodingAgent(
           ? 'The recorded OmO session is missing or unsafe. Restore its task-local session file before resuming; partial work is preserved.'
           : timedOut
             ? 'Invocation timed out; partial work is preserved.'
-            : parser.permissionDenied
-              ? 'The coding CLI reported a permission denial; review the task and continue explicitly.'
-              : 'Invocation did not complete. Inspect the saved output and partial diff; verify the installed CLI and sandbox.'),
+            : outputCapExceeded
+              ? 'The coding CLI exceeded the 16 MiB output limit and was stopped; partial work is preserved. Resume with a narrower prompt.'
+              : parser.permissionDenied
+                ? 'The coding CLI reported a permission denial; review the task and continue explicitly.'
+                : 'Invocation did not complete. Inspect the saved output and partial diff; verify the installed CLI and sandbox.'),
   }
 }
