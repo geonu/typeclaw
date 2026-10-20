@@ -8,8 +8,35 @@ import {
   describeAutoUpgrade,
   expectedInstalledAfterUpgrade,
   outcomeForcesInstall,
+  outcomeRequiresForceInstall,
   readInstalledTypeclawVersionFromAgent,
 } from './auto-upgrade'
+
+describe('outcomeRequiresForceInstall', () => {
+  test('forces a reinstall when switching a local spec back to a registry range', () => {
+    expect(
+      outcomeRequiresForceInstall({
+        kind: 'spec-rewritten',
+        from: 'file:../typeclaw',
+        to: '^1.2.3',
+        cliVersion: '1.2.3',
+      }),
+    ).toBe(true)
+    expect(
+      outcomeRequiresForceInstall({ kind: 'spec-rewritten', from: 'link:typeclaw', to: '^1.2.3', cliVersion: '1.2.3' }),
+    ).toBe(true)
+    expect(outcomeRequiresForceInstall({ kind: 'relinked-to-local', from: '^1.2.3', to: 'file:../typeclaw' })).toBe(
+      true,
+    )
+  })
+
+  test('leaves registry-to-registry upgrades to bun update', () => {
+    expect(
+      outcomeRequiresForceInstall({ kind: 'spec-rewritten', from: '^1.1.0', to: '^1.2.3', cliVersion: '1.2.3' }),
+    ).toBe(false)
+    expect(outcomeRequiresForceInstall({ kind: 'up-to-date', installedVersion: '1.2.3' })).toBe(false)
+  })
+})
 
 let root: string
 

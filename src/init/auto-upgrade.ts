@@ -141,8 +141,14 @@ export function outcomeForcesInstall(outcome: AutoUpgradeOutcome): boolean {
 // (file deps don't "update"), NOT the `bun update --latest` path above — and it
 // skips version verification, since a local install's version is whatever the
 // checkout declares. start.ts ORs this into its ensureDeps force flag.
+//
+// Leaving a local spec for a registry range needs the same force: `bun update
+// --latest` rewrites bun.lock but keeps the local copy in node_modules when its
+// version already satisfies the range, so the agent would keep running the
+// checkout's code.
 export function outcomeRequiresForceInstall(outcome: AutoUpgradeOutcome): boolean {
-  return outcome.kind === 'relinked-to-local'
+  if (outcome.kind === 'relinked-to-local') return true
+  return outcome.kind === 'spec-rewritten' && (outcome.from.startsWith('file:') || outcome.from.startsWith('link:'))
 }
 
 // The version we expect to find in node_modules/typeclaw after the
