@@ -888,7 +888,7 @@ export function buildChannelTools(
     if (origin.adapter === 'github' && sessionId !== undefined)
       tools.push(createPostGithubReviewTool({ router: channelRouter, origin: channelOrigin, sessionId }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
-    tools.push(createChannelReadTool({ router: channelRouter }))
+    tools.push(createChannelReadTool({ router: channelRouter, ...(sessionId !== undefined ? { sessionId } : {}) }))
     tools.push(
       createChannelSendTool({
         router: channelRouter,

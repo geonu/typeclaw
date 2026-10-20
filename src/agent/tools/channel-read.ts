@@ -3,7 +3,7 @@ import { defineTool } from '@earendil-works/pi-coding-agent'
 
 import type { ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
-import type { ChannelListEntry } from '@/channels/types'
+import type { ChannelKey, ChannelListEntry } from '@/channels/types'
 
 import { renderHistoryMessage, renderHistoryMessages } from './channel-history-render'
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
@@ -11,6 +11,7 @@ import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure 
 export type CreateChannelReadToolOptions = {
   router: ChannelRouter
   logger?: ChannelToolLogger
+  sessionId?: string
 }
 
 const DEFAULT_LIMIT = 20
@@ -22,7 +23,11 @@ const DEFAULT_LIMIT = 20
 // modes share one tool to keep the per-turn tool-schema budget small, mirroring
 // web_fetch's strategy union; mode-specific required params are validated at
 // runtime since JSON-Schema can't express "required-if".
-export function createChannelReadTool({ router, logger = consoleChannelLogger }: CreateChannelReadToolOptions) {
+export function createChannelReadTool({
+  router,
+  logger = consoleChannelLogger,
+  sessionId,
+}: CreateChannelReadToolOptions) {
   return defineTool({
     name: 'channel_read',
     label: 'Channel Read',
@@ -79,21 +84,62 @@ export function createChannelReadTool({ router, logger = consoleChannelLogger }:
     }),
 
     async execute(_toolCallId, params) {
-      const adapter = params.adapter as AdapterId
+      const adapter = params.adapter
       const limit = params.limit ?? DEFAULT_LIMIT
 
-      if (params.mode === 'history') {
-        return await readHistory({ router, logger, adapter, params, limit })
+      let result: { content: { type: 'text'; text: string }[]; details: Details }
+      switch (params.mode) {
+        case 'history':
+          result = await readHistory({ router, logger, adapter, params, limit })
+          break
+        case 'message':
+          result = await readMessage({ router, logger, adapter, params })
+          break
+        case 'list':
+          result = await readList({ router, logger, adapter, params, limit })
+          break
       }
-      if (params.mode === 'message') {
-        return await readMessage({ router, logger, adapter, params })
+      // These are platform protocol errors, not natural-language intent matching.
+      const error = result.details.error?.toLocaleLowerCase() ?? ''
+      const accessDenied = [
+        'missing access',
+        'missing permissions',
+        'access denied',
+        'access_denied',
+        'permission-denied',
+        'forbidden',
+        'http_403',
+        'missing_scope',
+        'not_in_channel',
+      ].some((code) => error.includes(code))
+      if (!result.details.ok && accessDenied && sessionId !== undefined && params.chat !== undefined) {
+        const handoffTargets = router
+          .searchSessions({
+            fromSessionId: sessionId,
+            query: '',
+            conversation: { adapter, workspace: params.workspace, chat: params.chat, thread: params.thread ?? null },
+          })
+          .map((entry) => entry.target)
+        if (handoffTargets.length > 0) {
+          const hint = `Another adapter has an authorized live session for this conversation. Use channel_handoff with a target below instead of asking the user to repair this account's access:\n${JSON.stringify(handoffTargets)}`
+          return {
+            content: result.content.map((part) => ({ ...part, text: `${part.text}\n\n${hint}` })),
+            details: { ...result.details, handoffTargets },
+          }
+        }
       }
-      return await readList({ router, logger, adapter, params, limit })
+      return result
     },
   })
 }
 
-type Details = { ok: boolean; error?: string; count?: number; nextCursor?: string }
+type Details = {
+  ok: boolean
+  error?: string
+  count?: number
+  nextCursor?: string
+  handoffTargets?: readonly ChannelKey[]
+}
 
 function fail(error: string): { content: [{ type: 'text'; text: string }]; details: Details } {
   return { content: [{ type: 'text' as const, text: `channel_read error: ${error}` }], details: { ok: false, error } }
