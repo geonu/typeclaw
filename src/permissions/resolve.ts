@@ -1,3 +1,4 @@
+import { adapterNamespace } from '@/channels/adapter-namespace'
 import { decodeWebexId } from '@/channels/adapters/webex-id-ref'
 import type { AdapterId } from '@/channels/schema'
 
@@ -29,6 +30,7 @@ export type MatchableOrigin =
       chat: string
       parentChat?: string
       lastInboundAuthorId?: string
+      lastInboundAuthorAdapter?: AdapterId
     }
 
 export function matchesOrigin(rule: MatchRule, origin: MatchableOrigin): boolean {
@@ -60,7 +62,11 @@ function matchesChannel(rule: Extract<MatchRule, { kind: 'channel' }>, origin: M
     if (rule.chat !== undefined && !matchesChat(rule.chat, origin)) return false
   }
 
-  if (rule.author !== undefined && !matchesAuthor(rule.platform, rule.author, origin.lastInboundAuthorId)) return false
+  if (rule.author !== undefined) {
+    if (adapterNamespace(origin.lastInboundAuthorAdapter ?? origin.adapter) !== adapterNamespace(origin.adapter))
+      return false
+    if (!matchesAuthor(rule.platform, rule.author, origin.lastInboundAuthorId)) return false
+  }
   return true
 }
 

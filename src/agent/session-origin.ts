@@ -43,6 +43,9 @@ export type SessionOrigin =
       parentChat?: string
       parentChatName?: string
       lastInboundAuthorId?: string
+      // Runtime-authenticated source of a delegated author, never model input.
+      // Foreign namespaces may match authorless rules, not local author IDs.
+      lastInboundAuthorAdapter?: AdapterId
       reactionRef?: ReactionRef
       participants?: readonly ChannelParticipant[]
       membership?: MembershipCount

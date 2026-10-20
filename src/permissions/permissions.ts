@@ -8,6 +8,8 @@ import type { RoleConfig, RolesConfig } from './schema'
 export type PermissionService = {
   has(origin: SessionOrigin | undefined, permission: string): boolean
   resolveRole(origin: SessionOrigin | undefined): string
+  // Discovery/delegation must distinguish an actual rule from the guest fallback.
+  resolveRole(origin: SessionOrigin | undefined, options: { requireMatch: true }): string | undefined
   describe(origin: SessionOrigin | undefined): { role: string; permissions: readonly string[] }
   // Orders two role names on the severity tower so callers can cap an
   // action to the requester's role (a guest turn must not read the output
@@ -208,9 +210,9 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
   // chat ids — even denied traffic that resolves to guest — would otherwise
   // grow the map without limit until the next role-table rebuild. See
   // createBoundedCache for the eviction policy.
-  const roleCache = createBoundedCache<string>(ROLE_CACHE_MAX)
+  const roleCache = createBoundedCache<string | null>(ROLE_CACHE_MAX)
 
-  function computeRole(origin: SessionOrigin): string {
+  function computeRole(origin: SessionOrigin): string | null {
     // Runtime-owned infrastructure (memory, backup) acts on the operator's
     // behalf over operator-owned state. It is constructed only by runtime/
     // bundled code — inbound channel/cron content cannot produce this kind —
@@ -230,25 +232,28 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
     }
 
     const matchable = toMatchable(origin)
-    if (matchable === null) return 'guest'
+    if (matchable === null) return null
 
     for (const role of resolved) {
       for (const rule of role.match) {
         if (matchesOrigin(rule, matchable)) return role.name
       }
     }
-    return 'guest'
+    return null
   }
 
-  function resolveRole(origin: SessionOrigin | undefined): string {
-    if (origin === undefined) return 'guest'
+  function resolveRole(origin: SessionOrigin | undefined): string
+  function resolveRole(origin: SessionOrigin | undefined, options: { requireMatch: true }): string | undefined
+  function resolveRole(origin: SessionOrigin | undefined, options?: { requireMatch: true }): string | undefined {
+    const fallback = options?.requireMatch ? undefined : 'guest'
+    if (origin === undefined) return fallback
     const key = roleCacheKey(origin)
-    if (key === null) return computeRole(origin)
+    if (key === null) return computeRole(origin) ?? fallback
     const cached = roleCache.get(key)
-    if (cached !== undefined) return cached
+    if (cached !== undefined) return cached ?? fallback
     const role = computeRole(origin)
     roleCache.set(key, role)
-    return role
+    return role ?? fallback
   }
 
   function invalidateRoleCache(): void {
@@ -409,6 +414,7 @@ function roleCacheKey(origin: SessionOrigin): string | null {
         origin.chat,
         origin.parentChat ?? '',
         origin.lastInboundAuthorId ?? '',
+        origin.lastInboundAuthorAdapter ?? origin.adapter,
       ].join('\u0000')
     default:
       return null
@@ -427,6 +433,9 @@ function toMatchable(origin: SessionOrigin): Parameters<typeof matchesOrigin>[1]
         chat: origin.chat,
         ...(origin.parentChat !== undefined ? { parentChat: origin.parentChat } : {}),
         ...(origin.lastInboundAuthorId !== undefined ? { lastInboundAuthorId: origin.lastInboundAuthorId } : {}),
+        ...(origin.lastInboundAuthorAdapter !== undefined
+          ? { lastInboundAuthorAdapter: origin.lastInboundAuthorAdapter }
+          : {}),
       }
     default:
       return null
