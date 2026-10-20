@@ -20043,6 +20043,34 @@ describe('ChannelRouter background-child await suppression', () => {
     expect(reactions[0]).toMatchObject({ emoji: 'eyes', reactionRef })
   })
 
+  test('trailing spawn narration after a landed ack is not posted while the background child runs', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, {
+      logs,
+      nowRef: { value: CHILD_STARTED_AT },
+      newestRunningChildSubagentStartedAt: runningChild,
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    // given: the model acks in Korean, spawns a background child, then ends on English console narration
+    await router.route(inbound({ isBotMention: true, text: 'Mercury 3 모델에 대해 리서치해봐' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'Mercury 3 한번 알아보고 올게' })
+      sessions[0]!.setAssistantText("Researcher spawned in the background — I'll report back once it's done.")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: only the ack reaches the channel
+    expect(sent).toEqual(['Mercury 3 한번 알아보고 올게'])
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(logs.some((m) => m.includes('post_send_prose_suppressed cause=awaiting_background_child'))).toBe(true)
+  })
+
   test('new inbounds while the child runs carry the deferred request instead of posting a restart notice', async () => {
     const dir = await tempDir()
     const logs: string[] = []
