@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 
+import { getConfig } from '@/config'
 import { definePlugin } from '@/plugin'
 import { publishForwardRequest, subscribeForwardResult } from '@/portbroker'
 
@@ -23,6 +24,7 @@ let unsubscribeForwardResult: (() => void) | null = null
 
 export default definePlugin({
   plugin: async (ctx) => {
+    if (!getConfig().browser.engines.includes('agent-browser')) return {}
     requestDashboardForward(ctx.logger)
 
     return {

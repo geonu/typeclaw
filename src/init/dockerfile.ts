@@ -1,4 +1,6 @@
 import { CONTAINER_AGENT_MESSENGER_CONFIG_DIR } from '@/agent-messenger/config-dir'
+import { renderBrowserLayers } from '@/browser/dockerfile'
+import type { BrowserConfig } from '@/browser/registry'
 import { ASKPASS_SCRIPT, TYPECLAW_GIT_ASKPASS_PATH } from '@/bundled-plugins/github-cli-auth/git-askpass'
 import { CLAUDE_CODE_VERSION } from '@/coding-agent/claude'
 import { CODEX_CLI_VERSION } from '@/coding-agent/codex'
@@ -12,6 +14,8 @@ import { GHCR_BASE_IMAGE_REPO } from './cli-version'
 export const DOCKERFILE = 'Dockerfile'
 
 export type BuildDockerfileOptions = {
+  // `typeclaw.json#browser`; omitted = the default agent-browser-only image.
+  browser?: BrowserConfig
   // Null or omitted = emit the full inline heavy stack (dev mode, tests).
   baseImageVersion?: string | null
   // Host-locale decision for `cjkFonts: 'auto'`. Callers that have a host
@@ -784,6 +788,7 @@ export function buildDockerfile(
   const claudeCodeLayer = renderClaudeCodeInstallLayer(config.claudeCode)
   const codexCliLayer = renderCodexCliInstallLayer(config.codexCli, buildKit)
   const omoCliLayer = renderOmoCliInstallLayer(config.omoCli)
+  const browserLayers = renderBrowserLayers(options.browser ?? { engines: ['agent-browser'], extensions: [] })
   const fromAndHeavyLayers =
     baseImageVersion !== null
       ? renderVersionedHead(
@@ -794,6 +799,7 @@ export function buildDockerfile(
           claudeCodeLayer,
           codexCliLayer,
           omoCliLayer,
+          browserLayers,
           buildKit,
         )
       : renderInlineHead(
@@ -803,6 +809,7 @@ export function buildDockerfile(
           claudeCodeLayer,
           codexCliLayer,
           omoCliLayer,
+          browserLayers,
           buildKit,
         )
 
@@ -857,6 +864,7 @@ function renderVersionedHead(
   claudeCodeLayer: string,
   codexCliLayer: string,
   omoCliLayer: string,
+  browserLayers: string,
   buildKit: boolean,
 ): string {
   const toggleAptLayer = toggleAptArgs.length === 0 ? '' : `${renderToggleAptInstallLayer(toggleAptArgs, buildKit)}\n\n`
@@ -870,7 +878,7 @@ WORKDIR /agent
 
 ARG TARGETARCH
 
-${ghKeyringLayer}${toggleAptLayer}${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${omoCliBlock}${renderEntrypointShimLayer()}
+${ghKeyringLayer}${toggleAptLayer}${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${omoCliBlock}${browserLayers}${renderEntrypointShimLayer()}
 ${renderGitAskPassLayer()}
 
 ${LAYER_TRANSFORMERS_INSTALL}
@@ -889,6 +897,7 @@ function renderInlineHead(
   claudeCodeLayer: string,
   codexCliLayer: string,
   omoCliLayer: string,
+  browserLayers: string,
   buildKit: boolean,
 ): string {
   const baselineAndToggleArgs = [...BASELINE_APT_PACKAGES, ...toggleAptArgs]
@@ -936,7 +945,7 @@ ${LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER}
 
 ${renderChromeForTestingLayer()}
 
-${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${omoCliBlock}${renderEntrypointShimLayer()}
+${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${omoCliBlock}${browserLayers}${renderEntrypointShimLayer()}
 ${renderGitAskPassLayer()}
 
 ${LAYER_TRANSFORMERS_INSTALL}

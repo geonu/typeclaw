@@ -6,6 +6,7 @@ import type { KnownApi, Model } from '@earendil-works/pi-ai'
 import { getBuiltinModel } from '@earendil-works/pi-ai/providers/all'
 import { z } from 'zod'
 
+import { BROWSER_ENGINE_IDS, BROWSER_EXTENSION_IDS } from '@/browser/registry'
 import { channelsSchema, SEEDED_GITHUB_EVENT_ALLOWLISTS } from '@/channels/schema'
 import { commitSystemFileSync } from '@/git/system-commit'
 import { parseMatchRule } from '@/permissions/match-rule'
@@ -252,6 +253,22 @@ const dockerfileObjectSchema = z.object({
 })
 
 export const dockerfileSchema = dockerfileObjectSchema.default(() => dockerfileObjectSchema.parse({}))
+
+// Which browser drivers the agent gets and which extensions load into the
+// TypeClaw-managed Chrome. Restart-required: engines and extensions install
+// image layers and the managed browser is spawned at boot.
+const browserObjectSchema = z.object({
+  engines: z
+    .array(z.enum(BROWSER_ENGINE_IDS))
+    .default(['agent-browser'])
+    .refine((ids) => new Set(ids).size === ids.length, { message: 'browser.engines must not repeat an engine' }),
+  extensions: z
+    .array(z.enum(BROWSER_EXTENSION_IDS))
+    .default([])
+    .refine((ids) => new Set(ids).size === ids.length, { message: 'browser.extensions must not repeat an extension' }),
+})
+
+export const browserSchema = browserObjectSchema.default(() => browserObjectSchema.parse({}))
 
 export type DockerfileConfig = z.infer<typeof dockerfileSchema>
 export type DockerfileFeatureToggle = z.infer<typeof dockerfileFeatureSchema>
@@ -862,6 +879,7 @@ export const configSchema = z
     network: networkSchema,
     sandbox: sandboxSchema,
     docker: dockerSchema,
+    browser: browserSchema,
     git: gitSchema,
     githubCli: githubCliSchema,
     logs: logsSchema,
@@ -1141,6 +1159,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   sandbox: 'restart-required',
   tunnels: 'restart-required',
   'docker.file': 'restart-required', // Includes omoCli; installation changes rebuild the image.
+  browser: 'restart-required',
   'git.ignore': 'restart-required',
   githubCli: 'restart-required',
   logs: 'ignored',
@@ -1225,6 +1244,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
   const known = new Set([
     '$schema',
+    'browser',
     'port',
     'models',
     'modelOverrides',

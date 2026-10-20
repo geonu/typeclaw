@@ -1176,6 +1176,18 @@ describe('docker.file schema', () => {
     })
   })
 
+  test('browser defaults to agent-browser only, rejects unknown or repeated ids, and is restart-required', () => {
+    expect(configSchema.parse({}).browser).toEqual({ engines: ['agent-browser'], extensions: [] })
+    expect(
+      configSchema.parse({ browser: { engines: ['omowright', 'browser-use'], extensions: ['browserskill'] } }).browser,
+    ).toEqual({ engines: ['omowright', 'browser-use'], extensions: ['browserskill'] })
+    expect(configSchema.parse({ browser: { engines: [] } }).browser.engines).toEqual([])
+    expect(() => configSchema.parse({ browser: { engines: ['playwright'] } })).toThrow()
+    expect(() => configSchema.parse({ browser: { engines: ['omowright', 'omowright'] } })).toThrow()
+    expect(() => configSchema.parse({ browser: { extensions: ['ublock'] } })).toThrow()
+    expect(FIELD_EFFECTS['browser']).toBe('restart-required')
+  })
+
   test('omoCli is opt-in, boolean-only and restart-required with the Dockerfile', () => {
     expect(configSchema.parse({}).docker.file.omoCli).toBe(false)
     expect(configSchema.parse({ docker: { file: { omoCli: true } } }).docker.file.omoCli).toBe(true)

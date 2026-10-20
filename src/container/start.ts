@@ -1269,6 +1269,7 @@ export async function refreshDockerfile(
   // path. Mirrors the same gate in writeDockerAssets (src/init/index.ts).
   const devMode = await hasLocallyLinkedTypeclawDep(cwd)
   const next = buildDockerfile(cfg.docker.file, {
+    browser: cfg.browser,
     baseImageVersion: devMode ? null : resolveBaseImageVersion(cwd),
     cjkFontsAuto: hostLocaleIsCjk(),
     buildKit: opts.buildKit,
