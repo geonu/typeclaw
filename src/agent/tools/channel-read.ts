@@ -39,7 +39,8 @@ export function createChannelReadTool({
       '- "list": discover channels/chats in `workspace` (no `chat` needed). Use when you do not yet know a chat id.\n' +
       'For Discord guild channels, `workspace` is the guild id; for Slack team channels, `workspace` is the team id (e.g. "T0ACME"); for DMs, "@dm". ' +
       'On failure returns { ok: false, error }. Not every adapter supports every mode — an unsupported mode returns a not-supported error rather than throwing. ' +
-      'This is read-only; use channel_send to post.',
+      'This is read-only. When work belongs to another conversation, use channel_session_search and channel_handoff ' +
+      'instead of reading or posting there directly. An access error may include an authorized handoff target.',
     parameters: Type.Object({
       mode: Type.Union([Type.Literal('history'), Type.Literal('message'), Type.Literal('list')], {
         description:

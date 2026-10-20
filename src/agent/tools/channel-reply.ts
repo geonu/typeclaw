@@ -61,8 +61,8 @@ export function createChannelReplyTool({
     description:
       'Reply in the current conversation. This is your default way to respond to a channel session — ' +
       'addressing fields (adapter, workspace, chat, thread) are filled in from the session origin, so ' +
-      'you only supply the text. To post somewhere else (different chat, break out of the current ' +
-      'thread, etc.), use `channel_send` instead. ' +
+      'you only supply the text. For work belonging to another conversation, use `channel_session_search` ' +
+      'then `channel_handoff` so its owning session answers with current context. ' +
       'On success the result carries adapter-reported posted-message ids (`messageId` and `messageIds` ' +
       'in send order) when available. For follow-ups, reuse `channel_reply` or the existing ' +
       '`channel_send` thread/root coordinates; a returned id starts a thread only where the adapter ' +
