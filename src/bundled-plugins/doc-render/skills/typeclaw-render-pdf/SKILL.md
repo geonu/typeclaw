@@ -100,8 +100,6 @@ thead {
 - **Lead with the conclusion.** The cover and first-page headline state the
   finding ("Edge inference became the default"), not the topic ("Q2 Report").
 - **Numbers up front.** Put the 3–4 headline figures in a row of cards.
-- **Every series becomes a chart.** Monthly values → columns; shares or
-  percentiles → horizontal bars; progress vs. target → a meter.
 - **Compare side by side** with CSS grid instead of stacking everything.
 - **Tables over repeated bullets**, with status as small colored pills and
   figures right-aligned (`font-variant-numeric: tabular-nums`).
@@ -110,6 +108,28 @@ thead {
 - **Keep prose short.** Short paragraphs under clear sections; no walls of text.
 - **Vary the design per document.** Don't reuse one layout for everything.
 - **Everything local.** No CDN fonts, scripts, stylesheets, or remote images.
+
+### Charts
+
+A chart should make one point; let its title say it ("Churn halved after the
+March price change"), not just name the data. If there's no point to make, a
+table or a sentence may serve better.
+
+Good defaults, not rules — break them when the content calls for it:
+
+- Pick the form from the question: trends → lines; comparisons → sorted
+  horizontal bars; part-of-whole → a stacked bar (pies only for 2–3 parts);
+  progress → a bar against a target.
+- Position and length read more precisely than angle, area, or color.
+- Bars usually start at zero, because readers compare their length.
+- Label lines and bars directly instead of using a legend; keep gridlines
+  faint and ticks round; put units where the reader looks.
+- Gray by default, the accent for what the title is about; the chart should
+  still read in grayscale.
+- Annotate the moment that explains the shape; note the source and date.
+- Too many series? Small multiples with a shared scale often read better.
+- Derive coordinates from the data (a small script that emits the `<svg>`
+  works well); shapes placed by eye drift from the numbers.
 
 ## Step 2 — render
 
