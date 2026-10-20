@@ -89,6 +89,8 @@ The empty block declares the adapter to the runtime — the schema fills in `ena
 
 ## Mounts
 
+To let rendered pages and PDFs use the host's installed fonts, set top-level `"hostFonts": true` instead of adding a font mount by hand: it mounts the host font folders read-only where fontconfig finds them (restart-required).
+
 Each entry in `mounts` is an object with:
 
 | Field         | Required | Type    | Notes                                                                                                                                                                            |
