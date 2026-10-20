@@ -110,6 +110,8 @@ export type InboundMessage = {
   // own session in another chat delegated this work here. The turn it starts
   // cannot hand off again (loop guard) and is never a reply-anchor target.
   handoff?: true
+  // Runtime-only provenance for a handoff; platform adapters omit this.
+  authorAdapter?: AdapterId
   // Prompt-only context for replied-to / quoted / linked messages. Kept out
   // of `text` so the engagement gate sees only the human-authored body.
   referenceContext?: InboundReferenceContext

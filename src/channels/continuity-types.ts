@@ -83,6 +83,7 @@ const principal = z.discriminatedUnion('kind', [
       chat: nonempty,
       parentChat: nonempty.optional(),
       lastInboundAuthorId: nonempty.optional(),
+      lastInboundAuthorAdapter: z.enum(ADAPTER_IDS).optional(),
     })
     .strict(),
 ])
