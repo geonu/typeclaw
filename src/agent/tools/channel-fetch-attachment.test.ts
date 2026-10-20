@@ -26,7 +26,7 @@ type FakeRouterOptions = {
   fetch?: (adapter: AdapterId, args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
 }
 
-function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
+function makeRouter(options: FakeRouterOptions = {}): ChannelRouter & { searchSessions: () => [] } {
   const attachments = options.attachments ?? []
   return {
     route: async () => ({ kind: 'observed' }),
@@ -115,6 +115,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
+    searchSessions: () => [],
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},

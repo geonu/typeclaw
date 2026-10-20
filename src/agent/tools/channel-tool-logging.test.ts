@@ -37,7 +37,7 @@ type RouterOverrides = {
   attachments?: readonly InboundAttachment[]
 }
 
-function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
+function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter & { searchSessions: () => [] } {
   return {
     route: async () => ({ kind: 'observed' }),
     registerMissedInbound: () => {},
@@ -129,6 +129,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
+    searchSessions: () => [],
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},

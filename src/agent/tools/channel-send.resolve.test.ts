@@ -20,7 +20,7 @@ function fakeRouter(handlers: {
   onSend?: (msg: OutboundMessage) => SendResult
   onResolve?: (req: ReviewThreadResolveRequest) => ReviewThreadResolveResult
   getReviewState?: ChannelRouter['getReviewState']
-}): ChannelRouter {
+}): ChannelRouter & { searchSessions: () => [] } {
   return {
     route: async () => ({ kind: 'observed' }),
     registerMissedInbound: () => {},
@@ -114,6 +114,7 @@ function fakeRouter(handlers: {
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
+    searchSessions: () => [],
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},

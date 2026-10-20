@@ -12,7 +12,7 @@ function fakeRouter(
     consecutiveCount?: number
     finishGithubReviewThreadCloseout?: ChannelRouter['finishGithubReviewThreadCloseout']
   } = {},
-): ChannelRouter {
+): ChannelRouter & { searchSessions: () => [] } {
   return {
     route: async () => ({ kind: 'observed' }),
     registerMissedInbound: () => {},
@@ -107,6 +107,7 @@ function fakeRouter(
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
     handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
+    searchSessions: () => [],
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},
