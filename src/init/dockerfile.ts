@@ -1089,17 +1089,30 @@ RUN ARCH_TARBALL="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-linux-gnu;
 // bwrap sandbox binds /usr but not /root, and its PATH has no `node`.
 const AGENT_BROWSER_ROOT = '/usr/local/lib/typeclaw-agent-browser'
 const AGENT_BROWSER_PACKAGE = `${AGENT_BROWSER_ROOT}/install/global/node_modules/agent-browser`
-// Stable browser path for both arches: apt chromium on arm64, Chrome for
-// Testing on amd64 (linked in Layer 5).
+// Stable browser path for both arches: a launcher that execs the real
+// browser, linked at AGENT_BROWSER_CHROME_BIN (apt chromium on arm64, Chrome
+// for Testing on amd64 in Layer 5).
 const AGENT_BROWSER_CHROME = `${AGENT_BROWSER_ROOT}/chrome`
+const AGENT_BROWSER_CHROME_BIN = `${AGENT_BROWSER_ROOT}/chrome-bin`
 
-const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable): point agent-browser at a browser path visible inside the
-# sandbox. arm64 uses the apt chromium; amd64 links Chrome for Testing in
+// The launcher adds --no-sandbox because Chromium's own sandbox cannot start
+// inside the model's bwrap sandbox: with the default proc-bind strategy /proc
+// is read-only, so Chromium's user-namespace sandbox cannot write
+// /proc/self/uid_map, and there is no setuid chrome-sandbox. agent-browser
+// only auto-adds --no-sandbox when it detects root or a container
+// (/.dockerenv, /proc/1/cgroup), and none of that is visible inside bwrap.
+// bwrap stays the isolation boundary for the browser. The flag lives in the
+// launcher, not AGENT_BROWSER_ARGS, because a CLI --args replaces that env
+// value wholesale and would silently drop it.
+const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable): point agent-browser at a browser launcher visible inside
+# the sandbox. arm64 links the apt chromium; amd64 links Chrome for Testing in
 # Layer 5. Independent of the npm install below so it stays cached across
 # agent-browser version bumps.
-RUN if [ "$TARGETARCH" = "arm64" ]; then \\
-      mkdir -p ${AGENT_BROWSER_ROOT} \\
-   && ln -sf /usr/bin/chromium ${AGENT_BROWSER_CHROME}; \\
+RUN mkdir -p ${AGENT_BROWSER_ROOT} \\
+ && printf '%s\\n' '#!/bin/sh' 'exec ${AGENT_BROWSER_CHROME_BIN} --no-sandbox "$@"' > ${AGENT_BROWSER_CHROME} \\
+ && chmod 0755 ${AGENT_BROWSER_CHROME} \\
+ && if [ "$TARGETARCH" = "arm64" ]; then \\
+      ln -sf /usr/bin/chromium ${AGENT_BROWSER_CHROME_BIN}; \\
     fi`
 
 // Layer 4: the npm tarball ships the native binaries without the exec bit and
@@ -1256,7 +1269,7 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \\
       HOME=${AGENT_BROWSER_ROOT} agent-browser install \\
    && chrome="$(find ${AGENT_BROWSER_ROOT}/.agent-browser/browsers -type f -name chrome -perm -u+x | head -n 1)" \\
    && [ -n "$chrome" ] \\
-   && ln -sf "$chrome" ${AGENT_BROWSER_CHROME}; \\
+   && ln -sf "$chrome" ${AGENT_BROWSER_CHROME_BIN}; \\
     fi`
 
 function renderOmoCliInstallLayer(enabled: boolean): string {

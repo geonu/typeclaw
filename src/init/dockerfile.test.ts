@@ -681,10 +681,27 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
 
   test('base Dockerfile points agent-browser at the apt chromium on arm64 (no Chrome for Testing download path on that arch)', () => {
     const base = buildBaseDockerfile()
-    expect(base).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome')
+    expect(base).toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome-bin')
     // The sandbox runs with --clearenv, so the default lives in the launcher, not an image ENV.
     expect(base).toContain('${AGENT_BROWSER_EXECUTABLE_PATH:=/usr/local/lib/typeclaw-agent-browser/chrome}')
     expect(base).not.toContain('ENV AGENT_BROWSER_EXECUTABLE_PATH')
+  })
+
+  // Chromium's own sandbox cannot start inside bwrap (read-only /proc, no
+  // setuid helper) and agent-browser's root/container auto-detection does not
+  // fire there, so the stable browser path must be a launcher that always adds
+  // --no-sandbox. It cannot live in AGENT_BROWSER_ARGS: a CLI --args replaces it.
+  test.each([
+    ['base', () => buildBaseDockerfile()],
+    ['inline', () => buildDockerfile(undefined, { baseImageVersion: null })],
+  ])('%s Dockerfile launches the agent-browser browser with --no-sandbox on both arches', (_, build) => {
+    const out = build()
+    expect(out).toContain(
+      `'exec /usr/local/lib/typeclaw-agent-browser/chrome-bin --no-sandbox "$@"' > /usr/local/lib/typeclaw-agent-browser/chrome`,
+    )
+    expect(out).toContain('ln -sf "$chrome" /usr/local/lib/typeclaw-agent-browser/chrome-bin')
+    expect(out).not.toContain('ln -sf /usr/bin/chromium /usr/local/lib/typeclaw-agent-browser/chrome;')
+    expect(out).not.toContain('AGENT_BROWSER_ARGS')
   })
 
   // The model's bwrap sandbox binds /usr but not /root, and its PATH has no
