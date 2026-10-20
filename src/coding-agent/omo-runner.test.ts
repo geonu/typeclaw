@@ -77,6 +77,10 @@ if(await command.exited !== 0 || await new Response(command.stdout).text() !== '
 await Bun.write(state,JSON.stringify(header)+'\\n'+JSON.stringify({type:'fixture',prior,prompt})+'\\n');
 console.error(process.env.TYPECLAW_CODING_AGENT_CAPABILITY);
 if(prompt==='overflow') { console.log('x'.repeat(4*1024*1024+1)); process.exit(0); }
+const delta = JSON.stringify({type:'message_update',usage:{input:0,output:0},assistantMessageEvent:{type:'toolcall_delta',contentIndex:0,delta:'x'.repeat(200)}});
+if(prompt==='deltas') for(let i=0;i<20*4096;i++) console.log(delta);
+if(prompt==='flood') for(let i=0;i<17;i++) console.log(JSON.stringify({type:'fixture',text:'x'.repeat(1024*1024)}));
+if(prompt==='final-flood') { for(let i=0;i<15;i++) console.log(JSON.stringify({type:'fixture',text:'x'.repeat(1024*1024)})); await Bun.write(state,JSON.stringify(header)+'\\n'); const big = {role:'assistant',content:[{type:'text',text:'x'.repeat(2*1024*1024)}],stopReason:'stop'}; console.log(JSON.stringify({type:'agent_end',messages:[big],willRetry:false})); process.exit(0); }
 const message = {role:'assistant',content:[{type:'text',text:prior?'続きも完了しました':'완료했습니다'}],stopReason:prompt==='failed'?'error':prompt==='length'?'length':'stop'};
 console.log(JSON.stringify({type:'message_end',message}));
 if(prompt==='malformed') console.log('{"type":');
@@ -250,6 +254,9 @@ describe.skipIf(process.platform === 'win32')('OmO runner integration', () => {
     ['failed', 'failed'],
     ['malformed', 'failed'],
     ['overflow', 'failed'],
+    ['deltas', 'completed'],
+    ['flood', 'failed'],
+    ['final-flood', 'failed'],
     ['provider-error', 'failed'],
   ] as const)('preserves partial work and honest state on %s', async (prompt, state) => {
     for (const part of ['worktree', 'output']) await mkdir(join(root, part))
@@ -275,6 +282,11 @@ describe.skipIf(process.platform === 'win32')('OmO runner integration', () => {
         broker: (opts) => startCodingBroker(opts, { upstream: new URL(server.url) }),
       })
       expect(result.state).toBe(state)
+      if (prompt === 'flood' || prompt === 'final-flood') expect(result.diagnostic).toContain('16 MiB output limit')
+      if (prompt === 'deltas') {
+        const [jsonl] = (await readdir(join(root, 'output'))).filter((name) => name.endsWith('.jsonl'))
+        expect(await readFile(join(root, 'output', jsonl!), 'utf8')).not.toContain('message_update')
+      }
       if (prompt === 'failed' || prompt === 'provider-error') expect(result.exitCode).toBe(0)
       if (prompt !== 'provider-error')
         expect(await readFile(join(root, 'worktree', 'generated.txt'), 'utf8')).toBe(prompt)

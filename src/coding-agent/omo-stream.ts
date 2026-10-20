@@ -14,6 +14,46 @@ const sessionSchema = z.object({
   cwd: z.string(),
 })
 
+// OmO print mode emits one `message_update` record per streamed token, each
+// repeating a full usage object (~100x amplification over the model output).
+// The parser ignores them, so they are dropped before the output cap and the
+// JSONL artifact; a single long tool call otherwise trips the cap mid-task.
+export class OmoDeltaFilter {
+  private pending = ''
+
+  push(text: string): string {
+    this.pending += text
+    const end = this.pending.lastIndexOf('\n')
+    if (end === -1) {
+      if (this.pending.length > 4 * 1024 * 1024) throw new Error('OmO event exceeds the 4 MiB event limit.')
+      return ''
+    }
+    const lines = this.pending.slice(0, end + 1)
+    this.pending = this.pending.slice(end + 1)
+    return lines
+      .split('\n')
+      .slice(0, -1)
+      .filter((line) => !isMessageUpdate(line))
+      .map((line) => `${line}\n`)
+      .join('')
+  }
+
+  flush(): string {
+    const rest = this.pending
+    this.pending = ''
+    return rest
+  }
+}
+
+function isMessageUpdate(line: string): boolean {
+  if (!line.startsWith('{"type":"message_update"')) return false
+  try {
+    return (JSON.parse(line) as { type?: unknown }).type === 'message_update'
+  } catch {
+    return false
+  }
+}
+
 export class OmoStreamParser {
   sessionId: string | undefined
   finalMessage = ''
