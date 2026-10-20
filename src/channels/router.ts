@@ -396,7 +396,7 @@ export const EMPTY_TURN_RETRY_NUDGE = [
 // Reminder-only nudge for the stranded-toolUse-after-send retry. Distinct from
 // EMPTY_TURN_RETRY_NUDGE: that one diagnoses output-budget exhaustion and tells
 // the model to "answer directly", which makes a stranded investigation RE-RUN
-// its tools and strand again. Here the model already sent a `more_work_this_turn: true`
+// its tools and strand again. Here the model already sent a `continue_after_reply: true`
 // status ack and did real tool work; the turn just ended on an unanswered
 // toolUse before final prose. The prior toolUse/toolResult entries are still in
 // this session's branch on the re-prompt, so the recovery is to STOP, read what
@@ -452,7 +452,7 @@ export const COLD_START_REPLY_NUDGE = [
 // both EMPTY_TURN_RETRY_NUDGE (which misdiagnoses a clean `stop` as output-budget
 // exhaustion and, per its own docstring, makes the model RE-RUN its tools and
 // strand again) and STRANDED_TOOLUSE_CONTINUATION_NUDGE (which assumes a
-// `more_work_this_turn: true` status reply already landed). Here NO send landed,
+// `continue_after_reply: true` status reply already landed). Here NO send landed,
 // the model gathered real
 // tool results, then the final completion came back as a bare empty `stop` — the
 // Fireworks/gpt empty-completion degeneration. The recovery is to READ the results
@@ -480,7 +480,7 @@ export const EMPTY_STOP_AFTER_TOOL_WORK_NUDGE = [
 // is a one-shot correction offer, not recovery from no output.
 export const MAX_WILLINGNESS_NUDGES = 1
 // Injected when a reply that ended the turn (terminal-reply abort) promised to
-// keep working but omitted `more_work_this_turn: true`. Reminder-only, SYSTEM MESSAGE
+// keep working but omitted `continue_after_reply: true`. Reminder-only, SYSTEM MESSAGE
 // framing so persona-rich models do not reply to the notice itself.
 // Leads with the DELIVERY imperative, mirroring SEND_WILLINGNESS_NUDGE below. An
 // earlier revision closed on a bare "If there is nothing left to do, reply with
@@ -495,13 +495,13 @@ export const WILLINGNESS_NUDGE = [
   '',
   'Your last reply promised the human you would keep working, but the turn ended',
   'right after sending — a successful channel reply ends the turn unless you set',
-  '`more_work_this_turn: true` on it. This is an automated signal from the channel',
+  '`continue_after_reply: true` on it. This is an automated signal from the channel',
   'router, not a message from anyone in the chat. **Do not acknowledge or reply to',
   'this notice itself.**',
   '',
   'Someone is waiting on the result you just promised. Do the work now (fetch data,',
   'run a tool, spawn a subagent) and post what you find — and on any further status',
-  'reply that precedes more work this turn, set `more_work_this_turn: true`. If you',
+  'reply that precedes more work this turn, set `continue_after_reply: true`. If you',
   'already did the work, post the conclusion you reached: having no work left is NOT',
   'the same as having nothing to report, and a promise that never lands reads to the',
   'human as being ignored.',
@@ -514,7 +514,7 @@ export const WILLINGNESS_NUDGE = [
 // did fresh work after it, then ended on an EMPTY `stop` leaf — the answer was
 // computed but never sent (the Kimi/Fireworks empty-completion flake). Distinct
 // from WILLINGNESS_NUDGE: that path is a `channel_reply` that ended the turn and
-// needs `more_work_this_turn: true`; this path is a `channel_send` (which never ends the
+// needs `continue_after_reply: true`; this path is a `channel_send` (which never ends the
 // turn) whose follow-up degenerated, so the model just needs to emit the reply it
 // already worked out. Shares MAX_WILLINGNESS_NUDGES so a turn can't double-nudge.
 // Scopes NO_REPLY the same way WILLINGNESS_NUDGE does, and for the same reason:
@@ -1094,7 +1094,7 @@ type LiveSession = {
   // channel send landed this turn. `validateChannelTurn` compares it to the
   // turn-end leaf: a DIFFERENT assistant `stop` leaf means the model replied,
   // kept working, then ended with FRESH final prose it forgot to deliver
-  // (the `more_work_this_turn: true` progress-reply bug) — recover it. A leaf that still
+  // (the `continue_after_reply: true` progress-reply bug) — recover it. A leaf that still
   // matches is narration the model emitted BEFORE/with the reply that already
   // landed, so it stays suppressed. Reset to null on every new prompt batch.
   lastSendLeafId: string | null
@@ -1184,7 +1184,7 @@ type LiveSession = {
   // nudge itself queues — same anti-reloop discipline as the empty-turn budget.
   willingnessNudges: number
   // Stashed by `installChannelReplyTerminalHook` after a successful
-  // `channel_reply` that omitted `more_work_this_turn: true`. Read once
+  // `channel_reply` that omitted `continue_after_reply: true`. Read once
   // by `validateChannelTurn` to decide the continuation nudge. `turnSeq`-stamped
   // (like `skippedTurn`/`skipLockedSendTurn`) so a stale record from an earlier
   // turn can never trigger a nudge on a later one. `null` when no such reply
@@ -1198,7 +1198,7 @@ type LiveSession = {
   // assistant. Cleared on consumption, stop, or a fresh user turn.
   pendingTerminalReplyStop: { turnSeq: number; tokens: number } | null
   // Stamped by `installChannelReplyTerminalHook` when a successful `channel_reply`
-  // set `more_work_this_turn: true` — the machine-readable "I'll keep working this turn"
+  // set `continue_after_reply: true` — the machine-readable "I'll keep working this turn"
   // promise. `validateChannelTurn` reads it to recover a turn that made that promise,
   // did more work, then ended on a fresh empty `stop` (dropped its conclusion) —
   // independent of what natural-language phrase the ack used, so a persona speaking
@@ -1265,7 +1265,7 @@ type LiveSession = {
   emptyTurnFallbackTurn: number | null
   // Set when a WILLINGNESS-ACK exhaustion path (empty_stop_after_continue_reply /
   // empty_stop_after_send_ack) would post EMPTY_TURN_FALLBACK_TEXT, but the model
-  // just made a machine-readable promise to keep working (`more_work_this_turn: true` /
+  // just made a machine-readable promise to keep working (`continue_after_reply: true` /
   // willingness phrase) and did post-ack tool work. Rather than posting the scary
   // "I got stuck" notice synchronously at validateChannelTurn — BEFORE the drain
   // loop runs maybeContinueTodosChannel, which can re-prompt the same logical turn
@@ -1324,7 +1324,7 @@ type LiveSession = {
   // this logical turn. Unlike toolExecutionThisLogicalTurn, channel_reply and
   // todo/control calls cannot satisfy a later durable completion claim.
   qualifyingWorkThisLogicalTurn: boolean
-  // True while a successful `channel_reply({ more_work_this_turn: true })`
+  // True while a successful `channel_reply({ continue_after_reply: true })`
   // promise remains unfulfilled in this LOGICAL turn. Unlike the per-iteration
   // `continueReplyTurn` stamp used by retry authorization and empty-stop
   // recovery, this survives reminder-only iterations so a provider failure
@@ -1337,7 +1337,7 @@ type LiveSession = {
   // True while the latest landed output accounted to this logical turn was a
   // continuation-willingness/status message ("I'll check and get back to you"):
   // the turn told the user more was coming without the machine-readable
-  // `more_work_this_turn` flag. A substantive send clears it; meta notices
+  // `continue_after_reply` flag. A substantive send clears it; meta notices
   // (provider error, fallbacks) leave it. Together with
   // `promisedWorkOutstandingThisLogicalTurn` it marks promised unfinished work,
   // which explicit silence can never settle. Reset with the logical turn.
@@ -3758,12 +3758,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // tools and `channel_send` must keep the follow-up so genuine multi-step turns
   // continue. A prior non-typeclaw `afterToolCall` (none today) is composed.
   //
-  // `channel_reply({ more_work_this_turn: true })` is the explicit opt-out: a
+  // `channel_reply({ continue_after_reply: true })` is the explicit opt-out: a
   // mid-turn status reply ("working on it…") that the model follows with more
   // work this turn. The tool surfaces that intent as
-  // `details.more_work_this_turn === true`, and we keep the follow-up so the turn
+  // `details.continue_after_reply === true`, and we keep the follow-up so the turn
   // proceeds. The kimi 32k loop only recurs when the model genuinely has nothing
-  // left to say after a reply, which `more_work_this_turn` asserts is not the
+  // left to say after a reply, which `continue_after_reply` asserts is not the
   // case; Layer 2's maxTokens cap still bounds any misuse.
   // IDs are cache hints, never generation authority. Call only inside the lane.
   const resolveBackgroundCoverage = async (
@@ -3899,7 +3899,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const details = context.result.details as
         | {
             ok?: unknown
-            more_work_this_turn?: unknown
+            continue_after_reply?: unknown
             backgroundCoverage?: BackgroundObligationRef[]
             inboundCoverage?: InboundRef[]
           }
@@ -3914,11 +3914,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.qualifyingWorkThisLogicalTurn = true
       }
       const succeeded = context.toolCall.name === 'channel_reply' && !context.isError && details?.ok === true
-      const keepTurnAlive = details?.more_work_this_turn === true
+      const keepTurnAlive = details?.continue_after_reply === true
       if (succeeded) {
         // This hook is authoritative for channel_reply semantics: the send path
         // cannot distinguish channel_reply from channel_send, but here the
-        // explicit more_work_this_turn flag tells us whether the delivered reply
+        // explicit continue_after_reply flag tells us whether the delivered reply
         // renewed the promise or terminally fulfilled it.
         const text = (context.toolCall.arguments as { text?: unknown } | undefined)?.text
         if (!keepTurnAlive && !promisesUnfinishedWork(live, text)) {
@@ -4853,7 +4853,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   // The logical turn told the user more was coming and has not delivered it: a
-  // `more_work_this_turn: true` reply, or a landed status/continuation message
+  // `continue_after_reply: true` reply, or a landed status/continuation message
   // that no substantive output followed. Silence cannot answer such a promise.
   const owesPromisedWork = (live: LiveSession): boolean =>
     live.promisedWorkOutstandingThisLogicalTurn || live.statusOutputOutstandingThisLogicalTurn
@@ -7425,7 +7425,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       //   (d) provider-error, empty-turn-fallback, and control notices are
       //       explicitly meta and preserve, so a warning can never self-clear.
       // The channel_reply afterToolCall hook above remains authoritative for its
-      // machine-readable more_work_this_turn flag.
+      // machine-readable continue_after_reply flag.
       if (outputKind === 'substantive') {
         live.promisedWorkOutstandingThisLogicalTurn = false
         live.statusOutputOutstandingThisLogicalTurn = false
@@ -7495,7 +7495,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   // The turn ended via terminal channel_reply completion. If that reply promised to keep
-  // working but omitted `more_work_this_turn: true`, queue ONE reminder-only re-prompt so
+  // working but omitted `continue_after_reply: true`, queue ONE reminder-only re-prompt so
   // the model gets a second chance to actually do it. The tool batch already
   // terminated (safe default preserved); this only adds an optional nudge. Bounded by
   // MAX_WILLINGNESS_NUDGES and gated on `promptQueue` being empty so a real
@@ -7661,10 +7661,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    // A send landed this turn, but the model may have posted a `more_work_this_turn: true`
+    // A send landed this turn, but the model may have posted a `continue_after_reply: true`
     // progress reply, kept working, then ENDED with its final answer as plain
     // prose — never calling a channel tool again. The terminal-reply abort fires
-    // only for a `channel_reply` WITHOUT `more_work_this_turn: true`, so that `stopReason:
+    // only for a `channel_reply` WITHOUT `continue_after_reply: true`, so that `stopReason:
     // 'stop'` text leaf is left undelivered and unguarded (the false-receipt
     // guard is github-only). The discriminator is leaf IDENTITY: only when the
     // turn-end `stop` leaf is a DIFFERENT entry than the one in place at the last
@@ -7675,17 +7675,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const terminalReplyCompletedThisTurn = live.lastTerminalReplyCompletion?.turnSeq === live.turnSeq
       maybeNudgeContinuationWillingness(live)
 
-      // A `channel_reply({ more_work_this_turn: true })` progress ack landed this turn (the
+      // A `channel_reply({ continue_after_reply: true })` progress ack landed this turn (the
       // machine-readable "I'll keep working" promise — `continueReplyTurn` is stamped
       // by installChannelReplyTerminalHook), the model did more work, then ended on a
       // FRESH empty `stop` — dropping its conclusion. This is the SAME degeneration as
-      // the phrase-gated `channel_send` branch below, but keyed on the `more_work_this_turn: true`
+      // the phrase-gated `channel_send` branch below, but keyed on the `continue_after_reply: true`
       // FLAG instead of a natural-language willingness phrase. The flag is the robust
       // signal: it fires regardless of the ack's language or register, closing the gap
       // where a persona speaking a phrasing outside the willingness table (e.g. casual
       // Korean "확인해볼게") stranded the user in silence. The `attemptMadeToolCall`
       // half ties the first trigger to real post-ack work; `willingnessNudges > 0`
-      // lets a retry that re-emitted `more_work_this_turn: true` and re-stranded spend the shared
+      // lets a retry that re-emitted `continue_after_reply: true` and re-stranded spend the shared
       // budget toward the visible fallback instead of bailing silent. Same
       // MAX_WILLINGNESS_NUDGES bound, same empty-`promptQueue` gate (a coalesced live
       // inbound supersedes this turn's silence), and same nudge/fallback path as the
@@ -7773,7 +7773,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       const trailing = recoverableAssistantText(live.session)
       if (trailing === null || trailing.source !== 'leaf') {
-        // A `more_work_this_turn: true` status reply landed, then the turn stranded on an
+        // A `continue_after_reply: true` status reply landed, then the turn stranded on an
         // unanswered `toolUse` (the post-tool follow-up never produced an
         // assistant message — aborted loop / cancelled stream). The promised
         // work never finished, so the user is left with a bare "checking now…"
@@ -8174,7 +8174,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: live.key.chat,
       thread: live.key.thread,
       text,
-      moreWorkThisTurn: false,
+      continueAfterReply: false,
       resolveReviewThread: false,
     })
     if (falseReceipt.kind === 'block') return falseReceipt.reason
@@ -8186,7 +8186,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       thread: live.key.thread,
       text,
       wantsResolve: false,
-      moreWorkThisTurn: false,
+      continueAfterReply: false,
       getReviewState: (req) => getReviewState(req),
     })
     if (rereview.block) return rereview.reason
@@ -10539,7 +10539,7 @@ function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'a
 // alongside its tool call and DID land a real send this turn (that trailing
 // `toolUse` is delivered narration, not a stranded promise — leave it alone).
 // Keys on the model having INTENDED to keep working with nothing yet said; used
-// to re-prompt a turn that strands mid-work after a `more_work_this_turn: true` status
+// to re-prompt a turn that strands mid-work after a `continue_after_reply: true` status
 // reply instead of ending in silence.
 function leafIsStrandedToolUse(session: AgentSession): boolean {
   const leaf = branchLeafEntry(session)
@@ -10623,7 +10623,7 @@ function repairDanglingToolUseBranch(session: AgentSession, timestamp: number): 
 // (the model did more work, then dropped its conclusion) from a legitimate
 // ack-then-stop where the model meant to wait for the user (leaf unchanged since
 // the send). The two willingness paths below layer their own promise-signal on top
-// of this shape: `channel_reply({ more_work_this_turn: true })` via `continueReplyTurn`, and
+// of this shape: `channel_reply({ continue_after_reply: true })` via `continueReplyTurn`, and
 // `channel_send` acks via the willingness phrase table.
 function isFreshEmptyStopAfterSend(live: LiveSession): boolean {
   const leaf = branchLeafEntry(live.session)
@@ -10633,10 +10633,10 @@ function isFreshEmptyStopAfterSend(live: LiveSession): boolean {
   return leaf.id !== live.lastSendLeafId
 }
 
-// The `channel_send` analogue of the `more_work_this_turn: true` recovery: the most recent
+// The `channel_send` analogue of the `continue_after_reply: true` recovery: the most recent
 // send to this target was a continuation-willingness ack (by phrase), then the
 // model produced a fresh empty stop. `channel_send` keeps the turn alive without a
-// `more_work_this_turn: true` flag and stamps no semantic marker, so the phrase table is the
+// `continue_after_reply: true` flag and stamps no semantic marker, so the phrase table is the
 // only "I promised to keep working" signal available for that shape.
 function isEmptyStopAfterWillingnessAck(live: LiveSession): boolean {
   if (!isFreshEmptyStopAfterSend(live)) return false

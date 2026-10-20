@@ -130,7 +130,7 @@ This nudge is **load-bearing**, not a backstop. Because sticky now engages every
 
 ## Continuation promises while a child runs
 
-After a terminal `channel_reply` promises more work without `more_work_this_turn: true`, the router normally queues one willingness reminder. An explicit `NO_REPLY` on that reminder triggers empty-turn recovery. Both decisions check for a running background child anywhere in the session, including one started before a later queued user message: the child's completion reminder owns the deferred result, so the router neither re-nudges its status reply nor posts a false stuck-reply warning.
+After a terminal `channel_reply` promises more work without `continue_after_reply: true`, the router normally queues one willingness reminder. An explicit `NO_REPLY` on that reminder triggers empty-turn recovery. Both decisions check for a running background child anywhere in the session, including one started before a later queued user message: the child's completion reminder owns the deferred result, so the router neither re-nudges its status reply nor posts a false stuck-reply warning.
 
 This exception uses the existing stuck-child backstop. Once it expires, willingness recovery resumes. Ordinary empty-turn recovery remains scoped to the logical turn that started the child; unrelated later turns still recover, and real prose is still delivered while a child runs.
 
@@ -207,7 +207,7 @@ coverage stays owed for conservative recovery. Healthy inbound-only `NO_REPLY`
 explicitly records intentional silence; SDK stop, child completion and recovery
 `NO_REPLY` are not delivery or background suppression. `NO_REPLY` after the
 turn's last origin output was a promise (a progress `channel_send` or a
-`channel_reply` with `more_work_this_turn: true`, in any language) does not
+`channel_reply` with `continue_after_reply: true`, in any language) does not
 settle either: the promised work is still owed.
 
 A provider-error notice (`⚠️` plus the redacted provider message) is a terminal
@@ -467,7 +467,7 @@ compaction starts is not included. Native Windows was not exercised.
 
 The registry remains the authority for execution, and the transcript remains the authority for content. Canonical child completion marks an existing obligation result-ready; it does not settle the response. An absent parent, a queued completion, reminder consumption, assistant `stop`, `NO_REPLY` or provider failure leaves the response owed. **Queued is not delivered.**
 
-Before splicing completion reminders into a prompt, the router durably claims their exact obligation IDs and generations. A successful final-result fetch attaches that task's coverage; polling a running task does not. Retries retain coverage, and a reload handoff or deferred-work carry moves ownership rather than recreating the obligation. Only a router settlement decision closes consumed or fetched coverage: a confirmed terminal reply, recognized formal review, substantive non-terminal `channel_send` to the exact origin coordinate, explicit skip or `/stop`. Progress, `more_work_this_turn`, continuation willingness, off-target sends and sends from other sessions cannot settle siblings or other turns. The durable decision precedes cache clearing or parent abort.
+Before splicing completion reminders into a prompt, the router durably claims their exact obligation IDs and generations. A successful final-result fetch attaches that task's coverage; polling a running task does not. Retries retain coverage, and a reload handoff or deferred-work carry moves ownership rather than recreating the obligation. Only a router settlement decision closes consumed or fetched coverage: a confirmed terminal reply, recognized formal review, substantive non-terminal `channel_send` to the exact origin coordinate, explicit skip or `/stop`. Progress, `continue_after_reply`, continuation willingness, off-target sends and sends from other sessions cannot settle siblings or other turns. The durable decision precedes cache clearing or parent abort.
 
 Live queues and turn coverage retain obligation IDs, not generation snapshots. Claim, fetch, settlement, stop withdrawal and reload retention resolve current ownership inside the same per-target lane after earlier decisions finish. A fetch retires its queued wake; a closed or already-owned wake is reconciled without replaying the result or blocking unrelated human input. `/stop` waits for an in-flight claim before selecting its coverage. If genuine storage failure prevents withdrawal, it reports the failure and still aborts the parent; the unresolved obligation remains eligible for conservative recovery.
 

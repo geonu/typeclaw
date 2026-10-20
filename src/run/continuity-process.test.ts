@@ -45,7 +45,7 @@ const sse = (block, stop) => new Response([
  'event: content_block_stop','data: {"type":"content_block_stop","index":0}','',
  'event: message_delta','data: '+JSON.stringify({type:'message_delta',delta:{stop_reason:stop,stop_sequence:null},usage:{output_tokens:1}}),'',
  'event: message_stop','data: {"type":"message_stop"}',''].join('\\n'),{headers:{'content-type':'text/event-stream'}});
-const reply = (text, more) => sse({ type: 'tool_use', name: 'channel_reply', input: { text, more_work_this_turn: more } }, 'tool_use');
+const reply = (text, more) => sse({ type: 'tool_use', name: 'channel_reply', input: { text, continue_after_reply: more } }, 'tool_use');
 globalThis.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
   if (!url.includes('/v1/messages')) { record('foreign-fetch', { mode, url }); throw new TypeError('network disabled in continuity proof') }

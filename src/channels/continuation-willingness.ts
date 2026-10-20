@@ -1,7 +1,7 @@
 // A channel turn ends after a successful `channel_reply` (the terminal-reply
 // abort in router.ts). When the model's reply PROMISES to keep working this
 // turn ("바로 확인해볼게요", "let me check", "I'll continue now") but it forgot
-// to set `channel_reply({ more_work_this_turn: true })`, the turn aborts and the promised
+// to set `channel_reply({ continue_after_reply: true })`, the turn aborts and the promised
 // follow-up never runs. The router uses this detector to inject ONE bounded
 // reminder nudge so the model gets a second chance. See the empty-turn retry
 // (router.ts) for the sibling mechanism this mirrors.
@@ -73,7 +73,7 @@ const EN_PHRASES: readonly string[] = [
   // Action/config verb family. The retrieval verbs above ("check/look/look up")
   // miss the much larger class of "I'll DO X" promises — update/configure/set up/
   // schedule/fix/apply/create — which is exactly the class that silently truncates
-  // when the model forgets `more_work_this_turn: true` (the cron-update production miss).
+  // when the model forgets `continue_after_reply: true` (the cron-update production miss).
   "i'll update",
   "i'll set up",
   "i'll set it up",
