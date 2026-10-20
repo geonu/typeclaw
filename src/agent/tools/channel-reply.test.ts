@@ -123,6 +123,7 @@ function fakeRouter(
       : {}),
     noteGithubReviewOutput: async () => ({ kind: 'no-live-session' }),
     markTurnSkipped: async () => ({ kind: 'no-live-session' }),
+    handoff: async () => ({ ok: false as const, code: 'no-source-session' as const, error: 'unused' }),
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},

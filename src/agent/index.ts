@@ -88,6 +88,7 @@ import { createBudgetState, type ToolResultBudget, wrapToolDefinitionWithBudget 
 import { createChannelDisengageTool } from './tools/channel-disengage'
 import { createChannelEditTool } from './tools/channel-edit'
 import { createChannelFetchAttachmentTool, resolveInboxBaseDir } from './tools/channel-fetch-attachment'
+import { createChannelHandoffTool } from './tools/channel-handoff'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
 import { createChannelReadTool } from './tools/channel-read'
@@ -924,6 +925,7 @@ export function buildChannelTools(
     tools.push(createChannelDisengageTool({ router: channelRouter, origin: channelOrigin }))
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
+      tools.push(createChannelHandoffTool({ router: channelRouter, sessionId }))
     }
   } else {
     tools.push(createChannelSendTool({ router: channelRouter, getOutboundOrigin }))
