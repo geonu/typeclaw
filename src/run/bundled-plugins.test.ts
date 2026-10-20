@@ -24,6 +24,7 @@ describe('BUNDLED_PLUGINS', () => {
       'memory',
       'backup',
       'agent-browser',
+      'managed-browser',
       'doc-render',
       'explorer',
       'scout',
