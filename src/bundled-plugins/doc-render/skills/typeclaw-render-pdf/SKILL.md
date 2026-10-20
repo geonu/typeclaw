@@ -145,8 +145,8 @@ report it as an environment issue and do **not** switch to another PDF library.
 `no Chrome at …` means the image has no browser at the default path; set
 `AGENT_BROWSER_EXECUTABLE_PATH` to a Chrome/Chromium binary.
 
-Check the result before sending: if layout matters, screenshot a page with
-`agent-browser` or re-read the HTML for overflowing tables or orphaned headings
+Check the result before sending: if layout matters, screenshot a page with a
+browser engine (`agent-browser` is always installed) or re-read the HTML for overflowing tables or orphaned headings
 and fix them with `break-inside: avoid` / `break-before: page`.
 
 ## Handling CJK content
@@ -171,8 +171,9 @@ skill), ask them to `typeclaw restart`, and regenerate afterwards.
 
 ## Archiving an existing web page
 
-To capture a **live URL** as a PDF rather than author a document, use
-`agent-browser` (`agent-browser open <url>`, then `agent-browser pdf out.pdf`).
+To capture a **live URL** as a PDF rather than author a document, drive a
+browser engine; with the always-installed `agent-browser` that is
+`agent-browser open <url>`, then `agent-browser pdf out.pdf`.
 
 ## Step 3 — deliver
 

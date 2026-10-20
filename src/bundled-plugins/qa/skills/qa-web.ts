@@ -3,7 +3,7 @@ import type { LoadableSkill } from '@/plugin'
 export const WEB_QA_SKILL: LoadableSkill = {
   name: 'qa-web',
   description:
-    'QA a web app or URL in a real browser: drive user flows with the bundled agent-browser CLI, capture screenshots and console/network errors per step, and cover happy path, a negative path, and mobile plus desktop widths.',
+    'QA a web app or URL in a real browser: drive user flows with a browser engine (agent-browser by default), capture screenshots and console/network errors per step, and cover happy path, a negative path, and mobile plus desktop widths.',
   content: `# qa-web
 
 You are QAing something that renders in a browser. Apply this on top of the QA loop and the \`<qa>\` output contract.
@@ -11,11 +11,11 @@ You are QAing something that renders in a browser. Apply this on top of the QA l
 ## Get a page to test
 
 - **A deployed URL** — use it directly. Do not log in to accounts, submit payments, or send messages on a production site unless the caller explicitly asked you to and provided a test account.
-- **A repo or PR** — install, then write one script that starts the dev or preview server from the project's documented command, waits until the port answers (\`curl -sf http://localhost:<port>\` in a bounded retry loop), runs your \`agent-browser\` steps, and stops the server. Run it in a single \`bash\` call: a server backgrounded in one call does not survive to the next. Record the start command.
+- **A repo or PR** — install, then write one script that starts the dev or preview server from the project's documented command, waits until the port answers (\`curl -sf http://localhost:<port>\` in a bounded retry loop), runs your browser steps, and stops the server. Run it in a single \`bash\` call: a server backgrounded in one call does not survive to the next. Record the start command.
 
 ## Drive the browser
 
-Use the bundled \`agent-browser\` CLI (read its skill if you need the full command list). The loop is observe → act → observe:
+The \`agent-browser\` CLI is always installed and is used below. If the operator enabled another engine (\`omowright\`, \`browser-use\`, \`browserskill\`), its skill is loaded and you may use it instead with the same loop. When TypeClaw's shared browser is running, agent-browser attaches to it automatically. The loop is observe → act → observe:
 
 - \`agent-browser open <url>\` to load the page.
 - \`agent-browser snapshot -i\` to get the interactive elements with \`@e\` refs; act on refs, not guessed selectors.
