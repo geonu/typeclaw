@@ -978,6 +978,60 @@ describe('decideEngagement (thread solo-fallback fail-closed gate)', () => {
     expect(decision).toBe('engage')
   })
 
+  test('a bot-joined thread with one human engages even when the parent channel is crowded', () => {
+    // given: a Slack thread inside a channel whose fresh membership reports many humans
+    const crowdedChannel = { humans: 5, bots: 1, fetchedAt: 10_000, truncated: false }
+
+    // when: the only human in the thread follows up without mentioning the bot, past any sticky window
+    const decision = decideEngagement({
+      message: threadInbound({ authorId: 'user-a', authorName: 'user-a', text: '이거 다시 확인해줘' }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger: new StickyLedger(),
+      now: 10_000,
+      participants: [participant('user-a')],
+      botInThread: true,
+      membership: crowdedChannel,
+    })
+
+    // then
+    expect(decision).toBe('engage')
+  })
+
+  test('a bot-joined thread observes un-addressed messages once a second human posts', () => {
+    const crowdedChannel = { humans: 5, bots: 1, fetchedAt: 10_000, truncated: false }
+
+    const decision = decideEngagement({
+      message: threadInbound({ authorId: 'user-b', authorName: 'user-b', text: 'agreed' }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger: new StickyLedger(),
+      now: 10_000,
+      participants: [participant('user-a'), participant('user-b')],
+      botInThread: true,
+      membership: crowdedChannel,
+    })
+
+    expect(decision).toBe('observe')
+  })
+
+  test('a thread the bot has not joined still uses the crowded parent membership', () => {
+    const crowdedChannel = { humans: 5, bots: 1, fetchedAt: 10_000, truncated: false }
+
+    const decision = decideEngagement({
+      message: threadInbound({ authorId: 'user-a', authorName: 'user-a' }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger: new StickyLedger(),
+      now: 10_000,
+      participants: [participant('user-a')],
+      botInThread: false,
+      membership: crowdedChannel,
+    })
+
+    expect(decision).toBe('observe')
+  })
+
   // Discord models a thread as its own channel: `thread` is null and the thread
   // id rides `chat`, so the gate must key on the structural `room` signal, not
   // `thread !== null`. Without this the Discord half of the incident bypasses

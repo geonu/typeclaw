@@ -52,7 +52,7 @@ import { detectContinuationWillingness } from './continuation-willingness'
 import type { RecoveryFailure, RecoveryRecord } from './continuity-types'
 import { describeError } from './describe-error'
 import {
-  countEffectiveHumans,
+  countEngagementHumans,
   decideEngagement,
   grantStickyForReplyTargets,
   isMultiHumanGroup,
@@ -3537,6 +3537,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       triggeringMessageId !== undefined
         ? result.messages.filter((m) => m.externalMessageId !== triggeringMessageId)
         : result.messages
+    let fromParentChannel = false
 
     // A thread rooted at the triggering message (a top-level mention the bot
     // answers in-thread) has no history of its own yet, so the thread fetch
@@ -3557,6 +3558,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return
       }
       filteredMessages = channelResult.messages.filter((m) => m.externalMessageId !== triggeringMessageId)
+      fromParentChannel = true
     }
     if (filteredMessages.length === 0) return
 
@@ -3596,6 +3598,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // normal. We push into contextBuffer (not promptQueue) because these are
     // background context for the model, not turns it must respond to.
     live.contextBuffer.push(...observed)
+    // Persisted participants only include authors routed since the session went
+    // live, so a cold-started thread would undercount humans who spoke earlier
+    // and lose them once the context buffer drains. Record the thread's own
+    // historical human speakers; parent-channel seeds are not thread members.
+    if ((isThread || live.room?.kind === 'thread') && !fromParentChannel) {
+      for (const item of observed) {
+        if (item.authorIsBot || live.participants.some((p) => p.authorId === item.authorId)) continue
+        live.participants = updateParticipants(live.participants, item.authorId, item.authorName, now(), false)
+      }
+    }
     logger.info(`[channels] ${live.keyId}: prefetched ${observed.length} context messages`)
   }
 
@@ -6232,7 +6244,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     const membership = await membershipForEngagement(live)
 
-    const effectiveHumans = countEffectiveHumans(live.participants, membership, now())
+    const botInThread = hasBotParticipated(live)
+    const effectiveHumans = countEngagementHumans(event, live.participants, membership, now(), botInThread)
     live.multiHumanGroup = isMultiHumanGroup(event.isDm, effectiveHumans)
 
     const decision: EngagementDecision = decideEngagement({
@@ -6244,7 +6257,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       participants: live.participants,
       membership,
       selfAliases: computeSelfAliases(),
-      botInThread: hasBotParticipated(live),
+      botInThread,
     })
 
     if (decision === 'observe') {

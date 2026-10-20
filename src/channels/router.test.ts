@@ -13345,6 +13345,134 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(sessions[0]!.prompts).toHaveLength(1)
   })
 
+  test('a cold-started bot-joined thread with two historical humans observes an un-addressed message', async () => {
+    // given: thread history already holds Alice, Bob, and our earlier reply
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'question', authorId: 'alice', authorName: 'alice' }),
+        historyMessage({
+          externalMessageId: 'h2',
+          text: 'our earlier reply',
+          authorId: 'BOT_SELF_ID',
+          authorName: 'Bot',
+          isBot: true,
+        }),
+        historyMessage({ externalMessageId: 'h3', text: '나도 궁금해', authorId: 'bob', authorName: 'bob' }),
+      ],
+    }))
+
+    // when: Bob follows up without addressing the bot
+    await router.route(
+      inboundForSelf('BOT_SELF_ID', {
+        thread: 't-A',
+        externalMessageId: 'bob-followup',
+        text: 'what about tomorrow',
+        authorId: 'bob',
+        authorName: 'bob',
+        isBotMention: false,
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    // then
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('historical thread humans still count after an addressed turn drains the context buffer', async () => {
+    // given: cold-start history with Alice, Bob, and our earlier reply
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const threadKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' } as const
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'question', authorId: 'alice', authorName: 'alice' }),
+        historyMessage({
+          externalMessageId: 'h2',
+          text: 'our earlier reply',
+          authorId: 'BOT_SELF_ID',
+          authorName: 'Bot',
+          isBot: true,
+        }),
+        historyMessage({ externalMessageId: 'h3', text: '나도 궁금해', authorId: 'bob', authorName: 'bob' }),
+      ],
+    }))
+
+    // when: Bob mentions the bot, the bot replies, and sticky credit later expires
+    await router.route(
+      inboundForSelf('BOT_SELF_ID', {
+        thread: 't-A',
+        externalMessageId: 'bob-mention',
+        text: 'bot, what about tomorrow',
+        authorId: 'bob',
+        authorName: 'bob',
+        isBotMention: true,
+      }),
+    )
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ ...threadKey, text: 'tomorrow works' })
+    }
+    await router.__testing!.flushDebounce(threadKey)
+    sessions[0]!.onPrompt = undefined
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    nowRef.value += 10 * 60 * 1000
+
+    await router.route(
+      inboundForSelf('BOT_SELF_ID', {
+        thread: 't-A',
+        externalMessageId: 'bob-followup',
+        text: 'ok thanks',
+        authorId: 'bob',
+        authorName: 'bob',
+        isBotMention: false,
+      }),
+    )
+    await router.__testing!.flushDebounce(threadKey)
+
+    // then: Alice still counts, so Bob's un-addressed follow-up is observed
+    expect(sessions.flatMap((s) => s.prompts)).toHaveLength(1)
+  })
+
+  test('a cold-started bot-joined thread with one historical human engages an un-addressed message', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'question', authorId: 'alice', authorName: 'alice' }),
+        historyMessage({
+          externalMessageId: 'h2',
+          text: 'our earlier reply',
+          authorId: 'BOT_SELF_ID',
+          authorName: 'Bot',
+          isBot: true,
+        }),
+      ],
+    }))
+
+    await router.route(
+      inboundForSelf('BOT_SELF_ID', {
+        thread: 't-A',
+        externalMessageId: 'alice-followup',
+        text: '이거 다시 확인해줘',
+        authorId: 'alice',
+        authorName: 'alice',
+        isBotMention: false,
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
   test('prefetches channel scrollback (tail-only) when session is not in a thread', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
