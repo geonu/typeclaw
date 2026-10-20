@@ -8,6 +8,7 @@ import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import operatorPlugin from '@/bundled-plugins/operator'
 import plannerPlugin from '@/bundled-plugins/planner'
+import qaPlugin from '@/bundled-plugins/qa'
 import researcherPlugin from '@/bundled-plugins/researcher'
 import reviewerPlugin from '@/bundled-plugins/reviewer'
 import scoutPlugin from '@/bundled-plugins/scout'
@@ -63,6 +64,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
   { name: 'scout', version: undefined, source: '<bundled>', defined: scoutPlugin },
   { name: 'reviewer', version: undefined, source: '<bundled>', defined: reviewerPlugin },
+  { name: 'qa', version: undefined, source: '<bundled>', defined: qaPlugin },
   { name: 'researcher', version: undefined, source: '<bundled>', defined: researcherPlugin },
   { name: 'planner', version: undefined, source: '<bundled>', defined: plannerPlugin },
   { name: 'operator', version: undefined, source: '<bundled>', defined: operatorPlugin },
