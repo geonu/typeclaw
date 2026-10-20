@@ -94,6 +94,7 @@ import { createChannelReactTool } from './tools/channel-react'
 import { createChannelReadTool } from './tools/channel-read'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
+import { createChannelSessionSearchTool } from './tools/channel-session-search'
 import { createGrantRoleTool } from './tools/grant-role'
 import { createPostGithubReviewTool } from './tools/post-github-review'
 import { createRestartTool } from './tools/restart'
@@ -926,6 +927,7 @@ export function buildChannelTools(
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
       tools.push(createChannelHandoffTool({ router: channelRouter, sessionId }))
+      tools.push(createChannelSessionSearchTool({ router: channelRouter, sessionId }))
     }
   } else {
     tools.push(createChannelSendTool({ router: channelRouter, getOutboundOrigin }))
