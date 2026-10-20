@@ -4,7 +4,7 @@ import { SecretsBackend, type Secret } from '@/secrets'
 import { providerKeyDefaultEnv } from '@/secrets/defaults'
 import type { ProviderCredential, Providers } from '@/secrets/schema'
 
-import { type Models, loadConfigSync } from './config'
+import { type ProfileEntry, loadConfigSync } from './config'
 import { KNOWN_PROVIDERS, type KnownProviderId, type ModelRef, providerForModelRef } from './providers'
 
 // Where a configured credential resolves from at runtime. Reported by
@@ -209,7 +209,7 @@ function readEnvKey(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return value
 }
 
-function buildProviderReferenceMap(models: Models | null): Map<string, string[]> {
+function buildProviderReferenceMap(models: Record<string, ProfileEntry> | null): Map<string, string[]> {
   const out = new Map<string, string[]>()
   if (models === null) return out
   for (const [profile, entry] of Object.entries(models)) {
@@ -238,9 +238,17 @@ function safeProviderForRef(ref: ModelRef): KnownProviderId | null {
   }
 }
 
-function readModelsOrNull(cwd: string): Models | null {
+// Every profile that can put a provider in use: global `models` plus each
+// `modelOverrides` entry's profiles, labelled `modelOverrides.<name>.<profile>`
+// so removal guards and listings name the override that still needs the provider.
+function readModelsOrNull(cwd: string): Record<string, ProfileEntry> | null {
   try {
-    return loadConfigSync(cwd).models
+    const config = loadConfigSync(cwd)
+    const out: Record<string, ProfileEntry> = { ...config.models }
+    for (const [name, override] of Object.entries(config.modelOverrides)) {
+      for (const [profile, entry] of Object.entries(override.models)) out[`modelOverrides.${name}.${profile}`] = entry
+    }
+    return out
   } catch {
     return null
   }

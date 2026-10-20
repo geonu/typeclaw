@@ -11,7 +11,13 @@ import {
   listAvailableModelRefs,
   listModelProfiles,
   listRegisteredModelRefs,
+  addOverrideMatch,
+  listModelOverrides,
+  removeOverride,
+  removeOverrideMatch,
+  removeOverrideProfile,
   removeProfile,
+  setOverrideProfile,
   setProfile,
   setProfileThinkingLevel,
 } from './models-mutation'
@@ -488,5 +494,49 @@ describe('setProfileThinkingLevel', () => {
     setProfileThinkingLevel(root, 'default', 'high')
     setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
     expect(await readProfileRaw('default')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'high' })
+  })
+})
+
+describe('model overrides', () => {
+  const FW = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+
+  test('set creates an override with --match, then edits profiles and rules by name', () => {
+    expect(setOverrideProfile(root, 'support', 'default', FW, { match: 'slack:T0123/C0123' }).ok).toBe(true)
+    expect(setOverrideProfile(root, 'support', 'fast', FW, { thinkingLevel: 'off' }).ok).toBe(true)
+    expect(addOverrideMatch(root, 'support', 'discord:G1/C2').ok).toBe(true)
+
+    expect(listModelOverrides(root) as unknown).toEqual([
+      {
+        name: 'support',
+        match: ['slack:T0123/C0123', 'discord:G1/C2'],
+        profiles: [
+          { profile: 'default', refs: [FW] },
+          { profile: 'fast', refs: [FW], thinkingLevel: 'off' },
+        ],
+      },
+    ])
+  })
+
+  test('creating an override without --match is refused', () => {
+    expect(setOverrideProfile(root, 'support', 'default', FW).ok).toBe(false)
+    expect(listModelOverrides(root)).toEqual([])
+  })
+
+  test('invalid rules and uncredentialed providers are refused unless forced', () => {
+    expect(setOverrideProfile(root, 'a', 'default', FW, { match: 'slak:*' }).ok).toBe(false)
+    expect(setOverrideProfile(root, 'a', 'default', 'openai/gpt-5.4-nano', { match: 'slack:*', env: {} }).ok).toBe(
+      false,
+    )
+    expect(
+      setOverrideProfile(root, 'a', 'default', 'openai/gpt-5.4-nano', { match: 'slack:*', env: {}, force: true }).ok,
+    ).toBe(true)
+  })
+
+  test('removing the last rule is refused; removing the last profile drops the override', () => {
+    setOverrideProfile(root, 'support', 'default', FW, { match: 'slack:*' })
+    expect(removeOverrideMatch(root, 'support', 'slack:*').ok).toBe(false)
+    expect(removeOverrideProfile(root, 'support', 'default').ok).toBe(true)
+    expect(listModelOverrides(root)).toEqual([])
+    expect(removeOverride(root, 'support').ok).toBe(false)
   })
 })

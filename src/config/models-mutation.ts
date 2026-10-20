@@ -6,6 +6,7 @@ import { commitSystemFileSync } from '@/git/system-commit'
 import {
   configSchema,
   loadConfigSyncOrDefaults,
+  modelOverrideRuleError,
   validateConfig,
   type CustomModelMeta,
   type ThinkingLevel,
@@ -281,6 +282,22 @@ function writeModels(
   commitMessage: string,
   customModel?: { ref: ModelRef; meta: CustomModelMeta },
 ): ModelMutationResult {
+  return writeConfig(
+    cwd,
+    (parsed) => {
+      parsed.models = models
+    },
+    commitMessage,
+    customModel,
+  )
+}
+
+function writeConfig(
+  cwd: string,
+  mutate: (parsed: Record<string, unknown>) => void,
+  commitMessage: string,
+  customModel?: { ref: ModelRef; meta: CustomModelMeta },
+): ModelMutationResult {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -292,7 +309,7 @@ function writeModels(
     }
     return { ok: false, reason: `Failed to read ${CONFIG_FILE}: ${(error as Error).message}` }
   }
-  parsed.models = models
+  mutate(parsed)
   if (customModel !== undefined) {
     const existingCustomModels = isObjectRecord(parsed.customModels) ? parsed.customModels : {}
     parsed.customModels = { ...existingCustomModels, [customModel.ref]: customModel.meta }
@@ -301,7 +318,7 @@ function writeModels(
   if (!check.success) {
     return {
       ok: false,
-      reason: `models block would be invalid: ${check.error.issues.map((i) => i.message).join('; ')}`,
+      reason: `config would be invalid: ${check.error.issues.map((i) => i.message).join('; ')}`,
     }
   }
   try {
@@ -336,6 +353,172 @@ function writeModels(
   // Bun, and clean files, so callers outside a git repo pay zero cost.
   commitSystemFileSync(cwd, CONFIG_FILE, commitMessage)
   return { ok: true }
+}
+
+export type ModelOverrideListing = {
+  name: string
+  match: string[]
+  profiles: { profile: string; refs: ModelRef[]; thinkingLevel?: ThinkingLevel }[]
+}
+
+export function listModelOverrides(cwd: string): ModelOverrideListing[] {
+  const overrides = loadConfigSyncOrDefaults(cwd).modelOverrides
+  return Object.entries(overrides).map(([name, override]) => ({
+    name,
+    match: override.match,
+    profiles: Object.entries(override.models).map(([profile, entry]) => ({
+      profile,
+      refs: entry.refs,
+      ...(entry.thinkingLevel !== undefined ? { thinkingLevel: entry.thinkingLevel } : {}),
+    })),
+  }))
+}
+
+export type SetOverrideProfileOptions = SetProfileOptions & {
+  // Rule added to the override's `match` (creating the override when it doesn't
+  // exist yet). Required to create one; optional when it already exists.
+  match?: string
+}
+
+export function setOverrideProfile(
+  cwd: string,
+  name: string,
+  profile: string,
+  ref: string,
+  options: SetOverrideProfileOptions = {},
+): ModelMutationResult {
+  const trimmed = profile.trim()
+  if (trimmed.length === 0) return { ok: false, reason: 'Profile name cannot be empty.' }
+  if (!isModelRef(ref)) {
+    return {
+      ok: false,
+      reason: `Unknown model "${ref}". Run \`typeclaw model list --available\` to see valid options.`,
+    }
+  }
+  if (options.match !== undefined) {
+    const ruleError = modelOverrideRuleError(options.match)
+    if (ruleError !== undefined) return { ok: false, reason: `Invalid match rule "${options.match}": ${ruleError}` }
+  }
+  const existing = readOverridesRaw(cwd)[name]
+  if (existing === undefined && options.match === undefined) {
+    return {
+      ok: false,
+      reason: `Override "${name}" does not exist. Pass --match <rule> to create it, e.g. --match 'slack:*'.`,
+    }
+  }
+  const providerId = providerForModelRef(ref)
+  if (options.force !== true && !hasUsableCredential(cwd, providerId, options.env ?? process.env)) {
+    return {
+      ok: false,
+      reason: `Provider "${providerId}" has no credentials. Run \`typeclaw provider add ${providerId}\` first, or pass --force to write anyway.`,
+    }
+  }
+  const match = existing?.match ?? []
+  const models = existing?.models ?? {}
+  const level = Object.hasOwn(options, 'thinkingLevel')
+    ? options.thinkingLevel
+    : rawProfileThinkingLevel(models[trimmed])
+  const next: RawOverride = {
+    match: options.match !== undefined && !match.includes(options.match) ? [...match, options.match] : match,
+    models: { ...models, [trimmed]: withRawProfileThinkingLevel(ref, level) },
+  }
+  const customModel = !isKnownModelRef(ref) && options.meta !== undefined ? { ref, meta: options.meta } : undefined
+  return writeOverride(cwd, name, next, `model: set ${trimmed} → ${ref} in override ${name}`, customModel)
+}
+
+// Removing an override's last profile removes the override itself, since an
+// entry with no profiles would be schema-invalid and has nothing to apply.
+export function removeOverrideProfile(cwd: string, name: string, profile: string): ModelMutationResult {
+  const existing = readOverridesRaw(cwd)[name]
+  if (existing === undefined) return { ok: false, reason: `Override "${name}" not found in ${CONFIG_FILE}.` }
+  if (!(profile in existing.models)) {
+    return { ok: false, reason: `Profile "${profile}" not found in override "${name}".` }
+  }
+  const models = { ...existing.models }
+  delete models[profile]
+  if (Object.keys(models).length === 0) return removeOverride(cwd, name)
+  return writeOverride(cwd, name, { ...existing, models }, `model: remove ${profile} from override ${name}`)
+}
+
+export function addOverrideMatch(cwd: string, name: string, rule: string): ModelMutationResult {
+  const ruleError = modelOverrideRuleError(rule)
+  if (ruleError !== undefined) return { ok: false, reason: `Invalid match rule "${rule}": ${ruleError}` }
+  const existing = readOverridesRaw(cwd)[name]
+  if (existing === undefined) {
+    return {
+      ok: false,
+      reason: `Override "${name}" not found. Create it with \`typeclaw model set <profile> <ref> --override ${name} --match '${rule}'\`.`,
+    }
+  }
+  if (existing.match.includes(rule)) return { ok: true }
+  return writeOverride(
+    cwd,
+    name,
+    { ...existing, match: [...existing.match, rule] },
+    `model: match ${rule} in override ${name}`,
+  )
+}
+
+export function removeOverrideMatch(cwd: string, name: string, rule: string): ModelMutationResult {
+  const existing = readOverridesRaw(cwd)[name]
+  if (existing === undefined) return { ok: false, reason: `Override "${name}" not found in ${CONFIG_FILE}.` }
+  if (!existing.match.includes(rule)) return { ok: false, reason: `Rule "${rule}" not found in override "${name}".` }
+  if (existing.match.length === 1) {
+    return {
+      ok: false,
+      reason: `"${rule}" is the last rule of override "${name}". Run \`typeclaw model override remove ${name}\` to delete the override.`,
+    }
+  }
+  const match = existing.match.filter((r) => r !== rule)
+  return writeOverride(cwd, name, { ...existing, match }, `model: unmatch ${rule} in override ${name}`)
+}
+
+export function removeOverride(cwd: string, name: string): ModelMutationResult {
+  if (readOverridesRaw(cwd)[name] === undefined) {
+    return { ok: false, reason: `Override "${name}" not found in ${CONFIG_FILE}.` }
+  }
+  return writeConfig(
+    cwd,
+    (parsed) => {
+      const overrides = { ...(isObjectRecord(parsed.modelOverrides) ? parsed.modelOverrides : {}) }
+      delete overrides[name]
+      parsed.modelOverrides = overrides
+    },
+    `model: remove override ${name}`,
+  )
+}
+
+type RawOverride = { match: string[]; models: RawModels }
+
+function writeOverride(
+  cwd: string,
+  name: string,
+  override: RawOverride,
+  commitMessage: string,
+  customModel?: { ref: ModelRef; meta: CustomModelMeta },
+): ModelMutationResult {
+  return writeConfig(
+    cwd,
+    (parsed) => {
+      const overrides = isObjectRecord(parsed.modelOverrides) ? parsed.modelOverrides : {}
+      parsed.modelOverrides = { ...overrides, [name]: override }
+    },
+    commitMessage,
+    customModel,
+  )
+}
+
+// On-disk `modelOverrides` so writers preserve hand-authored profile shapes.
+function readOverridesRaw(cwd: string): Record<string, RawOverride> {
+  try {
+    const parsed = JSON.parse(readFileSync(join(cwd, CONFIG_FILE), 'utf8')) as {
+      modelOverrides?: Record<string, RawOverride>
+    }
+    return parsed.modelOverrides ?? {}
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw error
+  }
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

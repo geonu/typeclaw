@@ -8,6 +8,7 @@ import { z } from 'zod'
 
 import { channelsSchema, SEEDED_GITHUB_EVENT_ALLOWLISTS } from '@/channels/schema'
 import { commitSystemFileSync } from '@/git/system-commit'
+import { parseMatchRule } from '@/permissions/match-rule'
 import { rolesConfigSchema } from '@/permissions/schema'
 import { secretFieldSchema } from '@/secrets/resolve'
 
@@ -758,17 +759,60 @@ export const modelsSchema = z
   .record(z.string().min(1), profileEntrySchema)
   .refine((m) => 'default' in m, { message: 'models.default is required' })
   // Fill only when unset, so an explicit level (including `off`) always wins.
-  .transform((models): Models => {
-    let next: Record<string, ProfileEntry> | undefined
-    for (const [profile, thinkingLevel] of Object.entries(PROFILE_THINKING_LEVEL_DEFAULTS)) {
-      const entry = models[profile]
-      if (entry !== undefined && entry.thinkingLevel === undefined) {
-        next ??= { ...models }
-        next[profile] = { ...entry, thinkingLevel }
-      }
+  .transform((models): Models => withProfileThinkingDefaults(models) as Models)
+
+function withProfileThinkingDefaults(models: Record<string, ProfileEntry>): Record<string, ProfileEntry> {
+  let next: Record<string, ProfileEntry> | undefined
+  for (const [profile, thinkingLevel] of Object.entries(PROFILE_THINKING_LEVEL_DEFAULTS)) {
+    const entry = models[profile]
+    if (entry !== undefined && entry.thinkingLevel === undefined) {
+      next ??= { ...models }
+      next[profile] = { ...entry, thinkingLevel }
     }
-    return (next ?? models) as Models
+  }
+  return next ?? models
+}
+
+// Why `rule` can't scope a `modelOverrides` entry, or undefined when it can.
+// Rules use the roles match-rule DSL, limited to channel scopes: `author:` is
+// rejected because a session keeps one model for every author of a shared chat.
+export function modelOverrideRuleError(rule: string): string | undefined {
+  const parsed = parseMatchRule(rule)
+  if (!parsed.ok) return parsed.error
+  if (parsed.value.kind === 'wildcard') return undefined
+  if (parsed.value.kind !== 'channel') {
+    return 'only channel rules (e.g. `slack:*`, `slack:T0123/C0123`, `*`) are allowed'
+  }
+  if (parsed.value.author !== undefined) return '`author:` is not supported; a session keeps one model for every author'
+  return undefined
+}
+
+// `modelOverrides` layers partial `models` blocks over the global one for the
+// chats each entry's `match` covers, mirroring `roles.<name> = { match, ... }`.
+// Per profile, the most specific matching rule wins (see `effectiveModels`);
+// profiles an entry doesn't define fall through to `models`.
+const modelOverrideSchema = z
+  .object({
+    match: z
+      .array(z.string())
+      .min(1, { message: 'match must list at least one rule (use "*" for every channel)' })
+      .superRefine((rules, ctx) => {
+        rules.forEach((rule, index) => {
+          const error = modelOverrideRuleError(rule)
+          if (error !== undefined)
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: `"${rule}": ${error}` })
+        })
+      }),
+    models: z
+      .record(z.string().min(1), profileEntrySchema)
+      .refine((m) => Object.keys(m).length > 0, { message: 'models must define at least one profile' })
+      .transform(withProfileThinkingDefaults),
   })
+  .strict()
+
+export type ModelOverride = z.infer<typeof modelOverrideSchema>
+
+export const modelOverridesSchema = z.record(z.string().min(1), modelOverrideSchema).default({})
 
 // A model profile after normalisation: its fallback chain (always non-empty)
 // plus an optional reasoning effort. `thinkingLevel` resolution is layered at
@@ -797,6 +841,7 @@ export const configSchema = z
       default: { refs: [asModelRef(DEFAULT_MODEL_REF)] },
     })) as unknown as z.ZodType<Models>,
     customModels: customModelsSchema,
+    modelOverrides: modelOverridesSchema,
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -1081,6 +1126,7 @@ export type FieldEffect = 'applied' | 'restart-required' | 'ignored'
 export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   $schema: 'ignored',
   models: 'applied',
+  modelOverrides: 'applied',
   customModels: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
@@ -1181,6 +1227,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     '$schema',
     'port',
     'models',
+    'modelOverrides',
     'customModels',
     'mounts',
     'plugins',
