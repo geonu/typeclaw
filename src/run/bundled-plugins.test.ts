@@ -27,6 +27,7 @@ describe('BUNDLED_PLUGINS', () => {
       'managed-browser',
       'doc-render',
       'explorer',
+      'browser-agent',
       'scout',
       'reviewer',
       'qa',
