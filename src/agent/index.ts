@@ -47,6 +47,7 @@ import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import type { InternalGuard } from './guard-types'
 import { buildInternalGuards } from './guards'
+import { attachIdleCompaction } from './idle-compaction'
 import type { LiveSubagentRegistry } from './live-subagents'
 import { sanitizeMessagesForLlmReplay } from './llm-replay-sanitizer'
 import { applyModelRuntimeOverrides } from './model-overrides'
@@ -669,6 +670,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
 
   const unsubToolNudge = attachToolNotFoundNudge(session, intendedActiveToolNames)
+  // An applied idle summary replaces the prefix the keepalive captured;
+  // replaying the old one would only refresh a cache no turn will read.
+  const stopIdleCompaction = attachIdleCompaction(session, { onApplied: () => cacheKeepalive?.invalidate() })
 
   // Registered only once creation can no longer fail, so a rejected creation
   // leaves no scope entry behind; tools resolve the scope lazily at call time.
@@ -680,6 +684,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
         )
       : undefined
   const dispose = async () => {
+    stopIdleCompaction()
     cacheKeepalive?.close()
     unsubCacheKeepalive()
     releaseSubagentTmp?.()

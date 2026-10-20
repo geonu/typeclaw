@@ -79,6 +79,11 @@ export class SubagentCacheKeepalive {
     this.refreshedAt = this.clock.now()
   }
 
+  invalidate(): void {
+    this.request = undefined
+    this.stop()
+  }
+
   startTurn(): void {
     this.idle = false
     this.pings = 0
