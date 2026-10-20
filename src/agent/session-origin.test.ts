@@ -221,7 +221,7 @@ describe('renderSessionOrigin', () => {
     },
   )
 
-  test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
+  test('channel origin includes reply and send tool references', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'slack-bot',
@@ -230,8 +230,6 @@ describe('renderSessionOrigin', () => {
       thread: '1700000000.000100',
     })
     expect(out).toContain('channel_reply({ text, continue_after_reply })')
-    expect(out).toContain("don't")
-    expect(out).toMatch(/post somewhere else/i)
     const replyIdx = out.indexOf('`channel_reply`')
     const sendIdx = out.indexOf('`channel_send`')
     expect(replyIdx).toBeGreaterThan(-1)

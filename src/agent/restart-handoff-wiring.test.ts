@@ -74,6 +74,32 @@ describe('buildRestartHandoffWiring', () => {
 })
 
 describe('currentChannelAuthor', () => {
+  test('does not export a foreign ID as a target-local restart author', () => {
+    // Given
+    const origin: SessionOrigin = {
+      ...channelOrigin,
+      lastInboundAuthorId: 'alice',
+      lastInboundAuthorAdapter: 'slack-bot',
+    }
+    // When
+    const author = currentChannelAuthor(() => origin)
+    // Then
+    expect(author).toBeUndefined()
+  })
+
+  test('preserves a shared-namespace author for restart', () => {
+    // Given
+    const origin: SessionOrigin = {
+      ...channelOrigin,
+      lastInboundAuthorId: 'alice',
+      lastInboundAuthorAdapter: 'discord',
+    }
+    // When
+    const author = currentChannelAuthor(() => origin)
+    // Then
+    expect(author).toBe('alice')
+  })
+
   test('reads the LIVE turn author, not the session-creation author', () => {
     // given: a live origin holder advanced to a SECOND author after creation
     const ref: { current: SessionOrigin | undefined } = {

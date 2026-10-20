@@ -10,6 +10,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@earendil-works/pi-coding-agent'
 
+import { adapterNamespace } from '@/channels/adapter-namespace'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import { createCodingAgentTool } from '@/coding-agent/tool'
@@ -94,6 +95,7 @@ import { createChannelReactTool } from './tools/channel-react'
 import { createChannelReadTool } from './tools/channel-read'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
+import { createChannelSessionSearchTool } from './tools/channel-session-search'
 import { createGrantRoleTool } from './tools/grant-role'
 import { createPostGithubReviewTool } from './tools/post-github-review'
 import { createRestartTool } from './tools/restart'
@@ -730,7 +732,12 @@ export function buildRestartHandoffWiring(
 // session. Returns undefined for non-channel/no-author origins.
 export function currentChannelAuthor(getOrigin: () => SessionOrigin | undefined): string | undefined {
   const origin = getOrigin()
-  return origin?.kind === 'channel' ? origin.lastInboundAuthorId : undefined
+  if (origin?.kind !== 'channel') return undefined
+  // The legacy restart record carries only a target-local author ID. Foreign
+  // requesters must remain authorless there, matching their target role rules.
+  if (adapterNamespace(origin.lastInboundAuthorAdapter ?? origin.adapter) !== adapterNamespace(origin.adapter))
+    return undefined
+  return origin.lastInboundAuthorId
 }
 
 function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {
@@ -887,7 +894,7 @@ export function buildChannelTools(
     if (origin.adapter === 'github' && sessionId !== undefined)
       tools.push(createPostGithubReviewTool({ router: channelRouter, origin: channelOrigin, sessionId }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
-    tools.push(createChannelReadTool({ router: channelRouter }))
+    tools.push(createChannelReadTool({ router: channelRouter, ...(sessionId !== undefined ? { sessionId } : {}) }))
     tools.push(
       createChannelSendTool({
         router: channelRouter,
@@ -926,6 +933,7 @@ export function buildChannelTools(
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
       tools.push(createChannelHandoffTool({ router: channelRouter, sessionId }))
+      tools.push(createChannelSessionSearchTool({ router: channelRouter, sessionId }))
     }
   } else {
     tools.push(createChannelSendTool({ router: channelRouter, getOutboundOrigin }))

@@ -35,11 +35,12 @@ import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { getConfig, resolveModel } from '@/config'
 import { effectiveModels } from '@/config/model-overrides'
-import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
+import { CORE_PERMISSIONS, type MatchableOrigin, type PermissionService } from '@/permissions'
 import type { ChannelOutboundBeforeEvent, ChannelOutboundOrigin, HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
+import { adapterNamespace } from './adapter-namespace'
 import { extractMentionedUserIds } from './adapters/mention-hints'
 import {
   BackgroundObligationStore,
@@ -111,6 +112,13 @@ import {
   type ReadCapability,
   type WriteCapability,
 } from './schema'
+import { checkHandoffAccess, createSessionHandoff, type ChannelHandoffResult } from './session-handoff'
+import {
+  createSessionSearch,
+  type SessionActivity,
+  type SessionSearchArgs,
+  type SessionSearchTarget,
+} from './session-search'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -755,25 +763,9 @@ export type CreateSessionForChannel = (params: {
 
 export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapterConfig | undefined
 
-export type ChannelHandoffResult =
-  | { ok: true; target: string }
-  | {
-      ok: false
-      code:
-        | 'no-source-session'
-        | 'loop'
-        | 'cross-adapter'
-        | 'same-conversation'
-        | 'no-requester'
-        | 'requester-not-in-target'
-        | 'would-elevate'
-        | 'denied'
-        | 'not-engaged'
-      error: string
-    }
+export type { ChannelHandoffResult } from './session-handoff'
 
-const DM_ORIGIN_WINDOW_MS = 30 * 60_000
-const HANDOFF_RECENT_PARTICIPATION_MS = 30 * 60_000
+const CONVERSATION_ORIGIN_WINDOW_MS = 30 * 60_000
 
 type QueuedInbound = {
   inputId: string
@@ -781,6 +773,7 @@ type QueuedInbound = {
   referenceContext?: InboundReferenceContext
   attachments?: readonly InboundAttachment[]
   authorId: string
+  authorAdapter?: AdapterId
   authorName: string
   authorIsBot: boolean
   externalMessageId: string
@@ -892,6 +885,8 @@ type PendingReloadCoverage = {
   // Author context a completion-only wake needs for author-scoped role
   // resolution, exactly as the reloaded session would have restored it.
   lastTurnAuthorId: string | null
+  lastTurnAuthorAdapter: AdapterId
+  lastTurnHandoff: boolean
   lastTurnAuthorIds: string[]
 }
 
@@ -1003,6 +998,7 @@ type LiveSession = {
   // leaks a timer that fires past the turn's end.
   promptInFlight: boolean
   lastInboundAt: number
+  recentMessages: SessionActivity[]
   // Transcript-file size (bytes) captured immediately after cold-start, before
   // any user turn — a proxy for the fixed base-context rebuild cost (rendered
   // system prompt + injected memory + prefetched channel context). Read by the
@@ -1011,6 +1007,7 @@ type LiveSession = {
   baseContextBytes: number
   firstUnprocessedAt: number
   currentTurnAuthorId: string | null
+  currentTurnAuthorAdapter: AdapterId
   currentTurnAuthorIds: Set<string>
   // Reaction target of the inbound that triggered THIS turn (the last item in
   // the drained batch, mirroring `currentTurnAuthorId`). Surfaced on the live
@@ -1032,12 +1029,10 @@ type LiveSession = {
   // True when THIS turn's batch carries a cross-session handoff inbound. The
   // handoff loop guard: a handoff-started turn cannot hand off again.
   currentTurnHandoff: boolean
-  // Whether the most recent inbound routed to this session was a DM. Lets a
-  // DM inbound find the non-DM conversation its author just came from.
+  // Whether the most recent inbound was private, for handoff context framing.
   lastInboundIsDm: boolean
-  // Origin channel keys already hinted to this DM session, so the hint is
-  // rendered once per origin instead of on every DM message.
-  dmOriginHintedKeys: Set<string>
+  // Hint each recently visited conversation only once in this session.
+  originHintedKeys: Set<string>
   // Typing-status anchor of the inbound that triggered THIS turn (last item in
   // the drained batch, mirroring `currentTurnReactionRef`). Adapter-opaque ts
   // carried only to the typing path; null when the triggering inbound supplied
@@ -1079,6 +1074,8 @@ type LiveSession = {
   // inserted into Set"), so a multi-author prior turn like alice→bob
   // restores `bob`, the same identity normal turns would have used.
   lastTurnAuthorId: string | null
+  lastTurnAuthorAdapter: AdapterId
+  lastTurnHandoff: boolean
   consecutiveAborts: number
   // Per-(chat:thread) count of bot messages sent without intervening user
   // input being rendered into the model's context. Reset at the top of each
@@ -1697,11 +1694,12 @@ export type ChannelRouter = {
   // session was found and the reminder was queued, `no-live-session`
   // otherwise. Used by the subagent-completion bridge in
   // src/run/index.ts; safe for tests to call directly via a fake router.
-  // Delegate work to the session that owns `target` (same adapter) instead of
+  // Delegate work to the live session that owns `target` on any adapter instead of
   // posting there blind. Routed as a synthetic inbound authored by the source
-  // turn's requester, so it queues behind any running turn, cold-starts with
-  // history prefetch, and re-checks the requester's role in the target.
+  // turn's requester, so it queues behind any running turn and re-checks the
+  // requester's target role without linking identities across platforms.
   handoff: (args: { fromSessionId: string; target: ChannelKey; text: string }) => Promise<ChannelHandoffResult>
+  searchSessions: (args: SessionSearchArgs) => SessionSearchTarget[]
   injectSubagentCompletionReminder: (args: {
     parentSessionId: string
     subagent: string
@@ -2741,6 +2739,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     coverageDeferredParentSessionId: live.coverageDeferredParentSessionId,
     ...(live.turnAccountIdentity !== undefined ? { turnAccountIdentity: live.turnAccountIdentity } : {}),
     lastTurnAuthorId: live.lastTurnAuthorId,
+    lastTurnAuthorAdapter: live.lastTurnAuthorAdapter,
+    lastTurnHandoff: live.lastTurnHandoff,
     lastTurnAuthorIds: [...live.lastTurnAuthorIds],
   })
 
@@ -2985,6 +2985,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (coverage.turnAccountIdentity !== undefined) live.turnAccountIdentity = coverage.turnAccountIdentity
       if (live.lastTurnAuthorId === null && coverage.lastTurnAuthorId !== null) {
         live.lastTurnAuthorId = coverage.lastTurnAuthorId
+        live.lastTurnAuthorAdapter = coverage.lastTurnAuthorAdapter
+        live.lastTurnHandoff = coverage.lastTurnHandoff
         live.lastTurnAuthorIds = new Set(coverage.lastTurnAuthorIds)
       }
     }
@@ -3312,12 +3314,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         baseContextBytes: 0,
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
+        recentMessages: [],
+        currentTurnAuthorAdapter: key.adapter,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
         currentTurnExplicitlyAddressed: false,
         currentTurnHandoff: false,
         lastInboundIsDm: false,
-        dmOriginHintedKeys: new Set(),
+        originHintedKeys: new Set(),
         currentTurnTypingThread: null,
         dirtyTypingThreads: new Set(),
         currentTurnEngageReactions: [],
@@ -3336,6 +3340,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // stay in sync, so they are written in the same statement.
         lastTurnAuthorIds: triggeringAuthorId !== undefined ? new Set([triggeringAuthorId]) : new Set(),
         lastTurnAuthorId: triggeringAuthorId ?? null,
+        lastTurnAuthorAdapter: key.adapter,
+        lastTurnHandoff: false,
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         lastSentText: new Map(),
@@ -4459,6 +4465,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(live.room?.parentChat !== undefined ? { parentChat: live.room.parentChat } : {}),
       ...(live.room?.parentChatName !== undefined ? { parentChatName: live.room.parentChatName } : {}),
       ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
+      ...(live.currentTurnAuthorAdapter !== live.key.adapter
+        ? { lastInboundAuthorAdapter: live.currentTurnAuthorAdapter }
+        : {}),
       ...(live.currentTurnReactionRef !== null ? { reactionRef: live.currentTurnReactionRef } : {}),
       participants: live.participants,
       ...(membership !== null ? { membership } : {}),
@@ -5494,6 +5503,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // which skip this branch.
           live.pendingProviderError = null
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
+          live.currentTurnAuthorAdapter = batch[batch.length - 1]!.authorAdapter ?? live.key.adapter
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
           const trigger = batch[batch.length - 1]!
@@ -5592,6 +5602,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // turn `batch[batch.length - 1]!.authorId` semantics) so a multi-
           // author prior turn like alice→bob restores `bob`, not alice.
           live.currentTurnAuthorId = live.lastTurnAuthorId
+          live.currentTurnAuthorAdapter = live.lastTurnAuthorAdapter
+          live.currentTurnHandoff = live.lastTurnHandoff
           live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
         } else {
           live.currentTurnEngageReactions = []
@@ -5850,6 +5862,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
         if (live.currentTurnAuthorId !== null) {
           live.lastTurnAuthorId = live.currentTurnAuthorId
+          live.lastTurnAuthorAdapter = live.currentTurnAuthorAdapter
+          live.lastTurnHandoff = live.currentTurnHandoff
         }
       }
     } finally {
@@ -6246,6 +6260,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         chat: event.chat,
         ...(event.room?.parentChat !== undefined ? { parentChat: event.room.parentChat } : {}),
         lastInboundAuthorId: event.authorId,
+        ...(event.authorAdapter !== undefined ? { lastInboundAuthorAdapter: event.authorAdapter } : {}),
       },
       messageId: event.externalMessageId || undefined,
       eventKind: event.eventKind ?? 'message',
@@ -6275,15 +6290,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     let live = await ensureLive(key, event.externalMessageId, event.authorId, undefined, event.room, generation)
     live.room = event.room
 
-    const isNewAuthor = !live.participants.some((p) => p.authorId === event.authorId)
-    live.participants = updateParticipants(
-      live.participants,
-      event.authorId,
-      event.authorName,
-      now(),
-      event.authorIsBot,
-    )
-    void persistParticipants(live)
+    const isNewAuthor = event.handoff !== true && !live.participants.some((p) => p.authorId === event.authorId)
+    // A delegated note is not evidence that its author joined this conversation.
+    if (event.handoff !== true) {
+      live.participants = updateParticipants(
+        live.participants,
+        event.authorId,
+        event.authorName,
+        now(),
+        event.authorIsBot,
+      )
+      void persistParticipants(live)
+      live.recentMessages.push({ text: event.text.slice(0, 2000), at: now() })
+      if (live.recentMessages.length > 20) live.recentMessages.shift()
+    }
 
     // A previously-unseen author just spoke. The cached membership count
     // (from /members or history-derived) was computed without them, so
@@ -6372,12 +6392,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       updateLoopGuard(live, event)
 
-      const dmOriginNote = event.isDm && event.handoff !== true ? takeDmOriginNote(live, event) : undefined
+      const originNote = event.handoff !== true ? takeConversationOriginNote(live, event) : undefined
       live.lastInboundIsDm = event.isDm
       enqueue(
         live,
-        dmOriginNote !== undefined
-          ? { ...event, routingNote: [event.routingNote, dmOriginNote].filter((n) => n !== undefined).join('\n') }
+        originNote !== undefined
+          ? { ...event, routingNote: [event.routingNote, originNote].filter((n) => n !== undefined).join('\n') }
           : event,
         engageReaction,
         admission.inputId,
@@ -6419,6 +6439,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     thread: event.thread,
     ...(event.room?.parentChat !== undefined ? { parentChat: event.room.parentChat } : {}),
     lastInboundAuthorId: event.authorId,
+    ...(event.authorAdapter !== undefined ? { lastInboundAuthorAdapter: event.authorAdapter } : {}),
   })
 
   const isChannelRespondDenied = (event: InboundMessage): boolean =>
@@ -6513,6 +6534,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(event.referenceContext !== undefined ? { referenceContext: event.referenceContext } : {}),
       ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
       authorId: event.authorId,
+      ...(event.authorAdapter !== undefined ? { authorAdapter: event.authorAdapter } : {}),
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
       externalMessageId: event.externalMessageId,
@@ -8868,13 +8890,32 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'unknown-command', name: lowered }
   }
 
-  const acceptBackgroundResponse: ChannelRouter['acceptBackgroundResponse'] = async (args) =>
-    backgroundObligations.withTargetLane(args.key, async () => {
+  const acceptBackgroundResponse: ChannelRouter['acceptBackgroundResponse'] = async (args) => {
+    // Freeze the authenticated live actor before entering the asynchronous lane.
+    // Legacy callers without a live parent retain their supplied provenance.
+    const live = liveSessions.get(channelKeyId(args.key))
+    let principal: MatchableOrigin | undefined
+    if (live !== undefined && !live.destroyed && live.sessionId === args.parentSessionId) {
+      const authorId = live.currentTurnAuthorId ?? live.lastTurnAuthorId
+      const authorAdapter =
+        live.currentTurnAuthorId !== null ? live.currentTurnAuthorAdapter : live.lastTurnAuthorAdapter
+      principal = {
+        kind: 'channel',
+        adapter: live.key.adapter,
+        workspace: live.key.workspace,
+        chat: live.key.chat,
+        ...(live.room?.parentChat !== undefined ? { parentChat: live.room.parentChat } : {}),
+        ...(authorId !== null ? { lastInboundAuthorId: authorId } : {}),
+        ...(authorAdapter !== live.key.adapter ? { lastInboundAuthorAdapter: authorAdapter } : {}),
+      }
+    }
+    return backgroundObligations.withTargetLane(args.key, async () => {
       await ready
       inboundJournal.assertAvailable()
-      const row = await backgroundObligations.accept(args)
+      const row = await backgroundObligations.accept({ ...args, ...(principal !== undefined ? { principal } : {}) })
       return { obligationId: row.obligationId, generation: row.generation }
     })
+  }
 
   const suppressUnstartedBackgroundResponse: ChannelRouter['suppressUnstartedBackgroundResponse'] = async (
     ref,
@@ -9036,20 +9077,35 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'delivered', keyId: live.keyId }
   }
 
-  // A user who moved from a channel into a DM (e.g. to do a role grant in
-  // private) usually wants the result back where they came from. Point the DM
-  // session at that origin once, so "continue" becomes a handoff to the session
-  // that owns the channel instead of a blind channel_send from stale context.
-  const takeDmOriginNote = (dm: LiveSession, event: InboundMessage): string | undefined => {
+  // Only shared namespaces identify the same person across conversations.
+  // Check the NEW inbound author, not the session's previous turn owner.
+  const takeConversationOriginNote = (live: LiveSession, event: InboundMessage): string | undefined => {
     let origin: LiveSession | undefined
     for (const s of liveSessions.values()) {
-      if (s === dm || s.destroyed || s.lastInboundIsDm || s.key.adapter !== event.adapter) continue
-      if (now() - s.lastInboundAt > DM_ORIGIN_WINDOW_MS) continue
-      if (!s.lastTurnAuthorIds.has(event.authorId) && !s.currentTurnAuthorIds.has(event.authorId)) continue
+      if (s === live || s.destroyed || adapterNamespace(s.key.adapter) !== adapterNamespace(event.adapter)) continue
+      if (!options.configForAdapter(s.key.adapter)?.enabled) continue
+      if (
+        !s.participants.some(
+          (p) => p.authorId === event.authorId && now() - p.lastMessageAt <= CONVERSATION_ORIGIN_WINDOW_MS,
+        )
+      )
+        continue
+      const access = checkHandoffAccess({
+        source: {
+          ...live,
+          currentTurnAuthorId: event.authorId,
+          currentTurnAuthorAdapter: event.adapter,
+          currentTurnHandoff: false,
+          lastTurnHandoff: false,
+        },
+        target: s,
+        permissions,
+      })
+      if (!access.ok) continue
       if (origin === undefined || s.lastInboundAt > origin.lastInboundAt) origin = s
     }
-    if (origin === undefined || dm.dmOriginHintedKeys.has(origin.keyId)) return undefined
-    dm.dmOriginHintedKeys.add(origin.keyId)
+    if (origin === undefined || live.originHintedKeys.has(origin.keyId)) return undefined
+    live.originHintedKeys.add(origin.keyId)
     const k = origin.key
     const thread = k.thread !== null ? ` thread="${k.thread}"` : ''
     return (
@@ -9060,149 +9116,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
-  const handoff = async (args: {
-    fromSessionId: string
-    target: ChannelKey
-    text: string
-  }): Promise<ChannelHandoffResult> => {
-    let source: LiveSession | undefined
-    for (const s of liveSessions.values()) {
-      if (s.sessionId === args.fromSessionId && !s.destroyed) source = s
-    }
-    if (source === undefined) {
-      return { ok: false, code: 'no-source-session', error: 'handoff is only available from a live channel session' }
-    }
-    if (source.currentTurnHandoff) {
-      return {
-        ok: false,
-        code: 'loop',
-        error: 'this turn was itself started by a handoff; answer here with channel_reply instead of handing off again',
-      }
-    }
-    if (args.target.adapter !== source.key.adapter) {
-      return {
-        ok: false,
-        code: 'cross-adapter',
-        error: `handoff target must be on the same adapter (${source.key.adapter}); the requester has no identity on ${args.target.adapter}`,
-      }
-    }
-    if (channelKeyId(args.target) === source.keyId) {
-      return { ok: false, code: 'same-conversation', error: 'target is this conversation; use channel_reply' }
-    }
-    const requesterId = source.currentTurnAuthorId ?? source.lastTurnAuthorId
-    if (requesterId === null) {
-      return { ok: false, code: 'no-requester', error: 'no human requester in this turn to act on behalf of' }
-    }
-    // Only deliver to a live conversation the requester spoke in recently.
-    // Persisted participants span days, so this is scoped to recent activity.
-    const targetLive = liveSessions.get(channelKeyId(args.target))
-    if (
-      targetLive === undefined ||
-      targetLive.destroyed ||
-      !targetLive.participants.some(
-        (p) => p.authorId === requesterId && now() - p.lastMessageAt <= HANDOFF_RECENT_PARTICIPATION_MS,
-      )
-    ) {
-      return {
-        ok: false,
-        code: 'requester-not-in-target',
-        error:
-          'the requester has not recently taken part in that conversation; handoff only reaches conversations they are in',
-      }
-    }
-    // Participation is not proof of CURRENT platform access, and the target
-    // coordinates are caller-chosen while conversation-scoped role rules trust
-    // them. So the turn may never carry authority the requester does not
-    // already hold where the platform just authenticated them (the source):
-    // every permission they would have in the target must already be theirs in
-    // the source. Unknown roles fail closed.
-    const sourceRole = permissions.resolveRole({
-      kind: 'channel',
-      adapter: source.key.adapter,
-      workspace: source.key.workspace,
-      chat: source.key.chat,
-      thread: source.key.thread,
-      ...(source.room?.parentChat !== undefined ? { parentChat: source.room.parentChat } : {}),
-      lastInboundAuthorId: requesterId,
-    })
-    const targetRole = permissions.resolveRole({
-      kind: 'channel',
-      adapter: args.target.adapter,
-      workspace: args.target.workspace,
-      chat: args.target.chat,
-      thread: args.target.thread,
-      ...(targetLive.room?.parentChat !== undefined ? { parentChat: targetLive.room.parentChat } : {}),
-      lastInboundAuthorId: requesterId,
-    })
-    const sourcePermissions = permissions.permissionsForRole(sourceRole)
-    const targetPermissions = permissions.permissionsForRole(targetRole)
-    if (sourcePermissions === undefined || targetPermissions === undefined) {
-      logger.warn(
-        `[channels] handoff ${source.keyId} -> ${channelKeyId(args.target)} author=${requesterId}: refused, unknown role (source ${sourceRole}, target ${targetRole})`,
-      )
-      return { ok: false, code: 'would-elevate', error: "the requester's role could not be resolved; handoff refused" }
-    }
-    if (targetPermissions.some((p) => !sourcePermissions.includes(p))) {
-      logger.info(
-        `[channels] handoff ${source.keyId} -> ${channelKeyId(args.target)} author=${requesterId}: refused, target role ${targetRole} exceeds source role ${sourceRole}`,
-      )
-      return {
-        ok: false,
-        code: 'would-elevate',
-        error: `the requester's role there (${targetRole}) grants more than their role here (${sourceRole}); ask them to make the request in that conversation directly`,
-      }
-    }
-    const requester = source.participants.find((p) => p.authorId === requesterId)
-    const requesterName = requester?.authorName ?? requesterId
-    const fromWhere = source.lastInboundIsDm ? 'a private DM' : `another conversation (${source.keyId})`
-    // Authored by the requester so the target channel re-resolves THEIR role:
-    // the handoff can never act with more authority than the requester has there.
-    const event: InboundMessage = {
-      adapter: args.target.adapter,
-      workspace: args.target.workspace,
-      chat: args.target.chat,
-      thread: args.target.thread,
-      // Keep the target's trusted room metadata: route() overwrites live.room
-      // from the event, and role resolution for the turn depends on parentChat.
-      ...(targetLive.room !== undefined ? { room: targetLive.room } : {}),
-      routingNote:
-        `[handoff: ${requesterName} asked you for this in ${fromWhere}. It was NOT posted in this conversation and nobody ` +
-        "here has seen it. Read this conversation's latest messages first: if someone has since asked for something newer " +
-        'or the result below is outdated, act on the current state instead of repeating it, or stay silent if nothing is ' +
-        'needed. Share only what this conversation needs, not private DM details.]',
-      handoff: true,
-      text: args.text,
-      externalMessageId: `handoff:${randomUUID()}`,
-      eventKind: 'handoff',
-      authorId: requesterId,
-      authorName: requesterName,
-      authorIsBot: false,
-      isBotMention: true,
-      suppressSticky: true,
-      replyToBotMessageId: null,
-      mentionsOthers: false,
-      replyToOtherMessageId: null,
-      isDm: args.target.workspace === '@dm',
-      ts: now(),
-    }
-    const receipt = await route(event)
-    const targetId = channelKeyId(args.target)
-    logger.info(`[channels] handoff ${source.keyId} -> ${targetId} author=${requesterId}: ${receipt.kind}`)
-    switch (receipt.kind) {
-      case 'accepted':
-      case 'duplicate':
-        return { ok: true, target: targetId }
-      case 'denied':
-        return {
-          ok: false,
-          code: 'denied',
-          error: `the requester is not allowed to engage you in ${targetId}, or that adapter is not configured`,
-        }
-      case 'observed':
-      case 'control':
-        return { ok: false, code: 'not-engaged', error: `${targetId} did not accept the handoff` }
-    }
-  }
+  const handoff = createSessionHandoff({ sessions: liveSessions, permissions, route, logger, now })
+  const searchSessions = createSessionSearch({
+    sessions: liveSessions,
+    permissions,
+    configForAdapter: options.configForAdapter,
+  })
 
   const injectSubagentCompletionReminder = async (args: {
     parentSessionId: string
@@ -9863,6 +9782,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     markTurnSkipped,
     clearSticky,
     handoff,
+    searchSessions,
     reserveRestartHandoff,
     resumeRestartHandoff,
     stop,

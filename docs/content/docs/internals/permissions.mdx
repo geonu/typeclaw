@@ -78,6 +78,12 @@ This closes the laundering attack: a `guest` who asks the agent to schedule a cr
 
 **Subagents do not escalate.** At spawn, `createSpawnSubagentTool` stamps `spawnedByRole = permissions.resolveRole(parentOrigin)` — the parent's resolved role, captured by the runtime, not chosen by the caller. The child `subagent` origin then resolves back to that exact role. A `guest` parent spawns a `guest` subagent: no automatic promotion to `member`/`trusted`/`owner`, and every `tool.before` guard fires identically against the child. The subagent also receives only the tool set its definition declares — there is no inheritance of the parent's tools. Granting `guest` `subagent.spawn` is therefore capability amplification (a fresh context window + a specialized prompt for read-only/research subagents), not privilege escalation.
 
+## Coding-task ownership
+
+`src/coding-agent/index.ts` binds each task to its session scope, recorded capabilities, and authenticated principal. A channel principal includes the target conversation coordinates and author ID; foreign handoff authors also carry their canonical author namespace from `src/channels/adapter-namespace.ts`. Only the explicitly shared Slack, Discord, and Webex user/bot modes share namespaces. Equal raw IDs from different namespaces cannot read results, resume, or dispose of each other's tasks, including through subagents.
+
+Legacy five-field channel principals implicitly belong to the target adapter's namespace. Native authors and their sibling account modes keep those keys unchanged, so existing owners retain access without a registry migration. Foreign authors always receive a namespace suffix and cannot match a legacy key. This is separate from conversation-owned todo scopes: todos deliberately use the adapter/workspace/chat/thread tuple, not per-author ownership.
+
 ## Wiring
 
 1. **Config**: top-level `roles?` parsed by `rolesConfigSchema`. **`roles` is restart-required**.
