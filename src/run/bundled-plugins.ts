@@ -1,5 +1,6 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
 import backupPlugin from '@/bundled-plugins/backup'
+import browserAgentPlugin from '@/bundled-plugins/browser-agent'
 import bunHygienePlugin from '@/bundled-plugins/bun-hygiene'
 import docRenderPlugin from '@/bundled-plugins/doc-render'
 import explorerPlugin from '@/bundled-plugins/explorer'
@@ -64,6 +65,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'managed-browser', version: undefined, source: '<bundled>', defined: browserPlugin },
   { name: 'doc-render', version: undefined, source: '<bundled>', defined: docRenderPlugin },
   { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
+  { name: 'browser-agent', version: undefined, source: '<bundled>', defined: browserAgentPlugin },
   { name: 'scout', version: undefined, source: '<bundled>', defined: scoutPlugin },
   { name: 'reviewer', version: undefined, source: '<bundled>', defined: reviewerPlugin },
   { name: 'qa', version: undefined, source: '<bundled>', defined: qaPlugin },
