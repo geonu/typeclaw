@@ -219,6 +219,9 @@ export type CreateSessionOptions = {
   // overrides) so different sessions on the same agent can run different
   // models without per-session config edits.
   profile?: string
+  // Thinking level overriding the resolved profile's own. Ignored when `profile`
+  // fell back to `default`, so the fallback session keeps `default`'s level.
+  thinkingLevel?: ThinkingLevel
   // Override the resolved ref directly, bypassing `profile` resolution. Used
   // by the model-fallback helper (`promptWithFallback`) to recreate a session
   // pinned to the next ref in the chain after the previous one failed. When
@@ -269,11 +272,16 @@ export type CreateSessionResult = {
 // in config.ts), so they arrive here as `resolved.thinkingLevel` — the first term.
 // That is why `deep`'s `high` still beats a lowered global default, and why there
 // is no profile special-casing in this function.
+//
+// `override` (a subagent's declared `thinkingLevel`) wins only when the requested
+// profile actually resolved; a fallback to `default` ignores it.
 export function resolveSessionThinkingLevel(
   models: Models,
-  resolved: Pick<ResolvedProfile, 'thinkingLevel' | 'profile'>,
+  resolved: Pick<ResolvedProfile, 'thinkingLevel' | 'profile'> & { fellBackToDefault?: boolean },
   activeRef: ModelRef,
+  override?: ThinkingLevel,
 ): ThinkingLevel | undefined {
+  if (override !== undefined && resolved.fellBackToDefault !== true) return override
   return resolved.thinkingLevel ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
 }
 
@@ -562,7 +570,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
   // Read live so a reloaded `models` lands on the next session without a
   // container restart.
-  const thinkingLevel = resolveSessionThinkingLevel(models, resolved, activeRef)
+  const thinkingLevel = resolveSessionThinkingLevel(models, resolved, activeRef, options.thinkingLevel)
   const { session } = await createAgentSession({
     model,
     modelRuntime,

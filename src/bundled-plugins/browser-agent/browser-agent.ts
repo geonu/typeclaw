@@ -49,8 +49,8 @@ If a step needs a human (login, 2FA, CAPTCHA, payment confirmation), follow the 
 4. **Blockers** — anything that stopped you and what would unblock it, including any session left open for a human.`
 }
 
-// `profile` is dropped, not passed through: browsing always runs on the fast
-// tier, so a parent must not bump it off `fast` via a per-spawn `profile`.
+// `profile` is dropped, not passed through: the browsing tier is fixed (see
+// createBrowserSubagent), so a parent must not move it via a per-spawn `profile`.
 export const browserPayloadSchema = z
   .object({
     requestId: z.string().optional(),
@@ -69,13 +69,17 @@ export const BROWSER_TIMEOUT_MS = 900_000
 export function createBrowserSubagent(drivers: BrowserDrivers): Subagent<BrowserPayload> {
   return {
     systemPrompt: buildBrowserSystemPrompt(drivers),
-    profile: 'fast',
+    // The deep model at low effort, like omo's deep-low browser lane: strong
+    // agentic UI handling without deliberating before every click. Without a
+    // configured `deep` profile this resolves to plain `default` (its own level).
+    profile: 'deep',
+    thinkingLevel: 'low',
     timeoutMs: BROWSER_TIMEOUT_MS,
     tools: [readTool, grepTool, findTool, lsTool, bashTool, writeTool],
     payloadSchema: browserPayloadSchema,
     visibility: 'public',
     rosterDescription:
-      'ALL web browsing — navigate, click, fill forms, log in, screenshot, scrape JS-rendered pages; always fast profile; never drive a browser yourself',
+      'ALL web browsing — navigate, click, fill forms, log in, screenshot, scrape JS-rendered pages; deep model at low thinking (default profile if no deep); never drive a browser yourself',
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 1_000_000,

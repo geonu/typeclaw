@@ -1,7 +1,7 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { z } from 'zod'
 
-import { getConfig, resolveModel } from '@/config'
+import { getConfig, resolveModel, type ThinkingLevel } from '@/config'
 import { effectiveModels } from '@/config/model-overrides'
 import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
@@ -65,6 +65,11 @@ export type SubagentShared<P = unknown> = {
   // session construction. Unknown profile names fall back to `default` with
   // a warning. See `Subagent` in `@/plugin/types` for the full contract.
   profile?: string
+  // Thinking level for this subagent's session, overriding the profile's own
+  // level. Applies only when `profile` is configured: when it falls back to
+  // `default`, the session keeps `default`'s level, so e.g. `deep` + `low` means
+  // "the deep model at low effort if one exists, else the plain default".
+  thinkingLevel?: ThinkingLevel
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
@@ -223,6 +228,7 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     ...(resolveSubagentProfile(subagent, options) !== undefined
       ? { profile: resolveSubagentProfile(subagent, options) }
       : {}),
+    ...(subagent.thinkingLevel !== undefined ? { thinkingLevel: subagent.thinkingLevel } : {}),
     ...(subagent.toolResultBudget !== undefined ? { toolResultBudget: subagent.toolResultBudget } : {}),
     ...(subagent.bashPolicy !== undefined ? { bashPolicy: subagent.bashPolicy } : {}),
   })

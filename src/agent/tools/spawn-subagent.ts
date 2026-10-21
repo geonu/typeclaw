@@ -182,17 +182,6 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         )
       }
       const subagentName = params.subagent_type
-      const { background, overrideNote } = resolveSpawnMode({
-        foreground: params.run_in_foreground,
-        fromSubagent: origin?.kind === 'subagent',
-        // Deep-profile spawns run for minutes; forcing them background from a
-        // top-level session keeps a foreground run from freezing the message
-        // loop. Per-spawn override wins over the declared profile.
-        isDeepProfile: (params.profile ?? subagent.profile) === 'deep',
-        canBackgroundFromSubagent: allowBackgroundFromSubagent === true,
-        subagentName,
-      })
-
       const taskId = generateTaskId()
       const payload: Record<string, unknown> = { requestId: taskId, prompt: params.prompt }
       if (params.description !== undefined) payload.description = params.description
@@ -213,6 +202,17 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         params.review_identity === undefined
           ? undefined
           : githubReviewerWorkKey(params.review_identity.repo, params.review_identity.pull_request)
+      const { background, overrideNote } = resolveSpawnMode({
+        foreground: params.run_in_foreground,
+        fromSubagent: origin?.kind === 'subagent',
+        // Deep-profile spawns run for minutes; forcing them background from a
+        // top-level session keeps a foreground run from freezing the message
+        // loop. Judged on the profile the session will actually run, so an
+        // override the subagent's schema strips cannot unlock foreground.
+        isDeepProfile: effectiveSpawnProfile(subagent, payload) === 'deep',
+        canBackgroundFromSubagent: allowBackgroundFromSubagent === true,
+        subagentName,
+      })
 
       const coalesceKey = subagentCoalesceKey({
         parentSessionId,
@@ -657,6 +657,22 @@ function errorResult(message: string): ToolReturn {
 export type SpawnModeResolution = {
   background: boolean
   overrideNote: string | undefined
+}
+
+// The profile the spawned session will actually run. A payload schema may strip
+// a per-spawn `profile` (scout/explorer/browser pin their tier), so read it from
+// the validated payload; an invalid payload fails at invocation, so judge it on
+// the raw override until then.
+export function effectiveSpawnProfile(
+  subagent: Pick<Subagent<any>, 'profile' | 'payloadSchema'>,
+  payload: Record<string, unknown>,
+): string | undefined {
+  const raw = typeof payload.profile === 'string' ? payload.profile : undefined
+  if (subagent.payloadSchema === undefined) return raw ?? subagent.profile
+  const parsed = subagent.payloadSchema.safeParse(payload)
+  if (!parsed.success) return raw ?? subagent.profile
+  const kept = (parsed.data as { profile?: unknown } | null | undefined)?.profile
+  return typeof kept === 'string' && kept !== '' ? kept : subagent.profile
 }
 
 // Resolve foreground vs background for a spawn, with the runtime free to
