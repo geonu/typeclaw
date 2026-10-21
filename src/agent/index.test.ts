@@ -1767,6 +1767,16 @@ describe('resolveSessionThinkingLevel', () => {
     expect(resolveLevel(models, 'fast')).toBe('off')
   })
 
+  test('a subagent override beats the profile level when the profile is configured', () => {
+    const models = parseModels({ default: REF, deep: REF })
+    expect(resolveSessionThinkingLevel(models, resolveProfile(models, 'deep'), REF, 'low')).toBe('low')
+  })
+
+  test('a subagent override is ignored when its profile fell back to default', () => {
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'medium' } })
+    expect(resolveSessionThinkingLevel(models, resolveProfile(models, 'deep'), REF, 'low')).toBe('medium')
+  })
+
   test('built-in defaults are scoped to fast/deep — other profiles fall through', () => {
     const models = parseModels({ default: REF, vision: REF, 'cheap-batch': REF })
     expect(resolveLevel(models, 'vision')).toBeUndefined()

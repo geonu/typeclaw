@@ -619,6 +619,9 @@ async function startAgentRuntime(
         ...(resolveSubagentProfile(entry.pluginSubagent, subagentOptions) !== undefined
           ? { profile: resolveSubagentProfile(entry.pluginSubagent, subagentOptions) }
           : {}),
+        ...(entry.pluginSubagent.thinkingLevel !== undefined
+          ? { thinkingLevel: entry.pluginSubagent.thinkingLevel }
+          : {}),
         ...(entry.pluginSubagent.toolResultBudget !== undefined
           ? { toolResultBudget: entry.pluginSubagent.toolResultBudget }
           : {}),
