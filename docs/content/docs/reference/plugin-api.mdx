@@ -190,6 +190,8 @@ type Hooks = {
 type HookContext = { agentDir: string; pluginName: string; logger: PluginLogger }
 ```
 
+At registration, unknown hook names produce a warning identifying the plugin and the unrecognized key. They are ignored; supported handlers from the same plugin remain active. This runtime check also covers JavaScript plugins and extra keys returned by async factories, which TypeScript's excess-property checks can miss. For an explicit compile-time check, write the hook object as `{ ... } satisfies Hooks`.
+
 `tool.before` is the gate. Return:
 
 ```ts
