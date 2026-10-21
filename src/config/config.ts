@@ -747,17 +747,19 @@ const richProfileSchema = z
     }
   })
 
-const profileEntrySchema = z
-  .union([singleModelRef, modelChainInputSchema, richProfileSchema])
-  .transform((value): ProfileEntry => {
-    if (typeof value === 'string' || Array.isArray(value)) {
-      const refs = (Array.isArray(value) ? value : [value]).map((ref) => asModelRef(ref))
-      return { refs }
-    }
-    const refsInput = value.models ?? value.model!
-    const refs = (Array.isArray(refsInput) ? refsInput : [refsInput]).map((ref) => asModelRef(ref))
-    return value.thinkingLevel === undefined ? { refs } : { refs, thinkingLevel: value.thinkingLevel }
-  })
+const profileEntryInputSchema = z.union([singleModelRef, modelChainInputSchema, richProfileSchema])
+const profileEntrySchema: z.ZodType<
+  ProfileEntry,
+  z.input<typeof profileEntryInputSchema>
+> = profileEntryInputSchema.transform((value): ProfileEntry => {
+  if (typeof value === 'string' || Array.isArray(value)) {
+    const refs = (Array.isArray(value) ? value : [value]).map((ref) => asModelRef(ref))
+    return { refs }
+  }
+  const refsInput = value.models ?? value.model!
+  const refs = (Array.isArray(refsInput) ? refsInput : [refsInput]).map((ref) => asModelRef(ref))
+  return value.thinkingLevel === undefined ? { refs } : { refs, thinkingLevel: value.thinkingLevel }
+})
 
 // Built-in per-profile `thinkingLevel` defaults, materialized at parse time so
 // resolved config / `typeclaw model list` / prompt dumps show the effective level

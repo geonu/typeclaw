@@ -92,6 +92,14 @@ For host-to-container mount assertions, use native `node:path` operations for th
 
 Replay-only CLI tests must isolate Docker discovery from the host daemon. An explicit offline `DOCKER_HOST`, empty `DOCKER_CONTEXT`, and task-local `DOCKER_CONFIG` keep an unavailable or stalled developer/CI daemon from turning a transcript check into a network timeout.
 
+### Plugin SDK declarations
+
+`bun run build:types` emits the public plugin declaration graph under the ignored `dist/types/` directory. It uses the existing TypeScript 6 compiler-API package; the normal repository typecheck still uses the TypeScript 7 CLI. Internal aliases and local imports are rewritten structurally to relative declaration-compatible paths. The named model-profile schema boundary preserves nominal `ModelRef` types during declaration emission without changing parsing behavior.
+
+`npm pack` and `npm publish` run that build through `prepack`; consumers receive prebuilt declarations and do not need the development compiler. Runtime entrypoints remain the existing TypeScript sources.
+
+Run `bun run check:plugin-sdk` after SDK or package-export changes. It packs through the actual lifecycle, installs the archive into a fresh consumer with install scripts disabled, and checks strict plugin/config/hook typing with both bundler and NodeNext resolution, without consumer `@/*` aliases or implementation-source imports. CI runs this check on Linux and Windows.
+
 ## Repo layout (the bits you'll touch)
 
 ```

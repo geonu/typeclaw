@@ -15,6 +15,7 @@
   },
   "files": [
     "src",
+    "dist/types",
     "scripts",
     "tsconfig.json",
     "typeclaw.schema.json",
@@ -25,13 +26,19 @@
   ],
   "type": "module",
   "exports": {
-    "./plugin": "./src/plugin/index.ts"
+    "./plugin": {
+      "types": "./dist/types/plugin/index.d.ts",
+      "default": "./src/plugin/index.ts"
+    }
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "build:types": "bun run scripts/build-plugin-types.ts",
+    "check:plugin-sdk": "bun run scripts/check-plugin-sdk.ts",
+    "prepack": "bun run build:types",
     "lint": "oxlint",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",

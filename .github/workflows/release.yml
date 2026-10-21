@@ -91,6 +91,9 @@ jobs:
       - name: Format check
         run: bun run format:check
 
+      - name: Verify packed plugin SDK
+        run: bun run check:plugin-sdk
+
       - name: Configure git identity
         # Several tests shell out to `git commit` against tmp repos. GitHub
         # Actions runners have no global user.name/user.email, so the commits
@@ -463,8 +466,9 @@ jobs:
         run: npm install -g npm@11.18.0 && npm --version
 
       - name: Bump version
-        # TypeClaw publishes raw TS sources (no build step), and has no
-        # .claude-plugin/plugin.json or skill `version:` frontmatter to sync —
+        # Runtime entrypoints remain raw TS; the prepack lifecycle generates
+        # plugin declarations. No .claude-plugin/plugin.json or skill
+        # `version:` frontmatter needs syncing —
         # package.json is the only place a version lives. `--allow-same-version`
         # makes this idempotent across re-runs. Mutates package.json in the
         # runner only; the bumped value is pushed by `Commit and tag` after
