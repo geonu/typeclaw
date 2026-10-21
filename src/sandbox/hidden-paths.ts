@@ -6,6 +6,7 @@ import { CORE_PERMISSIONS } from '@/permissions/builtins'
 import type { PermissionService } from '@/permissions/permissions'
 
 import {
+  BROWSER_PROFILE_RELATIVE_DIR,
   CANONICAL_AGENT_SECRET_DIRS,
   CANONICAL_AGENT_SECRET_FILES,
   OPERATOR_CLI_CREDENTIAL_DIRS,
@@ -121,11 +122,24 @@ async function verifyRequiredMaskTarget(target: string, kind: 'dir' | 'file'): P
   if (kind === 'dir' && isCanonicalSecretDir(target)) await rejectHardlinksUnderCanonicalDir(target)
 }
 
+// The browser profile grows past the bounded scan through ordinary browsing
+// (Chromium caches use about one file per entry), so scanning it per bash call
+// would eventually block every command. Its only writer is the managed Chrome,
+// which sees nothing but the profile and files directories, and every model tool
+// masks it, so no alias can be planted while the runtime is up. Pre-existing
+// aliases are refused once at browser boot instead (startManagedBrowser), which
+// disables only the browser.
 function isCanonicalSecretDir(target: string): boolean {
-  return CANONICAL_AGENT_SECRET_DIRS.some((dir) => target.endsWith(`${sep}${dir.split('/').join(sep)}`))
+  return CANONICAL_AGENT_SECRET_DIRS.some(
+    (dir) => dir !== BROWSER_PROFILE_RELATIVE_DIR && target.endsWith(`${sep}${dir.split('/').join(sep)}`),
+  )
 }
 
 async function rejectHardlinksUnderCanonicalDir(root: string): Promise<void> {
+  await rejectHardlinkAliases(root, MAX_CANONICAL_SECRET_SCAN_ENTRIES)
+}
+
+export async function rejectHardlinkAliases(root: string, maxEntries = Number.POSITIVE_INFINITY): Promise<void> {
   const pending = [root]
   let visited = 0
   while (pending.length > 0) {
@@ -136,7 +150,7 @@ async function rejectHardlinksUnderCanonicalDir(root: string): Promise<void> {
     try {
       for await (const entry of dir) {
         visited += 1
-        if (visited > MAX_CANONICAL_SECRET_SCAN_ENTRIES) {
+        if (visited > maxEntries) {
           throw new SandboxMaskTargetError(root, 'canonical secret directory exceeds bounded hardlink scan')
         }
         const child = join(current, entry.name)
