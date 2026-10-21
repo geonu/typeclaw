@@ -73,6 +73,7 @@ export async function runCodingAgent(
   let failure = false
   let missingSession = false
   let outputCapExceeded = false
+  let deadlineExpired = false
   const oom = readOomEvents()
   try {
     signal.throwIfAborted()
@@ -237,6 +238,9 @@ export async function runCodingAgent(
   } catch {
     failure = true
   } finally {
+    // The broker can reject an expired capability before the event loop
+    // delivers our timeout callback. The deadline, not callback order, wins.
+    deadlineExpired = Date.now() >= deadline
     clearTimeout(timer)
     await broker?.close()
     await cleanupPrepared?.()
@@ -246,6 +250,7 @@ export async function runCodingAgent(
   await options.writeArtifact(join(options.workspace.taskRoot, 'output', `${invocation}.stderr`), stderr)
   const timedOut =
     timeout.signal.aborted ||
+    deadlineExpired ||
     (options.signal?.reason instanceof DOMException && options.signal.reason.name === 'TimeoutError')
   const state = timedOut
     ? 'incomplete'

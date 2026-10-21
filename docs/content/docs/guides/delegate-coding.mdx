@@ -72,7 +72,7 @@ Container files live under `/agent/workspace/coding-agents/<task-id>/`: private 
 
 Fetch a receipt with `{"action":"result","taskId":"<returned UUID>"}`. Task IDs are not authorization: unrelated speakers/sibling operators cannot take ownership, and lower-authority continuations are denied. People already allowed to read the shared workspace can inspect its non-secret artifacts; separate agents remain the cross-trust-domain boundary.
 
-Timeout/cancellation preserves partial work. After runtime restart, previously running tasks are interrupted, not replayed. Resume explicitly with a fresh invocation. If no resumable session was emitted, inspect the partial changes instead of silently starting a replacement.
+Timeout/cancellation preserves partial work. An invocation that reaches its deadline is reported as `incomplete` with a timeout diagnostic, including when the broker rejects an expired capability before the runner's timer callback is delivered. After runtime restart, previously running tasks are interrupted, not replayed. Resume explicitly with a fresh invocation. If no resumable session was emitted, inspect the partial changes instead of silently starting a replacement.
 
 Discard a stopped task only when its work is no longer needed:
 
