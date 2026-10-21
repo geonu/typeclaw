@@ -141,6 +141,9 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
 
   return {
     registerAll(pluginName, agentDir, logger, hooks) {
+      for (const name of Object.keys(hooks)) {
+        if (!Object.hasOwn(r, name)) logger.warn(`Ignoring unknown hook "${name}" (plugin ${pluginName}).`)
+      }
       const base = { pluginName, agentDir, logger }
       r['tool.before'].push({ pluginName, guardOwner: true, logger })
       if (hooks['session.start']) r['session.start'].push({ ...base, handler: hooks['session.start'] })

@@ -6,6 +6,56 @@ import { createHookBus } from './hooks'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
+describe('HookBus registration', () => {
+  test('warns about unknown hook names while preserving supported handlers', async () => {
+    const warnings: string[] = []
+    const bus = createHookBus()
+    // Async factories can return extra hook keys without an excess-property
+    // error, even though the supported handler still satisfies Hooks.
+    const factory = async () => ({
+      'tool.before': () => ({ block: true as const, reason: 'supported guard' }),
+      'session.strat': () => {},
+      constructor: () => {},
+    })
+    bus.registerAll(
+      'example-plugin',
+      '/agent',
+      { ...noopLogger, warn: (message) => warnings.push(message) },
+      await factory(),
+    )
+
+    expect(warnings).toHaveLength(2)
+    for (const name of ['session.strat', 'constructor']) {
+      expect(warnings.some((message) => message.includes(name) && message.includes('example-plugin'))).toBe(true)
+    }
+    expect(await bus.runToolBefore({ tool: 'read', sessionId: 's', callId: 'c', args: {} })).toEqual({
+      block: true,
+      reason: 'supported guard',
+    })
+  })
+
+  test('does not warn for supported hook names, including omitted handlers', async () => {
+    const warnings: string[] = []
+    const bus = createHookBus()
+    bus.registerAll(
+      'example-plugin',
+      '/agent',
+      { ...noopLogger, warn: (message) => warnings.push(message) },
+      {
+        'session.start': undefined,
+        'tool.before': () => ({ block: true, reason: 'supported guard' }),
+        'channel.message.observed': () => {},
+        'channel.outbound.before': () => {},
+      },
+    )
+    expect(warnings).toEqual([])
+    expect(await bus.runToolBefore({ tool: 'read', sessionId: 's', callId: 'c', args: {} })).toEqual({
+      block: true,
+      reason: 'supported guard',
+    })
+  })
+})
+
 describe('HookBus session.prompt', () => {
   test('multiple plugins compose; each sees the previous mutation', async () => {
     const bus = createHookBus()
