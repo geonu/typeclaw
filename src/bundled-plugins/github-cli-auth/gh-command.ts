@@ -270,6 +270,10 @@ function isAuthStatusTokenDisplayFlag(arg: string): boolean {
   return arg.slice(1).split('=', 1)[0]?.includes('t') === true
 }
 
+export function hasGhInvocation(command: string): boolean {
+  return findGhInvocations(tokenize(command)).length > 0
+}
+
 export function canInjectPatIntoPassThroughGh(command: string): boolean {
   if (containsReviewGraphqlMutation(command)) return false
   if (hasUnsafeGhStageBackslash(command)) return false

@@ -22,6 +22,7 @@ import {
   canInjectPatIntoPassThroughGh,
   effectiveGhTokensForAuthenticatedUserEndpoint,
   effectiveGhTokensForCommand,
+  hasGhInvocation,
   usesGhApiGraphqlEndpoint,
 } from './gh-command'
 import { detectReviewDismissal } from './gh-review-detect'
@@ -415,7 +416,10 @@ export default definePlugin({
       }
 
       if (decision.kind === 'pass-through') {
-        const patOverlay = canUsePat(event.origin) ? processPatOverlay() : undefined
+        // The caller routes on a raw `gh` substring, so `git commit -m "...wright..."`
+        // lands here. With no real `gh` invocation there is nothing to broker the
+        // PAT to: fall through without the overlay instead of blocking.
+        const patOverlay = canUsePat(event.origin) && hasGhInvocation(command) ? processPatOverlay() : undefined
         if (patOverlay !== undefined) {
           if (!canInjectPatIntoPassThroughGh(command)) {
             return blockAfterLease({

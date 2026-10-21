@@ -629,6 +629,28 @@ describe('github-cli-auth plugin', () => {
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 
+  test('PAT: a non-gh command that merely contains "gh" falls through without the PAT', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    const hook = await hookFor(tokenResolver('ghs_minted'), false, { permissions: privilegedPermissions })
+    const event = bashEvent('git commit -m "Switch to omowright" -m "높은 night 설정"')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
+  test('PAT: a chained gh invocation is still blocked', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    const hook = await hookFor(tokenResolver('ghs_minted'), false, { permissions: privilegedPermissions })
+    const event = bashEvent('git status && gh auth token')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
   test('classic PAT (credential-entitled) + App minter: strips a redundant -R on gh api, mints the App token', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
