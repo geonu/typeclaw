@@ -16,6 +16,7 @@ import {
 import {
   canWriteAgentRootInSandbox,
   ensureHiddenMaskTargets,
+  rejectHardlinkAliases,
   resolveHiddenPaths,
   verifyHiddenMaskTargets,
 } from './hidden-paths'
@@ -37,6 +38,7 @@ const canonicalSecretDirs = (agentDir: string) => [
   join(agentDir, 'workspace', '.agent-messenger'),
   join(agentDir, '.typeclaw', 'home'),
   join(agentDir, '.typeclaw', 'logs'),
+  join(agentDir, '.typeclaw', 'browser-profile'),
 ]
 const secretFiles = (agentDir: string) => [
   join(agentDir, '.env'),
@@ -318,6 +320,39 @@ describe('ensureHiddenMaskTargets', () => {
     await writeFile(credential, 'secret')
     await link(credential, join(dir, 'public-alias'))
     await expect(ensureHiddenMaskTargets({ dirs: [gws], files: [] })).rejects.toThrow(/hardlink|mask target/i)
+  })
+
+  const fillDir = async (root: string, count: number) => {
+    await mkdir(root, { recursive: true })
+    await Promise.all(Array.from({ length: count }, (_, i) => writeFile(join(root, `f${i}`), '')))
+  }
+
+  test('a browser profile past the bounded scan size still lets bash prepare its masks', async () => {
+    // given: ordinary browsing grew the profile cache past 4,096 entries
+    const profile = join(dir, '.typeclaw', 'browser-profile')
+    await fillDir(join(profile, 'Default', 'Cache'), 4200)
+    // when
+    const targets = await ensureHiddenMaskTargets({ dirs: [profile], files: [] })
+    // then: the mask still renders and revalidation passes
+    expect(targets.dirs).toEqual([profile])
+    await verifyHiddenMaskTargets(targets)
+  })
+
+  test('other canonical secret directories keep the bounded scan', async () => {
+    const gws = join(dir, 'workspace', '.config', 'gws')
+    await fillDir(gws, 4200)
+    await expect(ensureHiddenMaskTargets({ dirs: [gws], files: [] })).rejects.toThrow(/bounded hardlink scan/)
+  })
+
+  test('the browser-boot profile scan finds an alias beyond the bash scan bound', async () => {
+    // given: an outside alias of a profile file, past the first 4,096 entries
+    const profile = join(dir, '.typeclaw', 'browser-profile')
+    await fillDir(join(profile, 'Default', 'Cache'), 4200)
+    const cookies = join(profile, 'Default', 'Cookies')
+    await writeFile(cookies, 'session')
+    await link(cookies, join(dir, 'public-alias'))
+    // when / then
+    await expect(rejectHardlinkAliases(profile)).rejects.toThrow(/hardlink aliases/)
   })
 
   test('fails closed when an absent canonical mask target cannot be materialized', async () => {

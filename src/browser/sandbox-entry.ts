@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { connect, createServer, type Socket } from 'node:net'
 import { join } from 'node:path'
 
@@ -58,6 +58,7 @@ export function chromeArgs(config: SandboxEntryConfig): string[] {
 }
 
 async function main(config: SandboxEntryConfig): Promise<void> {
+  await clearSingletonLocks(config.profileDir)
   await writeDownloadPreference(config)
   await rm(devtoolsSocket(config.runDir), { force: true })
   const servers = [
@@ -110,15 +111,55 @@ function bridge(
 
 // Downloads land in the browser files directory, which privileged bash sees at
 // the same path; Chrome's default ~/Downloads would be lost on the sandbox tmpfs.
-async function writeDownloadPreference(config: SandboxEntryConfig): Promise<void> {
+// Merged into the persisted Preferences so the rest of the profile's settings survive.
+export async function writeDownloadPreference(config: SandboxEntryConfig): Promise<void> {
   const defaultProfile = join(config.profileDir, 'Default')
   await mkdir(defaultProfile, { recursive: true })
   await mkdir(config.downloadsDir, { recursive: true })
+  const file = join(defaultProfile, 'Preferences')
+  const existing = await readPreferences(file)
   const preferences = {
-    download: { default_directory: config.downloadsDir, prompt_for_download: false },
-    savefile: { default_directory: config.downloadsDir },
+    ...existing,
+    download: { ...asRecord(existing['download']), default_directory: config.downloadsDir, prompt_for_download: false },
+    savefile: { ...asRecord(existing['savefile']), default_directory: config.downloadsDir },
   }
-  await writeFile(join(defaultProfile, 'Preferences'), JSON.stringify(preferences))
+  // Same-directory temp + rename: an interrupted boot never leaves a truncated file.
+  const temp = `${file}.typeclaw-tmp`
+  await writeFile(temp, JSON.stringify(preferences))
+  await rename(temp, file)
+}
+
+// A malformed file must not keep Chrome down on every boot: set it aside for
+// diagnosis and start from empty preferences.
+async function readPreferences(file: string): Promise<Record<string, unknown>> {
+  let text: string
+  try {
+    text = await readFile(file, 'utf8')
+  } catch {
+    return {}
+  }
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed))
+      return parsed as Record<string, unknown>
+  } catch {
+    // fall through to quarantine
+  }
+  await rename(file, `${file}.corrupt-${Date.now()}`).catch(() => {})
+  return {}
+}
+
+// The profile outlives the container, and Chrome refuses a profile whose lock
+// names another host (every container has a new hostname). Whatever Chrome held
+// it before has exited, since this entry only runs after the previous one did.
+export async function clearSingletonLocks(profileDir: string): Promise<void> {
+  await Promise.all(
+    ['SingletonLock', 'SingletonSocket', 'SingletonCookie'].map((name) => rm(join(profileDir, name), { force: true })),
+  )
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
 }
 
 if (import.meta.main) {

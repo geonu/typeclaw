@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path'
 import { createAndOpenAnchoredDirectory } from '@/agent/tool-file-safety'
 import { getProcBindSafetyVerdict, resolveProcSelfExe } from '@/sandbox/availability'
 import { buildSandboxedCommand } from '@/sandbox/build'
+import { BROWSER_PROFILE_RELATIVE_DIR } from '@/sandbox/canonical-secrets'
+import { rejectHardlinkAliases } from '@/sandbox/hidden-paths'
 import type { SandboxMount, SandboxProcStrategy } from '@/sandbox/policy'
 import { shellQuote } from '@/sandbox/quote'
 
@@ -15,7 +17,9 @@ import { cdpWebSocketUrl, startCdpRelay, startTokenStreamRelay } from './relay'
 import { devtoolsSocket, egressSocket, type SandboxEntryConfig } from './sandbox-entry'
 
 // Runtime-private (container /tmp is not the model's /tmp: sandboxed bash binds
-// a per-session directory over it), so the profile and sockets stay out of bash.
+// a per-session directory over it), so the sockets stay out of bash. The profile
+// lives in the agent folder so logins survive restarts; it is masked from every
+// model tool as a runtime-owned secret dir.
 const RUN_DIR = '/tmp/typeclaw-browser'
 const READY_TIMEOUT_MS = 60_000
 const READY_POLL_MS = 250
@@ -56,18 +60,26 @@ export async function startManagedBrowser(options: {
   // the agent root. Open each component no-follow and bind the held descriptor,
   // so Chrome gets exactly the directory validated here for the whole boot.
   const exchange = await createAndOpenAnchoredDirectory(filesDir)
+  const profileDir = join(agentDir, BROWSER_PROFILE_RELATIVE_DIR)
+  const profile = await createAndOpenAnchoredDirectory(profileDir)
+  // Bash skips the bounded per-call alias scan for the profile (see
+  // isCanonicalSecretDir), so refuse a pre-existing alias here, before Chrome writes.
+  await rejectHardlinkAliases(profileDir).catch(async (error: unknown) => {
+    await profile.close()
+    throw error
+  })
 
   const egress = await startSocksEgress(egressSocket(RUN_DIR))
   const entry: SandboxEntryConfig = {
     chrome: CHROME_LAUNCHER,
     runDir: RUN_DIR,
-    profileDir: join(RUN_DIR, 'profile'),
+    profileDir,
     downloadsDir: filesDir,
     extensionDirs: browser.extensions.map((id) => extensionDir(id)),
     headless: process.env['DISPLAY'] === undefined,
     ...(bskHome === undefined ? {} : { bsk: { home: bskHome } }),
   }
-  const launch = await buildLaunch(entry, filesDir)
+  const launch = await buildLaunch(entry, filesDir, profileDir)
   const token = randomBytes(32).toString('hex')
   const relay = await startCdpRelay({ token, upstreamSocket: devtoolsSocket(RUN_DIR) })
   const bskRelay =
@@ -85,7 +97,7 @@ export async function startManagedBrowser(options: {
     let attempt = 0
     while (!stopped) {
       const startedAt = Date.now()
-      child = Bun.spawn(launch.argv, { env: launch.env, stdio: ['ignore', 'ignore', 'pipe', exchange.fd] })
+      child = Bun.spawn(launch.argv, { env: launch.env, stdio: ['ignore', 'ignore', 'pipe', exchange.fd, profile.fd] })
       void waitUntilReady(devtoolsSocket(RUN_DIR)).then(
         () => {
           logger.info(`managed browser ready (engines: ${browser.engines.join(', ') || 'none'})`)
@@ -116,7 +128,7 @@ export async function startManagedBrowser(options: {
     stop: async () => {
       stopped = true
       child?.kill()
-      await Promise.allSettled([relay.close(), egress.close(), bskRelay?.close(), exchange.close()])
+      await Promise.allSettled([relay.close(), egress.close(), bskRelay?.close(), exchange.close(), profile.close()])
     },
   }
 }
@@ -124,12 +136,14 @@ export async function startManagedBrowser(options: {
 async function buildLaunch(
   entry: SandboxEntryConfig,
   filesDir: string,
+  profileDir: string,
 ): Promise<{ argv: string[]; env: Record<string, string> }> {
   const entryFile = await realpath(join(import.meta.dir, 'sandbox-entry.ts'))
   const mounts: SandboxMount[] = [
     { type: 'bind', source: RUN_DIR, dest: RUN_DIR },
     // fd 3 is the anchored exchange directory passed in the spawn's stdio.
     { type: 'bind-fd', fd: 3, dest: filesDir },
+    { type: 'bind-fd', fd: 4, dest: profileDir },
     { type: 'ro-bind', source: dirname(entryFile), dest: dirname(entryFile) },
   ]
   if (existsSync('/tmp/.X11-unix')) mounts.push({ type: 'ro-bind', source: '/tmp/.X11-unix', dest: '/tmp/.X11-unix' })
