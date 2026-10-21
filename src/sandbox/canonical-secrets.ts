@@ -3,6 +3,9 @@ import {
   LEGACY_AGENT_MESSENGER_CONFIG_RELATIVE_DIR,
 } from '@/agent-messenger/config-dir'
 
+// The managed Chrome profile: cookies and logins persist across container restarts.
+export const BROWSER_PROFILE_RELATIVE_DIR = '.typeclaw/browser-profile'
+
 // Runtime-owned credential stores: TypeClaw writes and reads these itself, and
 // no shipped skill ever invokes a CLI that reads them. Masked at EVERY role.
 export const RUNTIME_OWNED_SECRET_DIRS = [
@@ -12,6 +15,7 @@ export const RUNTIME_OWNED_SECRET_DIRS = [
   LEGACY_AGENT_MESSENGER_CONFIG_RELATIVE_DIR,
   '.typeclaw/home',
   '.typeclaw/logs',
+  BROWSER_PROFILE_RELATIVE_DIR,
 ] as const
 
 // SECURITY / classification: operator-provisioned CLI credential stores. TypeClaw
