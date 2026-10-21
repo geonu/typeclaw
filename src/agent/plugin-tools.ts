@@ -78,6 +78,7 @@ import {
   verifyHiddenMaskTargets,
   verifyPrivilegedSandboxRuntime,
 } from '@/sandbox'
+import { resolveDevSourceMount } from '@/sandbox/dev-source'
 import { resolveExposableEnvNames } from '@/sandbox/env-exposure'
 
 import type { InternalGuard } from './guard-types'
@@ -1005,6 +1006,7 @@ async function applyBashSandbox(
       env: sandboxEnvOverlay,
     })
     await verifyHiddenMaskTargets(maskTargets)
+    const devSourceMount = await resolveDevSourceMount(agentDir)
     const { commandString, spawnEnv } = boundary.buildCommand(command, {
       mounts: [
         { type: 'ro-bind', source: agentDir, dest: agentDir },
@@ -1013,6 +1015,7 @@ async function applyBashSandbox(
         // the lifetime of this command. Last-op-wins makes this narrow re-bind
         // read-only without adding any broader filesystem exposure.
         { type: 'ro-bind', source: dependencyBins.wrapperDir, dest: DEPENDENCY_BIN_SANDBOX_DIR },
+        ...(devSourceMount === undefined ? [] : [devSourceMount]),
         ...(privilegedRuntime?.mounts ?? []),
         ...(preparation === undefined ? [] : [preparation.mount]),
       ],
