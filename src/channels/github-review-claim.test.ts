@@ -45,6 +45,11 @@ const cases: ReadonlyArray<[string, ReviewClaim]> = [
   ['Going to review this shortly.', 'ignore'],
   ['I approved it earlier, in my last review.', 'ignore'],
   ['Yes, I requested changes yesterday.', 'ignore'],
+  // the re-review acknowledgement the GitHub session prompt prescribes must not read as a fresh receipt
+  [
+    'I approved `abc1234` earlier and it is still the head, so that verdict stands. Push new commits or point me at something specific to re-check.',
+    'ignore',
+  ],
   ['not LGTM yet — tests are still red', 'ignore'],
   ['This is not looks good territory yet.', 'ignore'],
   ['Please do not just say `LGTM`; submit the review.', 'ignore'],
