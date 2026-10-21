@@ -1551,6 +1551,33 @@ describe('wrapSystemTool', () => {
     }
   })
 
+  test.each(['channel_send', 'channel_reply'] as const)(
+    '%s pinned attachments keep their original filename so uploads are not named by index',
+    async (tool) => {
+      // given two attachments, one with a non-ASCII name
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-channel-attach-name-'))
+      const qr = path.join(agentDir, 'naver-login-qr.png')
+      const report = path.join(agentDir, '보고서 최종.pdf')
+      await writeFile(qr, 'png')
+      await writeFile(report, 'pdf')
+      try {
+        const args = { attachments: [{ path: qr }, { path: report }] }
+
+        // when the operands are pinned
+        const pinned = await enforceAndPinToolFiles({ tool, args, agentDir, genericInputs: true })
+
+        // then each snapshot path is a new file that still ends in the original basename
+        const seen = args.attachments.map((a) => a.path)
+        expect(seen).not.toEqual([qr, report])
+        expect(seen.map((p) => path.basename(p))).toEqual(['naver-login-qr.png', '보고서 최종.pdf'])
+        expect(await Promise.all(seen.map((p) => readFile(p, 'utf8')))).toEqual(['png', 'pdf'])
+        await pinned.cleanup()
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
   test('first-party prose operands with path-shaped values are never pinned or rejected', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-prose-'))
     await mkdir(path.join(agentDir, 'src'), { recursive: true })
