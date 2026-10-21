@@ -177,8 +177,13 @@ export async function enforceAndPinToolFiles(
     let copiedBytes = 0
     for (let i = 0; i < verified.length; i++) {
       const input = verified[i] as VerifiedInput
-      const pinned = path.join(dir, String(i))
+      const slot = path.join(dir, String(i))
+      // Files keep their original basename under a per-operand slot: tools that
+      // derive a name or type from the path (channel uploads, mime sniffing by
+      // extension) would otherwise see the bare index, e.g. a Discord file named `0`.
+      const pinned = input.kind === 'file' ? path.join(slot, path.basename(input.original)) : slot
       if (input.kind === 'file') {
+        await mkdir(slot, { mode: 0o700 })
         const source = await openInput(input.resolved, input.original)
         try {
           const opened = await source.stat()
