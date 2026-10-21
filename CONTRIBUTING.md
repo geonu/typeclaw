@@ -86,6 +86,12 @@ bun run test
 
 A handful of tests in `src/init/` shell out to a real `bun install` and take 4-5s each; that's normal. CI uses `--timeout 30000` for the same reason — keep yours at the default unless you see false negatives.
 
+CI also runs two full parallel suites concurrently as a required contention guard. Output-limit fixtures should cross the byte boundary with a bounded number of records, not tens of thousands of individual console writes competing with an invocation deadline. The OmO delta case uses seventeen 1 MiB payloads: it still exceeds the raw 16 MiB cap while checking that ignored updates do not count toward retained output. Keep timeout/cancellation checks separate from these output-volume checks.
+
+For host-to-container mount assertions, use native `node:path` operations for the host source and POSIX paths for the container destination. Docker mount sources are normalized with native `resolve()`, including Windows drive letters and backslashes, even when a test injects a different platform to select a mount policy.
+
+Replay-only CLI tests must isolate Docker discovery from the host daemon. An explicit offline `DOCKER_HOST`, empty `DOCKER_CONTEXT`, and task-local `DOCKER_CONFIG` keep an unavailable or stalled developer/CI daemon from turning a transcript check into a network timeout.
+
 ## Repo layout (the bits you'll touch)
 
 ```

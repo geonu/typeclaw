@@ -77,8 +77,11 @@ if(await command.exited !== 0 || await new Response(command.stdout).text() !== '
 await Bun.write(state,JSON.stringify(header)+'\\n'+JSON.stringify({type:'fixture',prior,prompt})+'\\n');
 console.error(process.env.TYPECLAW_CODING_AGENT_CAPABILITY);
 if(prompt==='overflow') { console.log('x'.repeat(4*1024*1024+1)); process.exit(0); }
-const delta = JSON.stringify({type:'message_update',usage:{input:0,output:0},assistantMessageEvent:{type:'toolcall_delta',contentIndex:0,delta:'x'.repeat(200)}});
-if(prompt==='deltas') for(let i=0;i<20*4096;i++) console.log(delta);
+if(prompt==='deltas') {
+  // Exceed the raw 16 MiB cap without turning this behavior check into an 81,920-write benchmark.
+  const delta = JSON.stringify({type:'message_update',usage:{input:0,output:0},assistantMessageEvent:{type:'toolcall_delta',contentIndex:0,delta:'x'.repeat(1024*1024)}});
+  for(let i=0;i<17;i++) console.log(delta);
+}
 if(prompt==='flood') for(let i=0;i<17;i++) console.log(JSON.stringify({type:'fixture',text:'x'.repeat(1024*1024)}));
 if(prompt==='final-flood') { for(let i=0;i<15;i++) console.log(JSON.stringify({type:'fixture',text:'x'.repeat(1024*1024)})); await Bun.write(state,JSON.stringify(header)+'\\n'); const big = {role:'assistant',content:[{type:'text',text:'x'.repeat(2*1024*1024)}],stopReason:'stop'}; console.log(JSON.stringify({type:'agent_end',messages:[big],willRetry:false})); process.exit(0); }
 const message = {role:'assistant',content:[{type:'text',text:prior?'続きも完了しました':'완료했습니다'}],stopReason:prompt==='failed'?'error':prompt==='length'?'length':'stop'};

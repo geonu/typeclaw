@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -196,6 +196,45 @@ describe('headless runner', () => {
     } finally {
       upstream.stop(true)
       await Promise.all(brokers.map((broker) => broker.close()))
+    }
+  })
+
+  test('an expired broker deadline is incomplete even before the timeout callback runs', async () => {
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const result = await runCodingAgent(
+        {
+          engine: 'claude',
+          workspace: { source: root, taskRoot: root, baseSha: 'a'.repeat(40), sourceIdentity: 'fixture' },
+          auth: {
+            resolve: async () => ({ provider: 'anthropic', type: 'api_key', token: 'canary', secrets: ['canary'] }),
+          },
+          model: 'primary',
+          allowedModels: ['primary'],
+          mode: 'code',
+          sessionId: crypto.randomUUID(),
+          resume: false,
+          prompt: 'test',
+          timeoutSeconds: 10,
+          writeArtifact: (path, text) => writeFile(path, text),
+        },
+        {
+          broker: async (options) => {
+            // Model the broker rejecting its expired capability before the
+            // event loop has delivered the runner's timeout callback.
+            now = options.deadline
+            throw new Error('capability_expired')
+          },
+          command: async () => {
+            throw new Error('An expired broker must not launch a child.')
+          },
+        },
+      )
+      expect(result.state).toBe('incomplete')
+      expect(result.diagnostic).toContain('timed out')
+    } finally {
+      clock.mockRestore()
     }
   })
 

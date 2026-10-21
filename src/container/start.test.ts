@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join, posix } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
@@ -833,7 +833,7 @@ describe('planStart mounts', () => {
       await writeTypeclawConfig(root, { hostFonts: true })
       const on = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'darwin', hostHome })
       expect(fontMounts(on.runArgs)).toContainEqual({
-        src: posix.join(hostHome, 'Library', 'Fonts'),
+        src: join(hostHome, 'Library', 'Fonts'),
         dst: '/usr/share/fonts/host-user',
         readonly: true,
       })

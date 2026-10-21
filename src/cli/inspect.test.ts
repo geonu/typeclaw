@@ -230,7 +230,16 @@ describe('typeclaw inspect refuses the picker without a TTY', () => {
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env, NO_COLOR: '1' },
+      // This is a replay-only CLI check, not a probe of the developer's or
+      // runner's Docker daemon (which may stall before returning a status).
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        DOCKER_HOST: 'tcp://127.0.0.1:0',
+        DOCKER_CONTEXT: '',
+        DOCKER_CONFIG: cwd,
+        DOCKER_TLS_VERIFY: '',
+      },
     })
     const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
     const exitCode = await proc.exited
