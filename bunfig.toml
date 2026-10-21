@@ -4,3 +4,5 @@
 # knob for --parallel yet (verified against bunfig.zig in oven-sh/bun
 # main), and serial runs are ~3.4x slower than the parallel happy path.
 preload = ["./scripts/require-parallel.ts"]
+# Keep the default here so explicit CLI budgets (30s/60s in CI) override it.
+timeout = 30000
