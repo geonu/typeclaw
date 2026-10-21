@@ -1,6 +1,6 @@
-// Preloaded by bunfig.toml `[test] preload`. Two responsibilities:
-//   1. Deny `bun test` without --parallel.
-//   2. Raise the per-test default timeout from Bun's 5000ms.
+// Preloaded by bunfig.toml `[test] preload` to deny `bun test` without
+// --parallel. The default timeout belongs in bunfig.toml, not this preload,
+// so an explicit CLI --timeout keeps its normal precedence.
 //
 // Why deny serial runs: Serial runs are ~3.4x slower (44s → 13s, see commit
 // 1c66d5e), and Bun has no bunfig knob for the flag yet (verified against
@@ -18,39 +18,12 @@
 //
 // Bypass with TYPECLAW_ALLOW_SERIAL_TESTS=1 when debugging a flaky test
 // where worker contention obscures the failure.
-//
-// Why raise the default timeout: A growing number of tests in this repo
-// either spawn child processes (`bun run typeclaw …` via Bun.spawn from
-// src/cli/index.test.ts, src/cli/role.test.ts, src/cli/status.test.ts,
-// src/init/dockerfile.test.ts agent-browser wrapper, etc.) or boot the
-// in-process agent (`startAgent({ port: 0, … })` from src/run/plugin.test.ts).
-// Both shapes have a happy-path cost well under 1s but a worst-case cost
-// that races Bun's 5000ms ceiling under `--parallel` contention. The
-// repeating failure mode is "this test timed out after 5000ms" appearing
-// on different tests across runs at a rough ~3-15% rate per full-suite
-// invocation — not a real bug, just resource starvation. Raising the
-// default to 30s eliminates the false positives without masking real
-// hangs (a wedged test still fails, just 6x slower than before). The
-// happy path is unaffected because tests complete in their actual
-// runtime, not the timeout budget.
-//
-// 30s was chosen as ~75x the observed happy-path cold-start (~400ms) for
-// the heaviest subprocess tests, matching the in-house convention used in
-// pi-coding-agent's subprocess fixtures and Bun's own integration-test
-// suites (see oven-sh/bun test/cli/install/*.test.ts which set 5-minute
-// timeouts for full installs). Individual tests that genuinely need more
-// can still pass an explicit 3rd arg to `test()` to override locally.
-
-import { setDefaultTimeout } from 'bun:test'
 
 const isParallelWorker = typeof process.env.BUN_TEST_WORKER_ID === 'string'
 
-if (isParallelWorker) {
-  setDefaultTimeout(30_000)
-} else if (process.env.TYPECLAW_ALLOW_SERIAL_TESTS === '1') {
+if (!isParallelWorker && process.env.TYPECLAW_ALLOW_SERIAL_TESTS === '1') {
   console.warn('[require-parallel] Running serially — TYPECLAW_ALLOW_SERIAL_TESTS=1 set.')
-  setDefaultTimeout(30_000)
-} else {
+} else if (!isParallelWorker) {
   console.error('')
   console.error('  ✗ `bun test` without --parallel is denied in this repo.')
   console.error('')

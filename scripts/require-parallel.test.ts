@@ -12,21 +12,20 @@ const scriptPath = join(dirname(fileURLToPath(import.meta.url)), 'require-parall
 // suite per scenario. The preload runs in the spawned process, so its
 // process.exit(1) deny is observable as a non-zero parent exit code.
 
-async function makeFixtureProject() {
+async function makeFixtureProject(
+  source = `import { test, expect } from 'bun:test'\ntest('noop', () => expect(1).toBe(1))\n`,
+) {
   const dir = await mkdtemp(join(tmpdir(), 'require-parallel-test-'))
-  await writeFile(
-    join(dir, 'noop.test.ts'),
-    `import { test, expect } from 'bun:test'\ntest('noop', () => expect(1).toBe(1))\n`,
-  )
+  await writeFile(join(dir, 'noop.test.ts'), source)
   // JSON.stringify handles TOML basic-string escaping correctly (the escape
   // sets overlap for `\` and `"`), which lets the test survive contributor
   // checkouts under paths with embedded quotes or backslashes.
-  await writeFile(join(dir, 'bunfig.toml'), `[test]\npreload = [${JSON.stringify(scriptPath)}]\n`)
+  await writeFile(join(dir, 'bunfig.toml'), `[test]\ntimeout = 30000\npreload = [${JSON.stringify(scriptPath)}]\n`)
   return dir
 }
 
-async function runBunTest(args: string[], env: Record<string, string> = {}) {
-  const dir = await makeFixtureProject()
+async function runBunTest(args: string[], env: Record<string, string> = {}, source?: string) {
+  const dir = await makeFixtureProject(source)
   // The parent process running this file is itself `bun test --parallel`, so
   // its env carries BUN_TEST_WORKER_ID (and possibly TYPECLAW_ALLOW_SERIAL_TESTS
   // if the contributor set it). Both would leak into the child subprocess and
@@ -89,4 +88,21 @@ describe('require-parallel preload', () => {
     const { exitCode } = await runBunTest(['--coverage'])
     expect(exitCode).toBe(1)
   })
+
+  // This integration checks Bun's native child-runner deadline. Fake JS
+  // timers cannot drive that watchdog, so the fixture needs real finite work.
+  test.each([
+    ['25', 1],
+    ['10000', 0],
+  ] as const)(
+    'honors an explicit --timeout %s instead of overwriting it in the preload',
+    async (timeout, expectedExit) => {
+      const { exitCode } = await runBunTest(
+        ['--parallel', '--timeout', timeout],
+        {},
+        `import { test } from 'bun:test'\ntest('finite async work', async () => { await Bun.sleep(250) })\n`,
+      )
+      expect(exitCode).toBe(expectedExit)
+    },
+  )
 })

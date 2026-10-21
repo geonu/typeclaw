@@ -93,6 +93,9 @@ jobs:
       - name: Format check
         run: bun run format:check
 
+      - name: Verify packed plugin SDK
+        run: bun run check:plugin-sdk
+
       - name: Configure git identity
         # Several tests shell out to `git commit` against tmp repos. GitHub
         # Actions runners have no global user.name/user.email, so the commits
@@ -272,6 +275,9 @@ jobs:
 
       - name: Format check
         run: bun run format:check
+
+      - name: Verify packed plugin SDK
+        run: bun run check:plugin-sdk
 
       - name: Configure git identity
         # Several tests shell out to `git commit` against tmp repos. GitHub

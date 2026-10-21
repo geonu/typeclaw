@@ -86,11 +86,21 @@ bun run test
 
 A handful of tests in `src/init/` shell out to a real `bun install` and take 4-5s each; that's normal. CI uses `--timeout 30000` for the same reason — keep yours at the default unless you see false negatives.
 
+The repository's 30-second default is configured in `bunfig.toml`. Explicit CLI budgets take precedence: the Windows and contention lanes use `--timeout 60000`. Keep timeout selection out of the parallel-mode preload; calling `setDefaultTimeout` there overrides the caller's explicit budget.
+
 CI also runs two full parallel suites concurrently as a required contention guard. Output-limit fixtures should cross the byte boundary with a bounded number of records, not tens of thousands of individual console writes competing with an invocation deadline. The OmO delta case uses seventeen 1 MiB payloads: it still exceeds the raw 16 MiB cap while checking that ignored updates do not count toward retained output. Keep timeout/cancellation checks separate from these output-volume checks.
 
 For host-to-container mount assertions, use native `node:path` operations for the host source and POSIX paths for the container destination. Docker mount sources are normalized with native `resolve()`, including Windows drive letters and backslashes, even when a test injects a different platform to select a mount policy.
 
 Replay-only CLI tests must isolate Docker discovery from the host daemon. An explicit offline `DOCKER_HOST`, empty `DOCKER_CONTEXT`, and task-local `DOCKER_CONFIG` keep an unavailable or stalled developer/CI daemon from turning a transcript check into a network timeout.
+
+### Plugin SDK declarations
+
+`bun run build:types` emits the public plugin declaration graph under the ignored `dist/types/` directory. It uses the existing TypeScript 6 compiler-API package; the normal repository typecheck still uses the TypeScript 7 CLI. Internal aliases and local imports are rewritten structurally to relative declaration-compatible paths. The named model-profile schema boundary preserves nominal `ModelRef` types during declaration emission without changing parsing behavior.
+
+`npm pack` and `npm publish` run that build through `prepack`; consumers receive prebuilt declarations and do not need the development compiler. Runtime entrypoints remain the existing TypeScript sources.
+
+Run `bun run check:plugin-sdk` after SDK or package-export changes. It packs through the actual lifecycle, installs the archive into a fresh consumer with install scripts disabled, and checks strict plugin/config/hook typing with both bundler and NodeNext resolution, without consumer `@/*` aliases or implementation-source imports. CI runs this check on Linux and Windows.
 
 ## Repo layout (the bits you'll touch)
 

@@ -6,6 +6,14 @@ icon: Plug
 
 The walkthrough is at [Add a plugin](/docs/guides/write-a-plugin). The shape is at [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages). This page is the contract. The source of truth is `src/plugin/types.ts` and `src/plugin/define.ts`.
 
+## TypeScript consumers
+
+Import values and types from `typeclaw/plugin`. Published packages include a declaration graph under `dist/types/`; the `types` export selects it for TypeScript, while Bun continues to load the existing TypeScript runtime entrypoint.
+
+Consumers do not need a `paths` mapping for TypeClaw's internal `@/*` alias. The declarations use relative imports, including explicit extensions for NodeNext resolution. With `skipLibCheck`, TypeScript can skip checking dependency declarations instead of repeatedly checking TypeClaw's implementation sources. Keep your own plugin code under normal strict checking.
+
+For a linked development checkout, run `bun run build:types` after SDK changes before typechecking a consumer. Packing or publishing runs that build automatically through `prepack`.
+
 ## `definePlugin`
 
 ```ts
