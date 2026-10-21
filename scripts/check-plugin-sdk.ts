@@ -3,7 +3,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const scratch = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-sdk-'))
@@ -25,7 +25,7 @@ try {
   // Exercise the real prepack lifecycle. Installing with scripts disabled then
   // proves declaration consumers do not need our dev compiler or install hook.
   await run(['npm', 'pack', '--pack-destination', scratch], root)
-  const archive = join(scratch, `typeclaw-${manifest.version}.tgz`)
+  const archiveName = `typeclaw-${manifest.version}.tgz`
   const consumer = join(scratch, 'consumer')
   await mkdir(consumer)
   await writeFile(
@@ -34,7 +34,7 @@ try {
       name: 'example-plugin-consumer',
       private: true,
       type: 'module',
-      dependencies: { typeclaw: pathToFileURL(archive).href, zod: manifest.dependencies.zod },
+      dependencies: { typeclaw: `file:../${archiveName}`, zod: manifest.dependencies.zod },
       devDependencies: { '@types/bun': bunTypes.version },
     }),
   )
