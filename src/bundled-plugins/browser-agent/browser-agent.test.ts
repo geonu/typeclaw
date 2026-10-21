@@ -6,11 +6,13 @@ import { BROWSER_ENGINE_IDS, BROWSER_EXTENSION_IDS } from '@/browser/registry'
 import { browserPayloadSchema, buildBrowserSystemPrompt, createBrowserSubagent, driverSkillPath } from './browser-agent'
 
 describe('browser subagent', () => {
-  test('always runs on the fast profile', () => {
-    expect(createBrowserSubagent({ engines: ['agent-browser'], extensions: [] }).profile).toBe('fast')
+  test('runs the deep profile at low thinking', () => {
+    const subagent = createBrowserSubagent({ engines: ['agent-browser'], extensions: [] })
+    expect(subagent.profile).toBe('deep')
+    expect(subagent.thinkingLevel).toBe('low')
   })
 
-  test('drops a per-spawn profile override so the parent cannot bump it off fast', () => {
+  test('drops a per-spawn profile override so the parent cannot move its tier', () => {
     const parsed = browserPayloadSchema.parse({ prompt: 'open example.com', profile: 'deep' })
     expect(parsed).toEqual({ prompt: 'open example.com' })
   })
