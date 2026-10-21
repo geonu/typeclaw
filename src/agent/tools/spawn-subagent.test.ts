@@ -1765,6 +1765,53 @@ describe('createSpawnSubagentTool — foreground/background resolution', () => {
     expect(details.mode).toBe('background')
   })
 
+  test('a per-spawn profile the schema strips cannot unlock foreground for a deep subagent', async () => {
+    const pinnedRegistry: SubagentRegistry = {
+      browser: {
+        systemPrompt: 'X',
+        visibility: 'public',
+        profile: 'deep',
+        payloadSchema: z
+          .object({ prompt: z.string().optional() })
+          .passthrough()
+          .transform(({ profile: _profile, ...rest }) => rest),
+      },
+    }
+    const { tool } = spawnWithOrigin(tuiOrigin, pinnedRegistry)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'browser', prompt: 'log in', profile: 'default', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    expect((result.details as { mode?: string }).mode).toBe('background')
+  })
+
+  test('a per-spawn profile the schema keeps still lets a deep subagent run in the foreground', async () => {
+    const keptRegistry: SubagentRegistry = {
+      operator: {
+        systemPrompt: 'X',
+        visibility: 'public',
+        profile: 'deep',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      },
+    }
+    const { tool } = spawnWithOrigin(tuiOrigin, keptRegistry)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'operator', prompt: 'quick', profile: 'default', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    expect((result.details as { mode?: string }).mode).toBe('sync')
+  })
+
   test('subagent origin defaults to foreground so the result folds in (planner->reviewer sync)', async () => {
     const plannerOrigin: SessionOrigin = {
       kind: 'subagent',
