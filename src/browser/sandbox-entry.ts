@@ -58,6 +58,7 @@ export function chromeArgs(config: SandboxEntryConfig): string[] {
 }
 
 async function main(config: SandboxEntryConfig): Promise<void> {
+  await clearSingletonLocks(config.profileDir)
   await writeDownloadPreference(config)
   await rm(devtoolsSocket(config.runDir), { force: true })
   const servers = [
@@ -146,6 +147,15 @@ async function readPreferences(file: string): Promise<Record<string, unknown>> {
   }
   await rename(file, `${file}.corrupt-${Date.now()}`).catch(() => {})
   return {}
+}
+
+// The profile outlives the container, and Chrome refuses a profile whose lock
+// names another host (every container has a new hostname). Whatever Chrome held
+// it before has exited, since this entry only runs after the previous one did.
+export async function clearSingletonLocks(profileDir: string): Promise<void> {
+  await Promise.all(
+    ['SingletonLock', 'SingletonSocket', 'SingletonCookie'].map((name) => rm(join(profileDir, name), { force: true })),
+  )
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
