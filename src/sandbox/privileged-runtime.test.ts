@@ -204,7 +204,10 @@ describe('resolvePrivilegedSandboxRuntime', () => {
 
     expect(runtime.env).toEqual({ HOME: agentDir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' })
     const probe = Bun.spawn(['bash', '-c', "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill"], {
-      env: { ...process.env, HOME: home, ...runtime.env },
+      // With no helper left, git falls back to prompting on /dev/tty. Under --parallel the
+      // worker sits in a background process group, so that read raises SIGTTIN and stops
+      // the whole worker forever. An empty GIT_ASKPASS also skips core.askpass/SSH_ASKPASS.
+      env: { ...process.env, HOME: home, ...runtime.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '' },
       stdout: 'ignore',
       stderr: 'ignore',
     })
