@@ -571,11 +571,13 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // Read live so a reloaded `models` lands on the next session without a
   // container restart.
   const thinkingLevel = resolveSessionThinkingLevel(models, resolved, activeRef, options.thinkingLevel)
+  // Read per session like `models`, so a reloaded ceiling applies to new sessions.
+  const maxCompactionTriggerTokens = getConfig().compaction.maxTriggerTokens
   const { session } = await createAgentSession({
     model,
     modelRuntime,
     sessionManager,
-    settingsManager: createCompactionSettingsManager(model),
+    settingsManager: createCompactionSettingsManager(model, maxCompactionTriggerTokens),
     resourceLoader,
     noTools: 'builtin',
     tools: intendedActiveToolNames,
@@ -683,7 +685,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const unsubToolNudge = attachToolNotFoundNudge(session, intendedActiveToolNames)
   // An applied idle summary replaces the prefix the keepalive captured;
   // replaying the old one would only refresh a cache no turn will read.
-  const stopIdleCompaction = attachIdleCompaction(session, { onApplied: () => cacheKeepalive?.invalidate() })
+  const stopIdleCompaction = attachIdleCompaction(session, {
+    maxTriggerTokens: maxCompactionTriggerTokens,
+    onApplied: () => cacheKeepalive?.invalidate(),
+  })
 
   // Registered only once creation can no longer fail, so a rejected creation
   // leaves no scope entry behind; tools resolve the scope lazily at call time.

@@ -10,7 +10,7 @@ const IDLE_COMPACTION_TRIGGER_RATIO = 0.9
 
 export function attachIdleCompaction(
   session: AgentSession,
-  options: { schedule?: IdleSchedule; onApplied?: () => void } = {},
+  options: { schedule?: IdleSchedule; onApplied?: () => void; maxTriggerTokens?: number } = {},
 ): () => void {
   const schedule = options.schedule ?? scheduleIdle
   // Capture before turn drivers install output caps that apply only to replies.
@@ -42,7 +42,7 @@ export function attachIdleCompaction(
       !model ||
       leaf === attemptedLeaf ||
       tokens == null ||
-      tokens < compactionTriggerTokens(model) * IDLE_COMPACTION_TRIGGER_RATIO
+      tokens < compactionTriggerTokens(model, options.maxTriggerTokens) * IDLE_COMPACTION_TRIGGER_RATIO
     )
       return
 
@@ -95,7 +95,11 @@ export function attachIdleCompaction(
       // can be disposed without starting a summary they will never use.
       const tokens = session.getContextUsage()?.tokens
       const model = session.model
-      if (model && tokens != null && tokens >= compactionTriggerTokens(model) * IDLE_COMPACTION_TRIGGER_RATIO) {
+      if (
+        model &&
+        tokens != null &&
+        tokens >= compactionTriggerTokens(model, options.maxTriggerTokens) * IDLE_COMPACTION_TRIGGER_RATIO
+      ) {
         cancelScheduled = schedule(run)
       }
     } else if (event.type === 'agent_start' || event.type === 'compaction_start' || event.type === 'entry_appended') {
