@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { Markdown, type Terminal, Text } from '@earendil-works/pi-tui'
+import { Markdown, type ProgramStatus, type Terminal, Text } from '@earendil-works/pi-tui'
 
 import type { SessionSummary } from './session-list'
 import { BoundedComponentWindow, createTranscriptView, componentFor, type HistoryEntry } from './transcript-view'
@@ -41,6 +41,7 @@ class FakeTerminal implements Terminal {
   clearScreen(): void {}
   setTitle(_title: string): void {}
   setProgress(_active: boolean): void {}
+  setProgramStatus(_status: ProgramStatus): void {}
   feed(data: string): void {
     this.inputHandler?.(data)
   }

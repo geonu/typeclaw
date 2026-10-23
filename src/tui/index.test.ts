@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { Terminal } from '@earendil-works/pi-tui'
+import type { ProgramStatus, Terminal } from '@earendil-works/pi-tui'
 
 import type { ClientMessage, ServerMessage } from '@/shared'
 
@@ -42,6 +42,7 @@ class FakeTerminal implements Terminal {
   clearScreen(): void {}
   setTitle(_title: string): void {}
   setProgress(_active: boolean): void {}
+  setProgramStatus(_status: ProgramStatus): void {}
 
   feed(data: string): void {
     this.inputHandler?.(data)

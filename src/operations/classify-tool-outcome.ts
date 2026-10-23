@@ -41,7 +41,7 @@ const COMMAND_NOT_FOUND = new RegExp(
 
 // Pi's grep/find reject with these fixed literals when `ensureTool` returns no
 // rg/fd path (pi packages/coding-agent/src/core/tools/{grep,find}.ts; published
-// dist/core/tools/{grep,find}.js, identical in 0.87.1, 0.99.2, and 1.0.0).
+// dist/core/tools/{grep,find}.js, identical in 0.87.1, 0.99.2, 1.0.0, and 1.4.0).
 // Classification accepts the literal alone or followed by the exact `: `
 // separator and untrusted context. Context is never parsed or persisted; the
 // bin comes only from the closed grep->rg/find->fd tool mapping. This contract
