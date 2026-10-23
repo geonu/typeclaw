@@ -183,18 +183,18 @@ describe('compaction request thinking', () => {
     }
   }
 
-  // pi-ai's compaction path calls streamSimple (pi-coding-agent
-  // dist/core/compaction/compaction.js:484-509), where forceAdaptiveThinking
+  // pi-ai's compaction path calls completeSimple (pi-coding-agent
+  // dist/core/compaction/compaction.js:477-487), where forceAdaptiveThinking
   // selects adaptive rather than rejected budget thinking
-  // (pi-ai dist/api/anthropic-messages.js:674-692). Capture the real request
+  // (pi-ai dist/api/anthropic-messages.js). Capture the real request
   // so this catalog compatibility contract cannot regress silently.
   //
-  // The same request must also stay within the model's output limit. pi
-  // derives the summary budget as 0.8 x reserveTokens (compaction.js), and our
-  // absolute trigger sets reserveTokens to nearly the whole window. On pi
-  // 0.73.1 that sent max_tokens=748800 for Sonnet 4.6, whose limit is 64K.
-  // pi 0.87 clamps both summary budgets to model.maxTokens
-  // (pi-coding-agent dist/core/compaction/compaction.js:533,748).
+  // The same request must also stay within the model's output limit. Our
+  // absolute trigger sets reserveTokens to nearly the whole window; on pi
+  // 0.73.1 the summary budget was 0.8 x reserveTokens, which sent
+  // max_tokens=748800 for Sonnet 4.6, whose limit is 64K. Since pi 1.4 the
+  // summary ignores reserveTokens and uses the model's output limit
+  // (generateSummaryWithUsage in compaction.js, pi #9512).
   test.each([
     ['anthropic/claude-sonnet-4-6', false],
     ['anthropic/claude-sonnet-5', false],

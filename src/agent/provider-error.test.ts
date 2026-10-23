@@ -863,7 +863,9 @@ describe('local failures whose text Pi would read as a context overflow', () => 
   })
 
   test("follow Pi's provider-specific overflow branch through the current provider", async () => {
-    const raw = '413 status code (no body)'
+    // Pi 1.4 reads any leading 413 as overflow for every provider; a bodyless
+    // 400 is still the Cerebras-only branch.
+    const raw = '400 status code (no body)'
     expect(piReadsAsOverflow(raw, 'cerebras')).toBe(true)
     expect(piReadsAsOverflow(raw, 'anthropic')).toBe(false)
     const unreadable = () => {

@@ -299,9 +299,20 @@ describe('listKnownModelRefs', () => {
       expect(getSupportedThinkingLevels(model)).toContain('max')
       expect(clampThinkingLevel(model, 'minimal')).toBe('low')
       expect(clampThinkingLevel(model, 'max')).toBe('max')
+      // With an API key, pi-ai 1.3+ carries the level in a trailing
+      // configuration_update item (compat.supportsMidConvoEffort); `off` has no
+      // reasoning option and still goes out as reasoning.effort none.
       for (const level of getSupportedThinkingLevels(model)) {
         const payload = await captureRequest(streamResponses, model, 'sk-test', level)
-        expect(payload?.reasoning).toMatchObject({ effort: level === 'off' ? 'none' : level })
+        const updates = ((payload?.input ?? []) as Array<Record<string, unknown>>).filter(
+          (item) => item.type === 'configuration_update',
+        )
+        if (level === 'off') {
+          expect(payload?.reasoning).toMatchObject({ effort: 'none' })
+          expect(updates).toEqual([])
+        } else {
+          expect(updates.at(-1)).toEqual({ type: 'configuration_update', reasoning: { effort: level } })
+        }
       }
     }
     for (const model of [

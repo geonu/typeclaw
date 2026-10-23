@@ -121,8 +121,12 @@ export const KNOWN_PROVIDERS = {
         maxTokens: 128000,
       },
       // GPT-6 Sol and Luna use Responses because Chat Completions accepts tools
-      // only at effort `none`. The full map and compat are pi-ai 0.87.1's
+      // only at effort `none`. The full map and compat are pi-ai 1.4.0's
       // catalog values, preserving every documented effort through `max`.
+      // With `supportsMidConvoEffort` (pi-ai 1.3.0), API-key requests keep a
+      // fixed reasoning.effort and carry the thinking level in
+      // configuration_update input items, so a mid-session level change keeps
+      // the prompt cache. Sign in with ChatGPT still sends reasoning.effort.
       'gpt-6-sol': {
         id: 'gpt-6-sol',
         name: 'GPT-6 Sol',
@@ -149,6 +153,7 @@ export const KNOWN_PROVIDERS = {
           supportsAdditionalTools: true,
           supportsToolSearch: true,
           supportsMidConvoSystemMessages: true,
+          supportsMidConvoEffort: true,
           supportsExplicitPromptCacheMode: true,
         },
       },
@@ -178,6 +183,7 @@ export const KNOWN_PROVIDERS = {
           supportsAdditionalTools: true,
           supportsToolSearch: true,
           supportsMidConvoSystemMessages: true,
+          supportsMidConvoEffort: true,
           supportsExplicitPromptCacheMode: true,
         },
       },
@@ -747,8 +753,8 @@ export const KNOWN_PROVIDERS = {
     apiKeyEnv: 'XAI_API_KEY',
     oauthProviderId: 'xai',
     models: {
-      // pi-ai 0.87.1's xAI catalog caps Grok 4.3 at 30K and maps its efforts;
-      // `minimal` is not an xAI effort, so it clamps to `low`. The current
+      // pi-ai 1.4.0's xAI catalog caps Grok 4.3 at 30K and maps its efforts,
+      // including `xhigh`; `minimal` is not an xAI effort, so it clamps to `low`. The current
       // transport sends model.maxTokens by default, so keep that vendor-safe cap.
       'grok-4.3': {
         id: 'grok-4.3',
@@ -767,7 +773,7 @@ export const KNOWN_PROVIDERS = {
           low: 'low',
           medium: 'medium',
           high: 'high',
-          xhigh: null,
+          xhigh: 'xhigh',
           max: null,
         },
         compat: { supportsLongCacheRetention: false },
