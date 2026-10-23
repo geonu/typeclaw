@@ -899,6 +899,17 @@ export const configSchema = z
     // block is omitted entirely. Read fresh per session via `getConfig()`, so
     // it applies on reload without a restart.
     branding: z.boolean().default(true),
+    // Auto-compaction budget. `maxTriggerTokens` sets the agent's own ceiling
+    // on the compaction trigger, so each agent can trade per-turn re-read cost
+    // against working room for its workload; omitted, the 64K default in
+    // src/agent/compaction.ts applies. The 80% window-relative trigger still
+    // applies. The floor is 3x the 20K recent window that compaction keeps, so
+    // a compaction cannot immediately retrigger. Read per session, so a reload
+    // applies to sessions created afterwards.
+    compaction: z
+      .object({ maxTriggerTokens: z.number().int().min(60_000).optional() })
+      .strict()
+      .default({}),
   })
   .catchall(z.unknown())
 
@@ -1181,6 +1192,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   'roles.match': 'applied',
   'roles.permissions': 'restart-required',
   branding: 'applied',
+  compaction: 'applied',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so

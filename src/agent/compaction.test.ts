@@ -7,7 +7,7 @@ import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
 import { resolveModel } from '@/config'
-import { __resetConfigForTesting, reloadConfig } from '@/config/config'
+import { __resetConfigForTesting, configSchema, reloadConfig } from '@/config/config'
 
 import { invalidateProviderAuthCache } from './auth'
 import {
@@ -59,6 +59,28 @@ describe('compactionTriggerTokens', () => {
     // then
     expect(trigger).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
   })
+
+  test('a configured ceiling replaces the absolute cap on large windows', () => {
+    // given: 80% of 1M (800_000) sits above the configured 160K ceiling
+    const model = fakeModel(1_000_000)
+
+    // when
+    const trigger = compactionTriggerTokens(model, 160_000)
+
+    // then
+    expect(trigger).toBe(160_000)
+  })
+
+  test('a configured ceiling never delays compaction past 80% of a small window', () => {
+    // given: 80% of 128K (102_400) sits below the configured 160K ceiling
+    const model = fakeModel(128_000)
+
+    // when
+    const trigger = compactionTriggerTokens(model, 160_000)
+
+    // then
+    expect(trigger).toBe(102_400)
+  })
 })
 
 describe('reserveTokensForModel', () => {
@@ -91,6 +113,15 @@ describe('compaction budget invariant', () => {
     // a trigger too close to keepRecent would re-compact almost immediately
     // after each compaction; keep headroom so a compacted session can grow
     expect(COMPACTION_ABSOLUTE_TRIGGER_TOKENS).toBeGreaterThanOrEqual(COMPACTION_KEEP_RECENT_TOKENS * 3)
+  })
+
+  test('a configured ceiling below 3x the recent window is rejected at parse time', () => {
+    expect(
+      configSchema.safeParse({ compaction: { maxTriggerTokens: COMPACTION_KEEP_RECENT_TOKENS * 3 } }).success,
+    ).toBe(true)
+    expect(
+      configSchema.safeParse({ compaction: { maxTriggerTokens: COMPACTION_KEEP_RECENT_TOKENS * 3 - 1 } }).success,
+    ).toBe(false)
   })
 })
 
@@ -285,5 +316,31 @@ describe('compaction request thinking', () => {
       globalThis.fetch = previousFetch
       await dispose()
     }
+  })
+
+  test('typeclaw.json compaction.maxTriggerTokens sets the created session compaction reserve', async () => {
+    const ref = 'anthropic/claude-sonnet-5'
+    const window = resolveModel(ref).contextWindow
+    const reserveFor = async (config: Record<string, unknown>): Promise<number> => {
+      await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify({ models: { default: ref }, ...config }))
+      reloadConfig(agentDir)
+      const { session, dispose } = await createSessionWithDispose({
+        sessionManager: SessionManager.inMemory(agentDir),
+        systemPromptOverride: 'test compaction budget',
+        tools: [],
+      })
+      try {
+        return session.settingsManager.getCompactionSettings().reserveTokens
+      } finally {
+        await dispose()
+      }
+    }
+
+    const defaultReserve = await reserveFor({})
+    const configuredReserve = await reserveFor({ compaction: { maxTriggerTokens: 160_000 } })
+
+    expect(defaultReserve).toBe(window - Math.min(Math.round(window * 0.8), COMPACTION_ABSOLUTE_TRIGGER_TOKENS))
+    expect(configuredReserve).toBe(window - Math.min(Math.round(window * 0.8), 160_000))
+    expect(configuredReserve).toBeLessThan(defaultReserve)
   })
 })
