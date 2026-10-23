@@ -512,6 +512,59 @@ describe('post_github_review', () => {
     }
   })
 
+  test('completes a retained approval check while keeping duplicate submission denied without posting a comment', async () => {
+    const head = 'd'.repeat(40)
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'APPROVED' }),
+      resolveHeadSha: async () => head,
+    })
+    const finished = Promise.withResolvers<ReviewCheckOutcome>()
+    const publisher = {
+      start: async () => ({ mode: 'status' as const }),
+      finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
+        finished.resolve(outcome)
+        return 'published' as const
+      },
+    }
+    await githubReviewChecks.attach({
+      publisher,
+      store: { load: async () => [], save: async () => {} },
+      logger: { info: () => {}, warn: () => {} },
+    })
+    await githubReviewChecks.beginReview({ repo: githubOrigin.workspace, pullRequest: 7, headSha: head }, 'bg_approval')
+    await githubReviewChecks.reviewerSettled('bg_approval', { kind: 'ok' })
+    const channelRouter = router()
+    let submissions = 0
+    let comments = 0
+    channelRouter.registerReviewSubmitter('github', async () => {
+      submissions += 1
+      return { ok: true, reviewId: 80, state: 'APPROVED' }
+    })
+    channelRouter.registerOutbound('github', async () => {
+      comments += 1
+      return { ok: true }
+    })
+
+    try {
+      const result = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
+        event: 'APPROVE',
+        body: '현재 변경에서도 기존 승인을 유지한다.',
+        head_sha: head,
+      })
+
+      expect(result.details).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('already holds a standing APPROVED review'),
+      })
+      expect(await finished.promise).toEqual({ kind: 'verdict', state: 'APPROVED' })
+      expect(submissions).toBe(0)
+      expect(comments).toBe(0)
+      expect(hasReview({ sessionId, workspace: githubOrigin.workspace, prNumber: 7, verdict: 'APPROVE' })).toBe(false)
+    } finally {
+      githubReviewChecks.detach(publisher)
+    }
+  })
+
   test('lets a sibling retry the duplicate-review comment when the first delivery failed', async () => {
     standingChangesRequested(() => 'sha-1')
     const channelRouter = router()

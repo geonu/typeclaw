@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
+import { githubReviewChecks, type ReviewCheckKey, type ReviewCheckOutcome } from './github-review-check'
 import {
   __recentLandedRecordCountForTest,
   __resetReviewVerdictGuardForTest,
@@ -8,6 +9,7 @@ import {
   completeGithubReviewRound,
   canPromoteGithubReviewRoundTo,
   createApproveIdempotencyGuard,
+  createSharedReviewVerdictGuard,
   guardGithubReviewRoundDismissal,
   githubReviewRoundKey,
   isGithubReviewRoundComplete,
@@ -52,6 +54,119 @@ describe('review verdict idempotency guard', () => {
       now,
     })
   }
+
+  test.each([
+    [false, undefined, true, false],
+    [false, 'B'.repeat(40), true, false],
+    [false, 'a'.repeat(40), false, false],
+    [true, undefined, true, false],
+    [true, 'b'.repeat(40), true, false],
+    [true, 'a'.repeat(40), false, false],
+    [true, undefined, false, true],
+  ] as const)(
+    'completes only the reviewed commit check for a retained approval, round: %s, reviewed head: %s',
+    async (withRound, reviewedHeadSha, completes, headMoves) => {
+      const headSha = 'b'.repeat(40)
+      const heads = headMoves ? [headSha, 'c'.repeat(40)] : []
+      configureReviewVerdictCoordinator({
+        resolveEffectiveApproval: resolver({ [`${WS}#5`]: 'APPROVED' }),
+        resolveHeadSha: async () => heads.shift() ?? headSha,
+      })
+      const outcomes: Array<{ key: ReviewCheckKey; outcome: ReviewCheckOutcome }> = []
+      const publisher = {
+        start: async () => ({ mode: 'check-run' as const, checkRunId: 99 }),
+        finish: async (key: ReviewCheckKey, _ref: unknown, outcome: ReviewCheckOutcome) => {
+          outcomes.push({ key, outcome })
+          return 'published' as const
+        },
+      }
+      await githubReviewChecks.attach({
+        publisher,
+        store: { load: async () => [], save: async () => {} },
+        logger: { info: () => {}, warn: () => {} },
+      })
+      await githubReviewChecks.beginReview({ repo: WS, pullRequest: 5, headSha }, 'current')
+      await githubReviewChecks.beginReview({ repo: WS, pullRequest: 5, headSha: 'a'.repeat(40) }, 'old')
+      await githubReviewChecks.beginReview({ repo: WS, pullRequest: 5, headSha: 'c'.repeat(40) }, 'new')
+      for (const task of ['current', 'old', 'new']) await githubReviewChecks.reviewerSettled(task, { kind: 'ok' })
+      const round = {
+        kind: 'push',
+        roundId: 'approval-round',
+        workspace: WS,
+        prNumber: 5,
+        headSha,
+        carrierThread: null,
+      } as const
+
+      try {
+        const decision = await createSharedReviewVerdictGuard().guard({
+          callId: 'retained-approval',
+          workspace: WS,
+          prNumber: 5,
+          verdict: 'APPROVE',
+          ...(reviewedHeadSha !== undefined ? { reviewedHeadSha } : {}),
+          ...(withRound ? { round, thread: null } : {}),
+        })
+        await githubReviewChecks.sweep()
+        expect(decision).toMatchObject({ block: true, kind: 'duplicate', duplicateSource: 'standing' })
+        expect(outcomes).toEqual(
+          completes
+            ? [{ key: { repo: WS, pullRequest: 5, headSha }, outcome: { kind: 'verdict', state: 'APPROVED' } }]
+            : [],
+        )
+        if (withRound) expect(isGithubReviewRoundComplete(round)).toBe(false)
+      } finally {
+        githubReviewChecks.detach(publisher)
+      }
+    },
+  )
+
+  test.each([
+    ['APPROVED', 'b'.repeat(40), true],
+    ['APPROVED', null, false],
+    ['NONE', 'b'.repeat(40), false],
+    ['CHANGES_REQUESTED', 'b'.repeat(40), false],
+    ['error', 'b'.repeat(40), false],
+  ] as const)(
+    'completes a recent duplicate only when GitHub confirms approval and the current head: %s, %s',
+    async (effective, headSha, completes) => {
+      configureReviewVerdictCoordinator({
+        resolveEffectiveApproval: resolver({ [`${WS}#5`]: effective }),
+        resolveHeadSha: async () => headSha,
+      })
+      const outcomes: ReviewCheckOutcome[] = []
+      const publisher = {
+        start: async () => ({ mode: 'check-run' as const, checkRunId: 99 }),
+        finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
+          outcomes.push(outcome)
+          return 'published' as const
+        },
+      }
+      await githubReviewChecks.attach({
+        publisher,
+        store: { load: async () => [], save: async () => {} },
+        logger: { info: () => {}, warn: () => {} },
+      })
+      await githubReviewChecks.beginReview({ repo: WS, pullRequest: 5, headSha: 'b'.repeat(40) }, 'current')
+      await githubReviewChecks.reviewerSettled('current', { kind: 'ok' })
+
+      try {
+        const guard = createSharedReviewVerdictGuard()
+        await guard.noteLandedReview({ workspace: WS, prNumber: 5, verdict: 'APPROVE' })
+        const decision = await guard.guard({
+          callId: 'recent-approval',
+          workspace: WS,
+          prNumber: 5,
+          verdict: 'APPROVE',
+        })
+        await githubReviewChecks.sweep()
+        expect(outcomes).toEqual(completes ? [{ kind: 'verdict', state: 'APPROVED' }] : [])
+        if (completes) expect(decision).toMatchObject({ block: true, kind: 'duplicate', duplicateSource: 'recent' })
+      } finally {
+        githubReviewChecks.detach(publisher)
+      }
+    },
+  )
 
   test('allows the first APPROVE when the bot has no prior verdict', async () => {
     const g = makeGuard()
