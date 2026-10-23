@@ -196,6 +196,36 @@ describe('GithubReviewCheckTracker', () => {
     ])
   })
 
+  test('completes only the specified commit waiting to post on the same pull request', async () => {
+    const h = harness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'current')
+    await h.tracker.beginReview({ ...KEY, headSha: 'b'.repeat(40) }, 'old')
+    await h.tracker.beginReview({ ...KEY, pullRequest: 8 }, 'other-pr')
+    await h.tracker.beginReview({ ...KEY, repo: 'acme/other' }, 'other-repo')
+    for (const task of ['current', 'old', 'other-pr', 'other-repo']) {
+      await h.tracker.reviewerSettled(task, { kind: 'ok' })
+    }
+
+    await h.tracker.completePostingReviews('acme/widgets', 7, 'APPROVED', KEY.headSha)
+    await h.tracker.completePostingReviews('acme/widgets', 7, 'APPROVED', 'c'.repeat(40))
+
+    expect(h.finished).toEqual([{ key: NORMALIZED, ref: RUN, outcome: { kind: 'verdict', state: 'APPROVED' } }])
+    expect(h.started).toHaveLength(4)
+  })
+
+  test('does not complete a reviewing check or create a missing check when a head is specified', async () => {
+    const h = harness()
+    await h.attach()
+    await h.tracker.beginReview(KEY, 'reviewing')
+
+    await h.tracker.completePostingReviews('acme/widgets', 7, 'APPROVED', KEY.headSha)
+    await h.tracker.completePostingReviews('acme/widgets', 8, 'APPROVED', KEY.headSha)
+
+    expect(h.finished).toEqual([])
+    expect(h.started).toEqual([NORMALIZED])
+  })
+
   test('a review posted without a tracked reviewer still publishes its verdict', async () => {
     const h = harness()
     await h.attach()
