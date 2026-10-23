@@ -24,6 +24,7 @@ export type DetectedReview = {
   prNumber: number
   verdict: ReviewVerdict
   source: 'api' | 'pr-review'
+  reviewedHeadSha?: string
 }
 
 export type GhReviewDetectInput = {
@@ -246,25 +247,18 @@ function detectApiReview(args: readonly string[], fileContents: string | null): 
   const prNumber = Number(m[3])
   if (!Number.isSafeInteger(prNumber)) return null
 
-  const verdict = verdictFromInlineFields(args) ?? verdictFromFile(fileContents)
+  const verdict = verdictFromInlineFields(args) ?? normalizeVerdict(stringFieldFromFile(fileContents, 'event') ?? '')
   if (verdict === null) return null
-  return { workspace, prNumber, verdict, source: 'api' }
+  const reviewedHeadSha = commitIdFromInlineFields(args) ?? stringFieldFromFile(fileContents, 'commit_id')
+  return { workspace, prNumber, verdict, source: 'api', ...(reviewedHeadSha !== null ? { reviewedHeadSha } : {}) }
 }
 
 // Inline `-f event=APPROVE` / `--field event=REQUEST_CHANGES` (and `-F` raw).
 // gh accepts both `flag value` and `flag=value` shapes; cover both.
 function verdictFromInlineFields(args: readonly string[]): ReviewVerdict | null {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]
-    if (a === undefined) continue
-    if (a === '-f' || a === '-F' || a === '--field' || a === '--raw-field') {
-      const v = parseEventAssignment(args[i + 1])
-      if (v !== null) return v
-    }
-    if (a.startsWith('-f=') || a.startsWith('-F=') || a.startsWith('--field=') || a.startsWith('--raw-field=')) {
-      const v = parseEventAssignment(a.slice(a.indexOf('=') + 1))
-      if (v !== null) return v
-    }
+  for (const assignment of inlineFieldAssignments(args)) {
+    const verdict = parseEventAssignment(assignment)
+    if (verdict !== null) return verdict
   }
   return null
 }
@@ -277,13 +271,43 @@ function parseEventAssignment(token: string | undefined): ReviewVerdict | null {
   return normalizeVerdict(token.slice(eq + 1))
 }
 
-function verdictFromFile(contents: string | null): ReviewVerdict | null {
+function commitIdFromInlineFields(args: readonly string[]): string | null {
+  for (const assignment of inlineFieldAssignments(args)) {
+    const separator = assignment.indexOf('=')
+    if (separator !== -1 && assignment.slice(0, separator).trim().toLowerCase() === 'commit_id') {
+      return assignment.slice(separator + 1)
+    }
+  }
+  return null
+}
+
+function inlineFieldAssignments(args: readonly string[]): string[] {
+  const assignments: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === undefined) continue
+    if (arg === '-f' || arg === '-F' || arg === '--field' || arg === '--raw-field') {
+      const assignment = args[++i]
+      if (assignment !== undefined) assignments.push(assignment)
+    } else if (
+      arg.startsWith('-f=') ||
+      arg.startsWith('-F=') ||
+      arg.startsWith('--field=') ||
+      arg.startsWith('--raw-field=')
+    ) {
+      assignments.push(arg.slice(arg.indexOf('=') + 1))
+    }
+  }
+  return assignments
+}
+
+function stringFieldFromFile(contents: string | null, field: string): string | null {
   if (contents === null || contents === '') return null
   try {
     const parsed = JSON.parse(contents) as unknown
     if (typeof parsed !== 'object' || parsed === null) return null
-    const event = (parsed as Record<string, unknown>).event
-    return typeof event === 'string' ? normalizeVerdict(event) : null
+    const value = (parsed as Record<string, unknown>)[field]
+    return typeof value === 'string' ? value : null
   } catch {
     return null
   }
