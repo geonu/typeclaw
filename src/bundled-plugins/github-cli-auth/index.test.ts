@@ -25,6 +25,7 @@ import {
   TYPECLAW_INTERNAL_BASH_WITHHOLD_ENV,
   wrapBuiltinToolDefinition,
 } from '@/agent/plugin-tools'
+import { githubReviewChecks, type ReviewCheckOutcome } from '@/channels/github-review-check'
 import {
   __resetReviewObserverForTest,
   observeVerifiedDismissals,
@@ -33,6 +34,7 @@ import {
 } from '@/channels/github-review-turn-ledger'
 import {
   __resetReviewVerdictGuardForTest,
+  configureReviewVerdictCoordinator,
   isGithubReviewRoundComplete,
 } from '@/channels/github-review-verdict-coordinator'
 import type { GithubTokenResolveResult } from '@/channels/github-token-bridge'
@@ -167,6 +169,57 @@ const unavailableResolver = async (): Promise<GithubTokenResolveResult> => ({
 })
 
 const hookCtx = { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger }
+
+test.each([
+  ['-f ', 51],
+  ['-F ', 52],
+  ['--field=', 53],
+  ['--raw-field=', 54],
+] as const)(
+  'does not complete the current head check when the CLI approves an older commit: %s',
+  async (fieldFlag, prNumber) => {
+    __resetReviewVerdictGuardForTest()
+    const headSha = 'b'.repeat(40)
+    const reviewedHeadSha = 'a'.repeat(40)
+    const outcomes: ReviewCheckOutcome[] = []
+    const publisher = {
+      start: async () => ({ mode: 'check-run' as const, checkRunId: prNumber }),
+      finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
+        outcomes.push(outcome)
+        return 'published' as const
+      },
+    }
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'APPROVED' }),
+      resolveHeadSha: async () => headSha,
+    })
+    await githubReviewChecks.attach({
+      publisher,
+      store: { load: async () => [], save: async () => {} },
+      logger: noopLogger,
+    })
+    await githubReviewChecks.beginReview({ repo: 'acme/widgets', pullRequest: prNumber, headSha }, `cli-${prNumber}`)
+    await githubReviewChecks.reviewerSettled(`cli-${prNumber}`, { kind: 'ok' })
+
+    try {
+      const fields = `-f event=APPROVE ${fieldFlag}commit_id=${reviewedHeadSha}`
+      const result = await hook(
+        bashEvent(`gh api -X POST repos/acme/widgets/pulls/${prNumber}/reviews ${fields}`),
+        hookCtx,
+      )
+      await githubReviewChecks.sweep()
+
+      expect(result).toMatchObject({ block: true, reason: expect.stringContaining('standing APPROVED') })
+      expect(outcomes).toEqual([])
+    } finally {
+      await githubReviewChecks.cancelPullRequest('acme/widgets', prNumber, 'test cleanup')
+      githubReviewChecks.detach(publisher)
+      __resetReviewVerdictGuardForTest()
+      __resetReviewObserverForTest()
+    }
+  },
+)
 
 describe('github-cli-auth plugin', () => {
   test('App auth: sets the env overlay with the minted token, leaving the command untouched', async () => {

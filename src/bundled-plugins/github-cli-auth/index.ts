@@ -382,6 +382,9 @@ export default definePlugin({
           workspace: review.detected.workspace,
           prNumber: review.detected.prNumber,
           verdict: review.detected.verdict,
+          ...(review.detected.reviewedHeadSha !== undefined
+            ? { reviewedHeadSha: review.detected.reviewedHeadSha }
+            : {}),
           ...(event.origin?.kind === 'channel' && event.origin.githubReviewRound !== undefined
             ? { round: event.origin.githubReviewRound, thread: event.origin.thread }
             : {}),

@@ -301,18 +301,22 @@ export class GithubReviewCheckTracker {
 
   // For a verdict posted without the reviewed head: only reviews that already
   // finished on this PR can be the ones it reports.
+  // When a reviewed head is supplied, complete only that commit's posting reviews.
   async completePostingReviews(
     repo: string,
     pullRequest: number,
     state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED',
+    headSha?: string,
   ): Promise<void> {
     const canonical = canonicalGithubRepo(repo)
+    const normalizedHead = headSha?.toLocaleLowerCase()
     const matching = [...this.leases.values()].filter(
       (lease) =>
         lease.outcome === undefined &&
         lease.phase === 'posting' &&
         lease.key.repo === canonical &&
-        lease.key.pullRequest === pullRequest,
+        lease.key.pullRequest === pullRequest &&
+        (normalizedHead === undefined || lease.key.headSha === normalizedHead),
     )
     await Promise.all(matching.map((lease) => this.finish(lease, { kind: 'verdict', state })))
   }

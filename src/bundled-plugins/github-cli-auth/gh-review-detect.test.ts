@@ -42,6 +42,38 @@ describe('detectReviewSubmission — REST --input', () => {
 })
 
 describe('detectReviewSubmission — REST inline fields', () => {
+  test.each(['-f ', '-F ', '--field ', '--raw-field ', '-f=', '-F=', '--field=', '--raw-field='])(
+    'preserves an inline %s commit_id as the reviewed head',
+    (flag) => {
+      const headSha = 'a'.repeat(40)
+      const field = `${flag}commit_id=${headSha}`
+      expect(
+        detectReviewSubmission({
+          command: `gh api -X POST repos/acme/widgets/pulls/3/reviews -f event=APPROVE ${field}`,
+        }),
+      ).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE', source: 'api', reviewedHeadSha: headSha })
+    },
+  )
+
+  test('preserves commit_id from the input file as the reviewed head', () => {
+    const headSha = 'b'.repeat(40)
+    expect(
+      detectReviewSubmission({
+        command: 'gh api -X POST repos/acme/widgets/pulls/3/reviews --input /tmp/review.json',
+        inputFileContents: JSON.stringify({ event: 'APPROVE', commit_id: headSha }),
+      }),
+    ).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE', source: 'api', reviewedHeadSha: headSha })
+  })
+
+  test('preserves a quoted commit_id as the reviewed head', () => {
+    const headSha = 'c'.repeat(40)
+    expect(
+      detectReviewSubmission({
+        command: `gh api -X POST repos/acme/widgets/pulls/3/reviews -f event=APPROVE -f "commit_id=${headSha}"`,
+      }),
+    ).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE', source: 'api', reviewedHeadSha: headSha })
+  })
+
   test('-f event=APPROVE (separate value)', () => {
     const result = detectReviewSubmission({
       command: 'gh api /repos/acme/widgets/pulls/3/reviews -f event=APPROVE',

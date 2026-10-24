@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { githubReviewChecks } from './github-review-check'
 import type { ReviewVerdict } from './github-review-turn-ledger'
 import type { GithubReviewFollowupRound } from './types'
 
@@ -710,6 +711,17 @@ export function createApproveIdempotencyGuard(deps: {
         roundState !== undefined &&
         remote.ok &&
         remote.effective === 'CHANGES_REQUESTED'
+
+      const reviewedHeadSha = args.reviewedHeadSha ?? args.round?.headSha
+      if (
+        args.verdict === 'APPROVE' &&
+        remote.ok &&
+        remote.effective === 'APPROVED' &&
+        headSha !== null &&
+        (reviewedHeadSha === undefined || sameSha(reviewedHeadSha, headSha))
+      ) {
+        void githubReviewChecks.completePostingReviews(args.workspace, args.prNumber, 'APPROVED', headSha)
+      }
 
       // Layer 3 — duplicate-review cooldown. A recently-landed SAME verdict on the
       // SAME (or uncertain) head blocks a redundant re-publication for the window. It
