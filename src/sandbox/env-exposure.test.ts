@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { resolveExposableEnvNames } from './env-exposure'
+import { resolveExposableEnvNames, resolveFillableEnvNames } from './env-exposure'
 
 const env = (entries: Record<string, string>): Map<string, string> => new Map(Object.entries(entries))
 
@@ -83,5 +83,23 @@ describe('resolveExposableEnvNames', () => {
     // from the parsed FILE value, so the empty declaration stays withheld.
     const names = resolveExposableEnvNames(env({ DISCORD_BOT_TOKEN: '', REAL: 'v' }))
     expect(names).toEqual(['REAL'])
+  })
+})
+
+describe('TYPECLAW_SECRET_ tier', () => {
+  const declared = env({
+    TYPECLAW_SECRET_STRIPE_KEY: 'sk_live_x',
+    TYPECLAW_SECRET_EMPTY: '',
+    SHOP_ADDRESS: '1 Main St',
+    TYPECLAW_HOSTD_TOKEN: 'runtime',
+    PATH: '/evil',
+  })
+
+  test('withholds TYPECLAW_SECRET_* from bash', () => {
+    expect(resolveExposableEnvNames(declared)).toEqual(['SHOP_ADDRESS'])
+  })
+
+  test('lets the fill tool type ordinary and secret-tier vars, never runtime controls or empty values', () => {
+    expect(resolveFillableEnvNames(declared)).toEqual(['SHOP_ADDRESS', 'TYPECLAW_SECRET_STRIPE_KEY'])
   })
 })
