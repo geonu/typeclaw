@@ -34,10 +34,15 @@ export type CheckContext = {
   hasAgentFolder: boolean
 }
 
+export type DoctorStage = 'host' | 'container'
+
 export type DoctorCheck = {
   name: string
   category: DoctorCategory
   description: string
+  // Probes host-only state (Docker, hostd, host kernel, host paths, host-side
+  // secrets). Omitted when doctor runs inside the agent container.
+  hostOnly?: boolean
   applies?: (ctx: CheckContext) => boolean
   run: (ctx: CheckContext) => Promise<CheckResult>
 }
@@ -64,6 +69,7 @@ export type ReportSummary = {
 
 export type DoctorReport = {
   cwd: string
+  stage: DoctorStage
   hasAgentFolder: boolean
   entries: ReportEntry[]
   summary: ReportSummary

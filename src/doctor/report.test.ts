@@ -6,6 +6,7 @@ import type { DoctorReport } from './types'
 function makeReport(): DoctorReport {
   return {
     cwd: '/agent',
+    stage: 'host',
     hasAgentFolder: true,
     entries: [
       {

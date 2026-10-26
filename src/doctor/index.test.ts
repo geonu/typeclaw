@@ -83,6 +83,71 @@ describe('runDoctor', () => {
     expect(result.fixAttempts).toBeUndefined()
   })
 
+  test('container stage omits host-only checks and notes the omission', async () => {
+    const cwd = makeTmpAgentDir()
+    const portable = fakeCheck('portable', 'ok')
+    const hostOnly: DoctorCheck = { ...fakeCheck('host-probe', 'error'), hostOnly: true }
+
+    const result = await runDoctor({
+      cwd,
+      stage: 'container',
+      staticChecks: [portable, hostOnly],
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+    })
+
+    const names = result.initial.entries.map((e) => e.name)
+    expect(names).toEqual(['doctor.container-stage', 'portable'])
+    expect(result.initial.stage).toBe('container')
+    expect(result.initial.ok).toBe(true)
+  })
+
+  test('host stage still runs host-only checks', async () => {
+    const cwd = makeTmpAgentDir()
+    const hostOnly: DoctorCheck = { ...fakeCheck('host-probe', 'error'), hostOnly: true }
+
+    const result = await runDoctor({
+      cwd,
+      stage: 'host',
+      staticChecks: [hostOnly],
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+    })
+
+    expect(result.initial.entries.map((e) => e.name)).toEqual(['host-probe'])
+    expect(result.initial.ok).toBe(false)
+  })
+
+  test('container stage drops the docker and hostd probes from the real static checks', async () => {
+    const cwd = makeTmpAgentDir()
+
+    const result = await runDoctor({
+      cwd,
+      stage: 'container',
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+    })
+
+    const names = result.initial.entries.map((e) => e.name)
+    expect(names).toContain('agent-folder.git-repo')
+    expect(names).toContain('operations.incidents')
+    expect(names.some((n) => n.startsWith('docker.') || n.startsWith('hostd.') || n.startsWith('container.'))).toBe(
+      false,
+    )
+    expect(names.some((n) => n.startsWith('channel.'))).toBe(false)
+  })
+
+  test('container-stage plugin deferral points at a host or docker exec run', async () => {
+    const cwd = makeTmpAgentDir()
+
+    const result = await runDoctor({
+      cwd,
+      stage: 'container',
+      staticChecks: [],
+      fetchPluginChecks: async () => ({ kind: 'unreachable', reason: 'unauthorized' }),
+    })
+
+    const deferred = result.initial.entries.find((e) => e.name === 'plugin-checks-deferred')
+    expect(deferred?.details?.[0]).toContain('docker exec')
+  })
+
   test('marks ok=false when any warning or error appears', async () => {
     const cwd = makeTmpAgentDir()
     const result = await runDoctor({
