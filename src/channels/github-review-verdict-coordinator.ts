@@ -132,6 +132,11 @@ const ROUND_HEAD_MOVED_REASON =
   'The pull request head moved past the commit this review round covers, so a verdict from this round would describe stale code. ' +
   'Do not submit it; the new push starts its own review round.'
 
+const ROUND_SUPERSEDED_REASON =
+  'A newer review round for this pull request replaced the one this session carries, at the same head commit. ' +
+  'Its designated session submits the formal verdict, so do not submit one from this session and do not reply now: call `skip_response`. ' +
+  'Once that verdict lands, close out only this thread with the technical outcome; never mention sessions, carriers, or review rounds on the PR.'
+
 function reviewedHeadRequiredReason(currentHead: string): string {
   return (
     `The pull request head moved to ${currentHead} after this review round opened. ` +
@@ -923,6 +928,12 @@ async function evaluateRoundEligibility(
   // Re-read ownership after the await: a round registered meanwhile evicted this
   // one, and the registration below would evict it right back.
   const superseded = isGithubReviewRoundSuperseded(activeRound, now)
+  if (superseded && currentRoundHead === activeRound.headSha) {
+    logger.warn(
+      `[github] review round superseded at unchanged head pr=${activeRound.workspace}#${activeRound.prNumber} round=${activeRound.roundId} head=${currentRoundHead}`,
+    )
+    return { block: true, kind: 'round-ineligible', reason: ROUND_SUPERSEDED_REASON }
+  }
   if (superseded || (currentRoundHead !== activeRound.headSha && activeRound.kind === 'push')) {
     logger.warn(
       `[github] review round head moved pr=${activeRound.workspace}#${activeRound.prNumber} round=${activeRound.roundId} round_head=${activeRound.headSha} current_head=${currentRoundHead}${superseded ? ' superseded=true' : ''}`,

@@ -252,6 +252,35 @@ describe('review verdict idempotency guard', () => {
     expect(warnings.some((line) => line.includes('current_head=sha-newer'))).toBe(true)
   })
 
+  test('names a replaced round instead of a moved head when the head is unchanged', async () => {
+    // given: a newer reply generation replaced this carrier's round at the same head
+    const warnings: string[] = []
+    const replaced = { ...ROUND, kind: 'reply', roundId: 'reply-replaced' } as const
+    registerGithubReviewRound(replaced)
+    registerGithubReviewRound({ ...replaced, roundId: 'reply-newer', carrierThread: '202' })
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: resolver({}),
+      resolveHeadSha: async () => ROUND.headSha,
+      logger: { warn: (message) => warnings.push(message) },
+    })
+
+    // when
+    const decision = await g.guard({
+      callId: 'replaced-carrier',
+      workspace: WS,
+      prNumber: 60,
+      verdict: 'APPROVE',
+      round: replaced,
+      thread: '101',
+    })
+
+    // then
+    expect(decision).toMatchObject({ block: true, kind: 'round-ineligible' })
+    expect(decision?.reason).toContain('replaced')
+    expect(decision?.reason).not.toContain('head moved')
+    expect(warnings.some((line) => line.includes('superseded at unchanged head'))).toBe(true)
+  })
+
   test('keeps a reply-round carrier eligible after a push the adapter never turned into a round', async () => {
     // given: the author replied, then force-pushed; no push round supersedes the reply round
     const replyRound = { ...ROUND, kind: 'reply', roundId: 'reply-head-moved' } as const
