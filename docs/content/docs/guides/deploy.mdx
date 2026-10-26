@@ -87,6 +87,8 @@ typeclaw inspect <session-id>    # replay or live-tail a session
 
 `doctor` is read-only by default; `doctor --fix` is safe too — every fix it makes is git-committed so you can review and revert. `doctor --json` is there for CI.
 
+`doctor` also runs inside the agent container, from the agent's own bash or via `docker exec <container> bun /agent/node_modules/typeclaw/src/cli/index.ts doctor` (the image has no `typeclaw` on its `PATH`). There it omits the host-only checks (Docker, hostd, Bun, config mounts, AppArmor, file ownership, managed templates, channel credentials) and keeps the agent-folder, operational-incident, and plugin checks. Sandboxed bash does not receive the agent websocket token, so plugin checks need `docker exec` or a host run when a TUI token is configured.
+
 </Accordion>
 
 </Accordions>
