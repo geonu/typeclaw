@@ -48,7 +48,6 @@ export const GUARD_PRIVATE_SURFACE_READ = 'privateSurfaceRead'
 // keeps both enforcement points agreeing on which tools read no local path.
 const UNSCANNED_TOOLS = new Set(['bash', ...TOOLS_WITHOUT_LOCAL_FILE_OPERANDS])
 const VIRTUAL_FILESYSTEM_ROOTS = ['/proc', '/sys', '/dev', '/run'] as const
-const HARDLINK_SCAN_EXCLUDED_AGENT_DIRS = new Set(['.git', '.gitstore', 'node_modules'])
 
 // The bash sandbox hides the role's private surface — the working DIRECTORIES
 // (workspace/, memory/, sessions/), unconditional credential directories, and
@@ -96,7 +95,7 @@ export function checkPrivateSurfaceReadGuard(
     const localOperands = collectLocalOperandPaths(fileOperands)
 
     if (!canonicalEmpty) {
-      const identityScanner = createHardlinkIdentityScanner(agentDir, canonicalDirs, canonicalFiles, hooks)
+      const identityScanner = createHardlinkIdentityScanner(canonicalDirs, canonicalFiles, hooks)
       for (const candidate of collectPathCandidates(
         args,
         tool,
@@ -111,7 +110,7 @@ export function checkPrivateSurfaceReadGuard(
     }
 
     if (!roleEmpty) {
-      const identityScanner = createHardlinkIdentityScanner(agentDir, roleDirs, roleFiles, hooks)
+      const identityScanner = createHardlinkIdentityScanner(roleDirs, roleFiles, hooks)
       for (const candidate of collectPathCandidates(args, tool, nonFile, localOperands)) {
         const hit = matchHidden(candidate, agentDir, roleDirs, roleFiles, identityScanner, realpath)
         if (hit !== undefined) return privateSurfacePathBlock(tool, candidate, hit)
@@ -153,7 +152,7 @@ export function createPrivateSurfaceReadIdentityVerifier(
   const { canonicalDirs, canonicalFiles, roleDirs, roleFiles } = deniedSurface(options.agentDir, options.hidden)
   const deniedDirs = [...new Set([...canonicalDirs, ...roleDirs])]
   const deniedFiles = [...new Set([...canonicalFiles, ...roleFiles])]
-  const scanner = createHardlinkIdentityScanner(options.agentDir, deniedDirs, deniedFiles, hooks)
+  const scanner = createHardlinkIdentityScanner(deniedDirs, deniedFiles, hooks)
   return {
     check(identity) {
       if (identity.nlink <= 1) return undefined
@@ -171,14 +170,12 @@ export function checkPrivateSurfaceReadIdentityGuard(
 }
 
 function createHardlinkIdentityScanner(
-  agentDir: string,
   deniedDirs: readonly string[],
   deniedFiles: readonly string[],
   hooks: PrivateSurfaceIdentityScanHooks,
 ): HardlinkIdentityScanner {
   const lstat = hooks.lstat ?? lstatSync
   return new HardlinkIdentityScanner({
-    agentDir,
     deniedDirs,
     deniedFiles,
     maxEntries: hooks.maxEntries ?? MAX_HARDLINK_IDENTITY_ENTRIES,
@@ -221,22 +218,34 @@ function deniedSurface(
   }
 }
 
-function privateSurfacePathBlock(tool: string, candidate: string, hit: string): SecurityBlock {
+function privateSurfacePathBlock(tool: string, candidate: string, hit: IdentityHit): SecurityBlock {
+  if (hit.kind === 'unverified') return unverifiedIdentityBlock(tool, `argument \`${candidate}\``, hit.reason)
   return {
     block: true,
     reason: [
-      `Guard \`${GUARD_PRIVATE_SURFACE_READ}\` blocked ${tool}: argument \`${candidate}\` resolves to ${hit}, which is not available to LLM tools.`,
+      `Guard \`${GUARD_PRIVATE_SURFACE_READ}\` blocked ${tool}: argument \`${candidate}\` resolves to ${hit.path}, which is not available to LLM tools.`,
       'The bash sandbox masks the same path. Privileged roles cannot bypass canonical agent credential files; use host-side redacted diagnostics such as `typeclaw doctor`, `typeclaw provider list`, or `typeclaw channel list` instead.',
     ].join(' '),
   }
 }
 
-function privateSurfaceBlock(tool: string, hit: string): SecurityBlock {
+function privateSurfaceBlock(tool: string, hit: IdentityHit): SecurityBlock {
+  if (hit.kind === 'unverified') return unverifiedIdentityBlock(tool, 'input', hit.reason)
   return {
     block: true,
     reason: [
-      `Guard \`${GUARD_PRIVATE_SURFACE_READ}\` blocked ${tool}: input inode aliases ${hit}, which is not available to LLM tools.`,
+      `Guard \`${GUARD_PRIVATE_SURFACE_READ}\` blocked ${tool}: input inode aliases ${hit.path}, which is not available to LLM tools.`,
       'The bash sandbox masks the same path. Privileged roles cannot bypass canonical agent credential files; use host-side redacted diagnostics instead.',
+    ].join(' '),
+  }
+}
+
+function unverifiedIdentityBlock(tool: string, subject: string, reason: string): SecurityBlock {
+  return {
+    block: true,
+    reason: [
+      `Guard \`${GUARD_PRIVATE_SURFACE_READ}\` blocked ${tool}: ${subject} is a multiply-linked file, and the guard could not verify that none of its hardlinks lives under a protected credential or private path (${reason}).`,
+      'No protected alias was found; the verification itself failed. Ask the operator to resolve the reported condition or to replace the file with a single-link copy.',
     ].join(' '),
   }
 }
@@ -470,22 +479,25 @@ function matchHidden(
   deniedFiles: string[],
   identityScanner: HardlinkIdentityScanner,
   realpath: (candidate: string) => string,
-): string | undefined {
+): IdentityHit | undefined {
   const lexicalHit = matchLexicallyDenied(candidate, agentDir, deniedDirs, deniedFiles)
-  if (lexicalHit !== undefined) return lexicalHit
+  if (lexicalHit !== undefined) return { kind: 'denied', path: lexicalHit }
   const lexical = path.resolve(agentDir, candidate)
   const resolved = realpathRealIntendedPath(lexical, realpath)
   const virtualRoot = virtualFilesystemRoot(lexical) ?? virtualFilesystemRoot(resolved)
-  if (virtualRoot !== undefined) return `${virtualRoot}, a virtual or process-backed filesystem`
+  if (virtualRoot !== undefined)
+    return { kind: 'denied', path: `${virtualRoot}, a virtual or process-backed filesystem` }
   for (const file of deniedFiles) {
-    if (resolved === realpathRealIntendedPath(file, realpath) || hasSameFileIdentity(resolved, file)) return file
+    if (resolved === realpathRealIntendedPath(file, realpath) || hasSameFileIdentity(resolved, file)) {
+      return { kind: 'denied', path: file }
+    }
   }
   for (const dir of deniedDirs) {
     const realDir = realpathRealIntendedPath(dir, realpath)
     // realpathRealIntendedPath joins with the platform separator, so the
     // under-dir test must use path.sep too — a hardcoded "/" never matches the
     // "\"-joined paths a win32 test runner produces.
-    if (resolved === realDir || resolved.startsWith(`${realDir}${path.sep}`)) return dir
+    if (resolved === realDir || resolved.startsWith(`${realDir}${path.sep}`)) return { kind: 'denied', path: dir }
   }
   const identity = fileIdentity(resolved)
   if (identity !== undefined && identity.nlink > 1) {
@@ -633,7 +645,6 @@ function openDescriptorAnchoredDirectory(directory: string): HardlinkDirectory {
 }
 
 type HardlinkIdentityScannerOptions = {
-  agentDir: string
   deniedDirs: readonly string[]
   deniedFiles: readonly string[]
   maxEntries: number
@@ -643,160 +654,159 @@ type HardlinkIdentityScannerOptions = {
   afterEntryLstat?(candidate: string, stats: Stats): void
 }
 
+type IdentityHit = { kind: 'denied'; path: string } | { kind: 'unverified'; reason: string }
+
+// A multiply-linked input can expose protected bytes only through a link that
+// lives under a denied file or tree, so the proof inventories exactly those and
+// fails closed only when that inventory is incomplete. Where the input's other
+// links live otherwise — a read-only dev checkout mounted outside the agent
+// tree, a package-manager cache — and how large the visible tree is say nothing
+// about that; demanding every link be found inside the agent tree blocked those
+// legitimate reads outright without protecting anything the denied inventory
+// does not already cover.
 class HardlinkIdentityScanner {
   private remaining: number
-  private readonly visibleCounts = new Map<string, number>()
   private readonly deniedIdentities = new Map<string, string>()
   private readonly observedEntries = new Set<string>()
   private readonly openedDirectories = new Set<string>()
-  private visibleScanned = false
-  private deniedScanned = false
-  private visibleFailure: string | undefined
-  private deniedFailure: string | undefined
+  private readonly deniedFileStates = new Map<string, string>()
+  private readonly missingDeniedDirs: string[] = []
   private deniedFilesScanned = false
+  private deniedScanned = false
+  private failure: string | undefined
 
   constructor(private readonly options: HardlinkIdentityScannerOptions) {
     this.remaining = options.maxEntries
   }
 
-  check(identity: Pick<Stats, 'dev' | 'ino' | 'nlink'>): string | undefined {
+  check(identity: Pick<Stats, 'dev' | 'ino' | 'nlink'>): IdentityHit | undefined {
     const key = identityKey(identity)
     this.scanDeniedFiles()
-    if (this.deniedFailure !== undefined) return this.deniedFailure
+    if (this.failure !== undefined) return { kind: 'unverified', reason: this.failure }
     const deniedFile = this.deniedIdentities.get(key)
-    if (deniedFile !== undefined) return deniedFile
+    if (deniedFile !== undefined) return { kind: 'denied', path: deniedFile }
 
     this.scanDeniedTrees()
     const deniedAlias = this.deniedIdentities.get(key)
-    if (deniedAlias !== undefined) return deniedAlias
-    if (this.deniedFailure !== undefined) return this.deniedFailure
-
-    this.scanVisibleTree()
-    if (this.visibleFailure !== undefined) return this.visibleFailure
-    if ((this.visibleCounts.get(key) ?? 0) >= identity.nlink) return undefined
-    return 'hardlink identities could not be fully accounted within the agent tree'
+    if (deniedAlias !== undefined) return { kind: 'denied', path: deniedAlias }
+    if (this.failure !== undefined) return { kind: 'unverified', reason: this.failure }
+    return undefined
   }
 
   private scanDeniedFiles(): void {
     if (this.deniedFilesScanned) return
     this.deniedFilesScanned = true
     for (const file of this.options.deniedFiles) {
-      try {
-        const stats = this.options.lstat(file)
-        if (stats.isFile()) this.deniedIdentities.set(identityKey(stats), file)
-      } catch (error) {
-        if (isNotFoundError(error)) continue
-        this.deniedFailure = `denied-file hardlink identity could not be read: ${file}`
-        return
-      }
+      const state = this.deniedFileState(file)
+      if (state === undefined) return
+      this.deniedFileStates.set(file, state)
+      if (state.startsWith('file:')) this.deniedIdentities.set(state.slice('file:'.length), file)
     }
   }
 
-  private scanVisibleTree(): void {
-    if (this.visibleScanned) return
-    this.visibleScanned = true
-    const root = realpathRealIntendedPath(this.options.agentDir, this.options.realpath)
-    const deniedRoots = this.options.deniedDirs.map((dir) => realpathRealIntendedPath(dir, this.options.realpath))
-    const deniedFiles = new Set(
-      this.options.deniedFiles.map((file) => realpathRealIntendedPath(file, this.options.realpath)),
-    )
-    const rootStats = this.readRootStats(root, 'visible')
-    if (rootStats === undefined) return
-    const rootDirectory = this.openVerifiedDirectory(root, rootStats, 'visible')
-    if (rootDirectory === undefined) return
+  // Every root's descriptors and census snapshots stay open until the whole
+  // inventory completes, and absent denied paths must still be absent then.
+  // Verifying root by root would let a protected link move from a pending root
+  // into an already-closed one — or into a denied root or file path that was
+  // missing when visited — without either observation seeing it.
+  private scanDeniedTrees(): void {
+    if (this.deniedScanned) return
+    this.deniedScanned = true
+    const opened: Array<{ directory: string; reader: HardlinkDirectory; census: Stats }> = []
+    let scanCompleted = false
+    try {
+      for (const deniedDir of this.options.deniedDirs) {
+        if (!this.scanDeniedTree(deniedDir, opened)) return
+      }
+      scanCompleted = true
+    } finally {
+      this.verifyAndCloseDirectories(opened, scanCompleted)
+    }
+    this.verifyDeniedPathsUnchanged()
+  }
+
+  private scanDeniedTree(
+    deniedDir: string,
+    opened: Array<{ directory: string; reader: HardlinkDirectory; census: Stats }>,
+  ): boolean {
+    let rootStats: Stats
+    let root: string
+    try {
+      root = realpathRealIntendedPath(deniedDir, this.options.realpath)
+      rootStats = this.options.lstat(root)
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        this.missingDeniedDirs.push(deniedDir)
+        return true
+      }
+      this.failure = `denied-directory hardlink identity could not be read: ${deniedDir}`
+      return false
+    }
+    if (!rootStats.isDirectory()) {
+      this.failure = `denied-directory hardlink identity root is not a directory: ${deniedDir}`
+      return false
+    }
+    const rootDirectory = this.openVerifiedDirectory(root, rootStats)
+    if (rootDirectory === undefined) return false
+    opened.push({ directory: root, ...rootDirectory })
     const pending: Array<{
       directory: string
       reader: HardlinkDirectory
       identity: Pick<Stats, 'dev' | 'ino'>
       census: Stats
-      agentRoot: boolean
-    }> = [{ directory: root, ...rootDirectory, identity: rootStats, agentRoot: true }]
-    const opened: Array<{ directory: string; reader: HardlinkDirectory; census: Stats }> = [
-      { directory: root, ...rootDirectory },
-    ]
-    let scanCompleted = false
-    try {
-      while (pending.length > 0) {
-        const current = pending.pop()
-        if (current === undefined) break
-        const completed = this.forEachEntry(current, 'visible', (entry, stats) => {
-          const entryPath = path.join(current.directory, entry.name)
-          if (current.agentRoot && HARDLINK_SCAN_EXCLUDED_AGENT_DIRS.has(entry.name)) return true
-          if (deniedFiles.has(entryPath) || deniedRoots.some((deniedRoot) => isPathAtOrBelow(entryPath, deniedRoot))) {
-            return true
-          }
-          if (stats.isDirectory()) {
-            const child = this.openVerifiedChild(current, entry.name, stats, 'visible')
-            if (child === undefined) return false
-            const openedChild = { directory: entryPath, ...child }
-            pending.push({ ...openedChild, identity: stats, agentRoot: false })
-            opened.push(openedChild)
-          } else if (stats.isFile()) {
-            this.recordVisibleFile(stats)
-          }
-          return true
-        })
-        if (!completed) return
+    }> = [{ directory: root, ...rootDirectory, identity: rootStats }]
+    while (pending.length > 0) {
+      const current = pending.pop()
+      if (current === undefined) break
+      const completed = this.forEachEntry(current, (entry, stats) => {
+        const entryPath = path.join(current.directory, entry.name)
+        if (stats.isDirectory()) {
+          const child = this.openVerifiedChild(current, entry.name, stats)
+          if (child === undefined) return false
+          const openedChild = { directory: entryPath, ...child }
+          pending.push({ ...openedChild, identity: stats })
+          opened.push(openedChild)
+        } else if (stats.isFile()) {
+          this.deniedIdentities.set(identityKey(stats), deniedDir)
+        }
+        return true
+      })
+      if (!completed) return false
+    }
+    return true
+  }
+
+  private verifyDeniedPathsUnchanged(): void {
+    if (this.failure !== undefined) return
+    for (const [file, before] of this.deniedFileStates) {
+      const after = this.deniedFileState(file)
+      if (after === undefined) return
+      if (after !== before) {
+        this.failure = `denied file changed during hardlink inventory: ${file}`
+        return
       }
-      scanCompleted = true
-    } finally {
-      this.verifyAndCloseDirectories(opened, 'visible', scanCompleted)
+    }
+    for (const deniedDir of this.missingDeniedDirs) {
+      try {
+        this.options.lstat(realpathRealIntendedPath(deniedDir, this.options.realpath))
+      } catch (error) {
+        if (isNotFoundError(error)) continue
+        this.failure = `denied-directory hardlink identity could not be read: ${deniedDir}`
+        return
+      }
+      this.failure = `denied directory appeared during hardlink inventory: ${deniedDir}`
+      return
     }
   }
 
-  private scanDeniedTrees(): void {
-    if (this.deniedScanned) return
-    this.deniedScanned = true
-    for (const deniedDir of this.options.deniedDirs) {
-      let rootStats: Stats
-      let root: string
-      try {
-        root = realpathRealIntendedPath(deniedDir, this.options.realpath)
-        rootStats = this.options.lstat(root)
-      } catch (error) {
-        if (isNotFoundError(error)) continue
-        this.deniedFailure = `denied-directory hardlink identity could not be read: ${deniedDir}`
-        return
-      }
-      if (!rootStats.isDirectory()) {
-        this.deniedFailure = `denied-directory hardlink identity root is not a directory: ${deniedDir}`
-        return
-      }
-      const rootDirectory = this.openVerifiedDirectory(root, rootStats, 'denied')
-      if (rootDirectory === undefined) return
-      const pending: Array<{
-        directory: string
-        reader: HardlinkDirectory
-        identity: Pick<Stats, 'dev' | 'ino'>
-        census: Stats
-      }> = [{ directory: root, ...rootDirectory, identity: rootStats }]
-      const opened: Array<{ directory: string; reader: HardlinkDirectory; census: Stats }> = [
-        { directory: root, ...rootDirectory },
-      ]
-      let scanCompleted = false
-      try {
-        while (pending.length > 0) {
-          const current = pending.pop()
-          if (current === undefined) break
-          const completed = this.forEachEntry(current, 'denied', (entry, stats) => {
-            const entryPath = path.join(current.directory, entry.name)
-            if (stats.isDirectory()) {
-              const child = this.openVerifiedChild(current, entry.name, stats, 'denied')
-              if (child === undefined) return false
-              const openedChild = { directory: entryPath, ...child }
-              pending.push({ ...openedChild, identity: stats })
-              opened.push(openedChild)
-            } else if (stats.isFile()) {
-              this.recordDeniedFile(stats, deniedDir)
-            }
-            return true
-          })
-          if (!completed) return
-        }
-        scanCompleted = true
-      } finally {
-        this.verifyAndCloseDirectories(opened, 'denied', scanCompleted)
-      }
+  private deniedFileState(file: string): string | undefined {
+    try {
+      const stats = this.options.lstat(file)
+      return stats.isFile() ? `file:${identityKey(stats)}` : `other:${identityKey(stats)}`
+    } catch (error) {
+      if (isNotFoundError(error)) return 'missing'
+      this.failure = `denied-file hardlink identity could not be read: ${file}`
+      return undefined
     }
   }
 
@@ -806,7 +816,6 @@ class HardlinkIdentityScanner {
       reader: HardlinkDirectory
       identity: Pick<Stats, 'dev' | 'ino'>
     },
-    surface: 'visible' | 'denied',
     visit: (entry: Dirent, stats: Stats) => boolean,
   ): boolean {
     let completed = true
@@ -814,11 +823,11 @@ class HardlinkIdentityScanner {
       while (true) {
         const entry = current.reader.readSync()
         if (entry === null) break
-        if (!this.consumeEntry(surface)) {
+        if (!this.consumeEntry()) {
           completed = false
           break
         }
-        if (!this.claimEntryObservation(current.identity, entry.name, surface)) {
+        if (!this.claimEntryObservation(current.identity, entry.name)) {
           completed = false
           break
         }
@@ -827,7 +836,7 @@ class HardlinkIdentityScanner {
           stats = current.reader.lstatEntrySync(entry.name)
           this.options.afterEntryLstat?.(path.join(current.directory, entry.name), stats)
         } catch {
-          this.recordEntryFailure(path.join(current.directory, entry.name), surface)
+          this.recordEntryFailure(path.join(current.directory, entry.name))
           completed = false
           break
         }
@@ -838,59 +847,44 @@ class HardlinkIdentityScanner {
         try {
           const confirmed = current.reader.lstatEntrySync(entry.name)
           if (!sameDirectoryEntry(stats, confirmed)) {
-            this.recordEntryFailure(path.join(current.directory, entry.name), surface)
+            this.recordEntryFailure(path.join(current.directory, entry.name))
             completed = false
             break
           }
         } catch {
-          this.recordEntryFailure(path.join(current.directory, entry.name), surface)
+          this.recordEntryFailure(path.join(current.directory, entry.name))
           completed = false
           break
         }
       }
     } catch {
-      this.recordDirectoryFailure(current.directory, surface)
+      this.recordDirectoryFailure(current.directory)
       completed = false
     } finally {
       try {
         current.reader.finishSync()
       } catch {
-        this.recordDirectoryFailure(current.directory, surface)
+        this.recordDirectoryFailure(current.directory)
         completed = false
       }
     }
     return completed
   }
 
-  private readRootStats(directory: string, surface: 'visible' | 'denied'): Stats | undefined {
-    try {
-      const stats = this.options.lstat(directory)
-      if (!stats.isDirectory()) {
-        this.recordDirectoryFailure(directory, surface)
-        return undefined
-      }
-      return stats
-    } catch {
-      this.recordDirectoryFailure(directory, surface)
-      return undefined
-    }
-  }
-
   private openVerifiedDirectory(
     directory: string,
     expected: Pick<Stats, 'dev' | 'ino'>,
-    surface: 'visible' | 'denied',
   ): OpenedHardlinkDirectory | undefined {
     let reader: HardlinkDirectory | undefined
     try {
       reader = this.options.openDirectory(directory)
       const opened = reader.statSync()
       if (!opened.isDirectory() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
-        this.recordDirectoryFailure(directory, surface)
+        this.recordDirectoryFailure(directory)
         reader.closeSync()
         return undefined
       }
-      if (!this.claimDirectoryIdentity(opened, directory, surface)) {
+      if (!this.claimDirectoryIdentity(opened, directory)) {
         reader.closeSync()
         return undefined
       }
@@ -899,7 +893,7 @@ class HardlinkIdentityScanner {
       try {
         reader?.closeSync()
       } catch {}
-      this.recordDirectoryFailure(directory, surface)
+      this.recordDirectoryFailure(directory)
       return undefined
     }
   }
@@ -908,7 +902,6 @@ class HardlinkIdentityScanner {
     parent: { directory: string; reader: HardlinkDirectory },
     name: string,
     expected: Pick<Stats, 'dev' | 'ino'>,
-    surface: 'visible' | 'denied',
   ): OpenedHardlinkDirectory | undefined {
     const directory = path.join(parent.directory, name)
     let reader: HardlinkDirectory | undefined
@@ -916,11 +909,11 @@ class HardlinkIdentityScanner {
       reader = parent.reader.openChildSync(name)
       const opened = reader.statSync()
       if (!opened.isDirectory() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
-        this.recordDirectoryFailure(directory, surface)
+        this.recordDirectoryFailure(directory)
         reader.closeSync()
         return undefined
       }
-      if (!this.claimDirectoryIdentity(opened, directory, surface)) {
+      if (!this.claimDirectoryIdentity(opened, directory)) {
         reader.closeSync()
         return undefined
       }
@@ -929,92 +922,68 @@ class HardlinkIdentityScanner {
       try {
         reader?.closeSync()
       } catch {}
-      this.recordDirectoryFailure(directory, surface)
+      this.recordDirectoryFailure(directory)
       return undefined
     }
   }
 
   private verifyAndCloseDirectories(
     opened: Array<{ directory: string; reader: HardlinkDirectory; census: Stats }>,
-    surface: 'visible' | 'denied',
     verify: boolean,
   ): void {
     for (const current of opened.reverse()) {
       if (verify) {
         try {
           if (!sameDirectoryCensus(current.census, current.reader.statSync())) {
-            this.recordDirectoryFailure(current.directory, surface)
+            this.recordDirectoryFailure(current.directory)
           }
         } catch {
-          this.recordDirectoryFailure(current.directory, surface)
+          this.recordDirectoryFailure(current.directory)
         }
       }
       try {
         current.reader.closeSync()
       } catch {
-        this.recordDirectoryFailure(current.directory, surface)
+        this.recordDirectoryFailure(current.directory)
       }
     }
   }
 
-  private recordDirectoryFailure(directory: string, surface: 'visible' | 'denied'): void {
-    const reason = `${surface} hardlink identity directory could not be read: ${directory}`
-    if (surface === 'visible') this.visibleFailure = reason
-    else this.deniedFailure = reason
+  private recordDirectoryFailure(directory: string): void {
+    this.failure = `denied hardlink identity directory could not be read: ${directory}`
   }
 
-  private consumeEntry(surface: 'visible' | 'denied'): boolean {
+  private consumeEntry(): boolean {
     if (this.remaining > 0) {
       this.remaining -= 1
       return true
     }
-    const reason = `hardlink identity entry limit exceeded (${this.options.maxEntries})`
-    if (surface === 'visible') this.visibleFailure = reason
-    else this.deniedFailure = reason
+    this.failure = `hardlink identity entry limit exceeded (${this.options.maxEntries})`
     return false
   }
 
-  private recordEntryFailure(candidate: string, surface: 'visible' | 'denied'): void {
-    const reason = `${surface} hardlink identity could not be read: ${candidate}`
-    if (surface === 'visible') this.visibleFailure = reason
-    else this.deniedFailure = reason
+  private recordEntryFailure(candidate: string): void {
+    this.failure = `denied hardlink identity could not be read: ${candidate}`
   }
 
-  private claimDirectoryIdentity(
-    identity: Pick<Stats, 'dev' | 'ino'>,
-    directory: string,
-    surface: 'visible' | 'denied',
-  ): boolean {
+  private claimDirectoryIdentity(identity: Pick<Stats, 'dev' | 'ino'>, directory: string): boolean {
     const key = identityKey(identity)
     if (this.openedDirectories.has(key)) {
-      this.recordDirectoryFailure(directory, surface)
+      this.recordDirectoryFailure(directory)
       return false
     }
     this.openedDirectories.add(key)
     return true
   }
 
-  private claimEntryObservation(
-    directoryIdentity: Pick<Stats, 'dev' | 'ino'>,
-    name: string,
-    surface: 'visible' | 'denied',
-  ): boolean {
+  private claimEntryObservation(directoryIdentity: Pick<Stats, 'dev' | 'ino'>, name: string): boolean {
     const key = `${identityKey(directoryIdentity)}:${JSON.stringify(name)}`
     if (this.observedEntries.has(key)) {
-      this.recordEntryFailure(name, surface)
+      this.recordEntryFailure(name)
       return false
     }
     this.observedEntries.add(key)
     return true
-  }
-
-  private recordVisibleFile(stats: Stats): void {
-    const key = identityKey(stats)
-    this.visibleCounts.set(key, (this.visibleCounts.get(key) ?? 0) + 1)
-  }
-
-  private recordDeniedFile(stats: Stats, deniedRoot: string): void {
-    this.deniedIdentities.set(identityKey(stats), deniedRoot)
   }
 }
 
@@ -1038,10 +1007,6 @@ function sameDirectoryCensus(before: Stats, after: Stats): boolean {
     before.mtimeMs === after.mtimeMs &&
     before.ctimeMs === after.ctimeMs
   )
-}
-
-function isPathAtOrBelow(candidate: string, root: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}${path.sep}`)
 }
 
 function isPathKey(key: string | undefined): boolean {

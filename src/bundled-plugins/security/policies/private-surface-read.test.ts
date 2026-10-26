@@ -21,7 +21,11 @@ import path from 'node:path'
 import { TOOLS_WITHOUT_LOCAL_FILE_OPERANDS } from '@/agent/tools-without-local-file-operands'
 import type { HiddenPaths } from '@/sandbox'
 
-import { checkPrivateSurfaceReadGuard, checkPrivateSurfaceReadIdentityGuard } from './private-surface-read'
+import {
+  checkPrivateSurfaceReadGuard,
+  checkPrivateSurfaceReadIdentityGuard,
+  type PrivateSurfaceIdentityScanHooks,
+} from './private-surface-read'
 
 const AGENT = '/agent'
 const guestHidden: HiddenPaths = {
@@ -785,6 +789,21 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     return { agentDir, source, alias }
   }
 
+  // An agent whose role-hidden memory/ tree exists, plus a public file whose
+  // other link lives outside the agent tree (a read-only dev checkout, a
+  // package-manager cache).
+  function makeDeniedTreeFixture(): { agentDir: string; memoryDir: string; hidden: HiddenPaths; input: string } {
+    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-denied-tree-')))
+    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-denied-tree-external-')))
+    const memoryDir = path.join(agentDir, 'memory')
+    mkdirSync(memoryDir)
+    writeFileSync(path.join(memoryDir, 'note.md'), 'private')
+    const input = path.join(agentDir, 'input.txt')
+    writeFileSync(input, 'public')
+    linkSync(input, path.join(externalDir, 'input.txt'))
+    return { agentDir, memoryDir, hidden: { dirs: [memoryDir], files: [] }, input }
+  }
+
   test('rejects an inode matching a denied file', () => {
     const { agentDir, source, alias } = makeHardlinkFixture()
     expect(
@@ -817,7 +836,7 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     ).toBe(true)
   })
 
-  test('accepts a fully-accounted ordinary multi-link inode', () => {
+  test('accepts an ordinary multi-link inode with no denied alias', () => {
     const { agentDir, alias } = makeHardlinkFixture()
     expect(
       checkPrivateSurfaceReadIdentityGuard(
@@ -832,170 +851,222 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     ).toBeUndefined()
   })
 
-  test('does not count the same visible directory entry twice toward nlink', () => {
-    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-duplicate-external-')))
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-duplicate-agent-')))
-    const external = path.join(externalDir, 'external.txt')
-    const visible = path.join(agentDir, 'visible.txt')
-    writeFileSync(external, 'shared')
-    linkSync(external, visible)
-    const visibleEntry = readdirSync(agentDir, { withFileTypes: true }).find((entry) => entry.name === 'visible.txt')
-    if (visibleEntry === undefined) throw new Error('test fixture entry missing')
+  test('accepts a multi-link input outside the agent tree whose other link is also outside it', () => {
+    // given: a read-only dev checkout file mounted outside /agent, hardlinked elsewhere outside it
+    const { agentDir, hidden } = makeDeniedTreeFixture()
+    const checkoutDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-checkout-')))
+    const skill = path.join(checkoutDir, 'SKILL.md')
+    writeFileSync(skill, '# skill')
+    linkSync(skill, path.join(checkoutDir, 'SKILL.cache.md'))
+
+    // when
+    const result = checkPrivateSurfaceReadGuard(
+      { tool: 'read', args: { path: skill }, agentDir, hidden },
+      { openDirectory: opendirSync, lstat: localOnlyLstat(agentDir) },
+    )
+
+    // then
+    expect(result).toBeUndefined()
+  })
+
+  test('accepts a multi-link input when the visible agent tree exceeds the entry budget', () => {
+    const { agentDir, hidden, input } = makeDeniedTreeFixture()
+    for (let i = 0; i < 20; i++) writeFileSync(path.join(agentDir, `visible-${i}.txt`), 'x')
 
     expect(
       checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(visible) },
-        {
-          lstat: localOnlyLstat(agentDir),
-          openDirectory() {
-            let reads = 0
-            return {
-              readSync() {
-                reads += 1
-                return reads <= 2 ? visibleEntry : null
-              },
-              closeSync() {},
-            }
-          },
-        },
-      )?.block,
-    ).toBe(true)
+        { tool: 'read', agentDir, hidden, identity: statSync(input) },
+        { maxEntries: 3, openDirectory: opendirSync, lstat: localOnlyLstat(agentDir) },
+      ),
+    ).toBeUndefined()
   })
 
-  test('rejects one visible link renamed between observations while an external alias remains unscanned', () => {
-    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-rename-external-')))
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-rename-agent-')))
-    const external = path.join(externalDir, 'external.txt')
-    const beforeRename = path.join(agentDir, 'before.txt')
-    const afterRename = path.join(agentDir, 'after.txt')
-    writeFileSync(external, 'shared')
-    linkSync(external, beforeRename)
-    const beforeEntry = readdirSync(agentDir, { withFileTypes: true }).find((entry) => entry.name === 'before.txt')
-    if (beforeEntry === undefined) throw new Error('test fixture entry missing')
+  test('still rejects a denied-tree alias when the visible agent tree exceeds the entry budget', () => {
+    const { agentDir, memoryDir, hidden } = makeDeniedTreeFixture()
+    for (let i = 0; i < 20; i++) writeFileSync(path.join(agentDir, `visible-${i}.txt`), 'x')
+    const alias = path.join(agentDir, 'leak.txt')
+    linkSync(path.join(memoryDir, 'note.md'), alias)
 
-    expect(
-      checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(beforeRename) },
-        {
-          lstat: localOnlyLstat(agentDir),
-          openDirectory() {
-            let reads = 0
-            return {
-              readSync() {
-                reads += 1
-                if (reads === 1) return beforeEntry
-                if (reads === 2) {
-                  renameSync(beforeRename, afterRename)
-                  return (
-                    readdirSync(agentDir, { withFileTypes: true }).find((entry) => entry.name === 'after.txt') ?? null
-                  )
-                }
-                return null
-              },
-              closeSync() {},
-            }
-          },
-        },
-      )?.block,
-    ).toBe(true)
+    const result = checkPrivateSurfaceReadGuard(
+      { tool: 'read', args: { path: alias }, agentDir, hidden },
+      { maxEntries: 3, openDirectory: opendirSync, lstat: localOnlyLstat(agentDir) },
+    )
+
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain(memoryDir)
   })
 
-  test('rejects one visible link moved from a scanned sibling into a pending sibling', () => {
-    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-move-external-')))
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-move-agent-')))
-    const scannedDir = path.join(agentDir, 'scanned')
-    const pendingDir = path.join(agentDir, 'pending')
-    const external = path.join(externalDir, 'external.txt')
-    const beforeMove = path.join(scannedDir, 'visible.txt')
-    const afterMove = path.join(pendingDir, 'visible.txt')
+  test('rejects a denied alias moved from an unscanned denied subtree into a scanned one', () => {
+    const agentDir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-denied-move-')))
+    let moved = false
+    const memoryDir = path.join(agentDir, 'memory')
+    const scannedDir = path.join(memoryDir, 'scanned')
+    const pendingDir = path.join(memoryDir, 'pending')
+    mkdirSync(memoryDir)
     mkdirSync(scannedDir)
     mkdirSync(pendingDir)
-    writeFileSync(external, 'shared')
-    linkSync(external, beforeMove)
-    const rootEntries = readdirSync(agentDir, { withFileTypes: true })
-    const scannedEntry = rootEntries.find((entry) => entry.name === 'scanned')
-    const pendingEntry = rootEntries.find((entry) => entry.name === 'pending')
-    const visibleEntry = readdirSync(scannedDir, { withFileTypes: true }).find((entry) => entry.name === 'visible.txt')
-    if (scannedEntry === undefined || pendingEntry === undefined || visibleEntry === undefined) {
-      throw new Error('test fixture entry missing')
-    }
+    const beforeMove = path.join(pendingDir, 'secret.txt')
+    const afterMove = path.join(scannedDir, 'secret.txt')
+    const alias = path.join(agentDir, 'alias.txt')
+    writeFileSync(beforeMove, 'private')
+    linkSync(beforeMove, alias)
+    const memoryEntries = readdirSync(memoryDir, { withFileTypes: true })
+    const scannedEntry = memoryEntries.find((entry) => entry.name === 'scanned')
+    const pendingEntry = memoryEntries.find((entry) => entry.name === 'pending')
+    if (scannedEntry === undefined || pendingEntry === undefined) throw new Error('test fixture entry missing')
 
     expect(
       checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(beforeMove) },
+        { tool: 'read', agentDir, hidden: { dirs: [memoryDir], files: [] }, identity: statSync(alias) },
         {
           lstat: localOnlyLstat(agentDir),
           openDirectory(directory) {
-            if (directory === agentDir) {
+            if (directory === memoryDir) {
               const entries = [pendingEntry, scannedEntry]
               let index = 0
               return { readSync: () => entries[index++] ?? null, closeSync() {} }
             }
             if (directory === scannedDir) {
-              let read = false
               return {
-                readSync() {
-                  if (read) return null
-                  read = true
-                  return visibleEntry
-                },
+                readSync: () => null,
                 closeSync() {
                   renameSync(beforeMove, afterMove)
+                  moved = true
                 },
               }
             }
-            let read = false
-            return {
-              readSync() {
-                if (read) return null
-                read = true
-                return (
-                  readdirSync(pendingDir, { withFileTypes: true }).find((entry) => entry.name === 'visible.txt') ?? null
-                )
-              },
-              closeSync() {},
-            }
+            const reader = opendirSync(directory)
+            return { readSync: () => reader.readSync(), closeSync: () => reader.closeSync() }
           },
         },
       )?.block,
     ).toBe(true)
+    expect(moved).toBe(true)
+  })
+
+  // A protected link that leaves a not-yet-visited denied path for one the
+  // inventory already passed must not escape both observations.
+  function makeCrossRootFixture(): {
+    agentDir: string
+    sessionsDir: string
+    secret: string
+    alias: string
+    openFrom(onOpen: (directory: string) => void): PrivateSurfaceIdentityScanHooks
+  } {
+    const agentDir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-cross-root-')))
+    const sessionsDir = path.join(agentDir, 'sessions')
+    mkdirSync(sessionsDir)
+    const secret = path.join(sessionsDir, 'secret.txt')
+    const alias = path.join(agentDir, 'alias.txt')
+    writeFileSync(secret, 'private')
+    linkSync(secret, alias)
+    return {
+      agentDir,
+      sessionsDir,
+      secret,
+      alias,
+      openFrom(onOpen) {
+        return {
+          lstat: localOnlyLstat(agentDir),
+          openDirectory(directory) {
+            onOpen(directory)
+            const reader = opendirSync(directory)
+            return {
+              readSync: () => reader.readSync(),
+              closeSync: () => reader.closeSync(),
+            }
+          },
+        }
+      },
+    }
+  }
+
+  test('rejects a denied alias moved from a pending denied root into an already-enumerated one', () => {
+    const { agentDir, sessionsDir, secret, alias, openFrom } = makeCrossRootFixture()
+    const memoryDir = path.join(agentDir, 'memory')
+    mkdirSync(memoryDir)
+    let moved = false
+
+    const result = checkPrivateSurfaceReadIdentityGuard(
+      { tool: 'read', agentDir, hidden: { dirs: [memoryDir, sessionsDir], files: [] }, identity: statSync(alias) },
+      openFrom((directory) => {
+        if (moved || directory !== sessionsDir) return
+        moved = true
+        renameSync(secret, path.join(memoryDir, 'secret.txt'))
+      }),
+    )
+
+    expect(moved).toBe(true)
+    expect(result?.block).toBe(true)
+  })
+
+  test('rejects a denied alias moved into a denied root that was missing when visited', () => {
+    const { agentDir, sessionsDir, secret, alias, openFrom } = makeCrossRootFixture()
+    const memoryDir = path.join(agentDir, 'memory')
+    let moved = false
+
+    const result = checkPrivateSurfaceReadIdentityGuard(
+      { tool: 'read', agentDir, hidden: { dirs: [memoryDir, sessionsDir], files: [] }, identity: statSync(alias) },
+      openFrom((directory) => {
+        if (moved || directory !== sessionsDir) return
+        moved = true
+        mkdirSync(memoryDir)
+        renameSync(secret, path.join(memoryDir, 'secret.txt'))
+      }),
+    )
+
+    expect(moved).toBe(true)
+    expect(result?.block).toBe(true)
+  })
+
+  test('rejects a denied alias moved onto a denied file path that was missing when visited', () => {
+    const { agentDir, sessionsDir, secret, alias, openFrom } = makeCrossRootFixture()
+    const vault = path.join(agentDir, 'vault.txt')
+    let moved = false
+
+    const result = checkPrivateSurfaceReadIdentityGuard(
+      { tool: 'read', agentDir, hidden: { dirs: [sessionsDir], files: [vault] }, identity: statSync(alias) },
+      openFrom((directory) => {
+        if (moved || directory !== sessionsDir) return
+        moved = true
+        renameSync(secret, vault)
+      }),
+    )
+
+    expect(moved).toBe(true)
+    expect(result?.block).toBe(true)
   })
 
   test.skipIf(process.platform === 'linux')('fails closed without a descriptor traversal seam off Linux', () => {
-    const { agentDir, alias } = makeHardlinkFixture()
+    const { agentDir, hidden, input } = makeDeniedTreeFixture()
     expect(
       checkPrivateSurfaceReadIdentityGuard({
         tool: 'read',
         agentDir,
-        hidden: privilegedHidden,
-        identity: statSync(alias),
+        hidden,
+        identity: statSync(input),
       })?.block,
     ).toBe(true)
   })
 
-  test('does not count a regular entry swapped to a symlink during the scan', () => {
-    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-external-')))
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-swap-')))
-    const source = path.join(externalDir, 'source.txt')
-    const alias = path.join(agentDir, 'alias.txt')
-    const decoy = path.join(agentDir, 'decoy.txt')
-    writeFileSync(source, 'outside')
-    linkSync(source, alias)
-    writeFileSync(decoy, 'decoy')
+  test('fails closed when a denied-tree entry is swapped to a symlink during the scan', () => {
+    const { agentDir, memoryDir, hidden, input } = makeDeniedTreeFixture()
+    const decoy = path.join(memoryDir, 'note.md')
 
     expect(
       checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(alias) },
+        { tool: 'read', agentDir, hidden, identity: statSync(input) },
         {
+          lstat: localOnlyLstat(agentDir),
           openDirectory(directory) {
             const entries = readdirSync(directory, { withFileTypes: true })
             let index = 0
             return {
               readSync() {
                 const entry = entries[index++] ?? null
-                if (entry?.name === 'decoy.txt') {
+                if (entry?.name === 'note.md') {
                   unlinkSync(decoy)
-                  symlinkSync(source, decoy)
+                  symlinkSync(input, decoy)
                 }
                 return entry
               },
@@ -1007,65 +1078,38 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     ).toBe(true)
   })
 
-  test.skipIf(process.platform !== 'linux')('fails closed when a discovered directory is swapped to a symlink', () => {
-    const externalDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-dir-swap-external-')))
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-dir-swap-agent-')))
-    const visibleDir = path.join(agentDir, 'visible')
-    const parkedDir = path.join(externalDir, 'parked')
-    const first = path.join(visibleDir, 'first.txt')
-    const second = path.join(visibleDir, 'second.txt')
-    mkdirSync(visibleDir)
-    writeFileSync(first, 'public')
-    linkSync(first, second)
-    let swapped = false
+  test.skipIf(process.platform !== 'linux')(
+    'fails closed when a discovered denied directory is swapped to a symlink',
+    () => {
+      const { agentDir, memoryDir, hidden, input } = makeDeniedTreeFixture()
+      const parkedDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-dir-swap-parked-')))
+      const nestedDir = path.join(memoryDir, 'nested')
+      const parked = path.join(parkedDir, 'nested')
+      mkdirSync(nestedDir)
+      writeFileSync(path.join(nestedDir, 'deep.md'), 'private')
+      let swapped = false
 
-    expect(
-      checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(first) },
-        {
-          afterEntryLstat(candidate, stats) {
-            if (swapped || candidate !== visibleDir || !stats.isDirectory()) return
-            swapped = true
-            renameSync(visibleDir, parkedDir)
-            symlinkSync(parkedDir, visibleDir)
+      expect(
+        checkPrivateSurfaceReadIdentityGuard(
+          { tool: 'read', agentDir, hidden, identity: statSync(input) },
+          {
+            afterEntryLstat(candidate, stats) {
+              if (swapped || candidate !== nestedDir || !stats.isDirectory()) return
+              swapped = true
+              renameSync(nestedDir, parked)
+              symlinkSync(parked, nestedDir)
+            },
           },
-        },
-      )?.block,
-    ).toBe(true)
-  })
-
-  test('scans denied trees before accepting duplicated visible identity counts', () => {
-    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-denied-first-')))
-    const hiddenDir = path.join(agentDir, 'memory')
-    const visible = path.join(agentDir, 'visible.txt')
-    const hidden = path.join(hiddenDir, 'hidden.txt')
-    mkdirSync(hiddenDir)
-    writeFileSync(visible, 'shared')
-    linkSync(visible, hidden)
-
-    expect(
-      checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: { dirs: [hiddenDir], files: [] }, identity: statSync(visible) },
-        {
-          openDirectory(directory) {
-            const entries = readdirSync(directory, { withFileTypes: true })
-            const visibleEntry = entries.find((entry) => entry.name === 'visible.txt')
-            const queued = directory === agentDir && visibleEntry !== undefined ? [...entries, visibleEntry] : entries
-            let index = 0
-            return {
-              readSync() {
-                return queued[index++] ?? null
-              },
-              closeSync() {},
-            }
-          },
-        },
-      )?.block,
-    ).toBe(true)
-  })
+        )?.block,
+      ).toBe(true)
+    },
+  )
 
   test('shares one entry budget and inventory across every candidate in a guard call', () => {
     const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-hardlink-aggregate-')))
+    const memoryDir = path.join(agentDir, 'memory')
+    mkdirSync(memoryDir)
+    writeFileSync(path.join(memoryDir, 'note.md'), 'private')
     const first = path.join(agentDir, 'first.txt')
     const firstAlias = path.join(agentDir, 'first-alias.txt')
     const second = path.join(agentDir, 'second.txt')
@@ -1078,7 +1122,7 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     let reads = 0
     const maxEntries = 4
     const result = checkPrivateSurfaceReadGuard(
-      { tool: 'plugin_reader', args: { first, second }, agentDir, hidden: privilegedHidden },
+      { tool: 'plugin_reader', args: { first, second }, agentDir, hidden: { dirs: [memoryDir], files: [] } },
       {
         maxEntries,
         lstat: localOnlyLstat(agentDir),
@@ -1102,23 +1146,25 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
     expect(reads).toBeLessThanOrEqual(maxEntries + 1)
   })
 
-  test('fails closed when the entry budget is exhausted', () => {
-    const { agentDir, alias } = makeHardlinkFixture()
-    writeFileSync(path.join(agentDir, 'unrelated.txt'), 'x')
-    expect(
-      checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(alias) },
-        { maxEntries: 1 },
-      )?.reason,
-    ).toMatch(/bounded|entry|hardlink/i)
+  test('fails closed with a verification-failure reason when the denied inventory exceeds the budget', () => {
+    const { agentDir, memoryDir, hidden, input } = makeDeniedTreeFixture()
+    writeFileSync(path.join(memoryDir, 'other.md'), 'private')
+    const result = checkPrivateSurfaceReadIdentityGuard(
+      { tool: 'read', agentDir, hidden, identity: statSync(input) },
+      { maxEntries: 1, openDirectory: opendirSync, lstat: localOnlyLstat(agentDir) },
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('hardlink identity entry limit exceeded (1)')
+    expect(result?.reason).not.toContain('inode aliases')
   })
 
-  test('fails closed when a scanned directory cannot be read', () => {
-    const { agentDir, alias } = makeHardlinkFixture()
+  test('fails closed when a denied directory cannot be read', () => {
+    const { agentDir, hidden, input } = makeDeniedTreeFixture()
     expect(
       checkPrivateSurfaceReadIdentityGuard(
-        { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(alias) },
+        { tool: 'read', agentDir, hidden, identity: statSync(input) },
         {
+          lstat: localOnlyLstat(agentDir),
           openDirectory() {
             const error = new Error('denied')
             Object.assign(error, { code: 'EACCES' })
@@ -1126,31 +1172,28 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
           },
         },
       )?.reason,
-    ).toMatch(/bounded|read|hardlink/i)
+    ).toMatch(/could not verify.*could not be read/i)
   })
 
   test('stops pulling directory entries when the shared budget is exceeded', () => {
-    const { agentDir, alias } = makeHardlinkFixture()
-    const unrelated = path.join(agentDir, 'unrelated.txt')
-    writeFileSync(unrelated, 'x')
-    const unrelatedEntry = readdirSync(agentDir, { withFileTypes: true }).find(
-      (entry) => entry.name === 'unrelated.txt',
-    )
-    if (!unrelatedEntry) throw new Error('test fixture entry missing')
+    const { agentDir, memoryDir, hidden, input } = makeDeniedTreeFixture()
+    const noteEntry = readdirSync(memoryDir, { withFileTypes: true }).find((entry) => entry.name === 'note.md')
+    if (!noteEntry) throw new Error('test fixture entry missing')
 
     let reads = 0
     let closes = 0
     const maxEntries = 3
     const fakeEntryCount = 10_000
     const result = checkPrivateSurfaceReadIdentityGuard(
-      { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(alias) },
+      { tool: 'read', agentDir, hidden, identity: statSync(input) },
       {
         maxEntries,
+        lstat: localOnlyLstat(agentDir),
         openDirectory() {
           return {
             readSync() {
               reads += 1
-              return reads <= fakeEntryCount ? unrelatedEntry : null
+              return reads <= fakeEntryCount ? noteEntry : null
             },
             closeSync() {
               closes += 1
@@ -1166,12 +1209,13 @@ describe('private-surface-read guard — bounded hardlink identity proof', () =>
   })
 
   test('closes the directory handle when an incremental read fails', () => {
-    const { agentDir, alias } = makeHardlinkFixture()
+    const { agentDir, hidden, input } = makeDeniedTreeFixture()
     let closes = 0
 
     const result = checkPrivateSurfaceReadIdentityGuard(
-      { tool: 'read', agentDir, hidden: privilegedHidden, identity: statSync(alias) },
+      { tool: 'read', agentDir, hidden, identity: statSync(input) },
       {
+        lstat: localOnlyLstat(agentDir),
         openDirectory() {
           return {
             readSync() {
