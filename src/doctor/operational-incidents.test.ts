@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { IncidentLedger } from '@/operations'
+import { IncidentLedger, incidentsPath } from '@/operations'
 
 import { buildOperationalIncidentChecks } from './operational-incidents'
 
@@ -22,6 +22,29 @@ describe('operational incident doctor check', () => {
     expect(result.details).toEqual([
       'bash:command-not-found:opensoma count=2 first=2026-08-01T00:00:00.000Z last=2026-08-02T00:00:00.000Z',
     ])
+  })
+
+  test('defers instead of reporting ok when the ledger is sandbox-masked', async () => {
+    // given a ledger with an unresolved incident, seen through the 0-byte bwrap mask
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-doctor-masked-incidents-'))
+    const ledger = new IncidentLedger(cwd)
+    await ledger.record({ kind: 'bash-command-not-found', bin: 'opensoma' }, 'session-a', new Date())
+    await writeFile(incidentsPath(cwd), '')
+
+    // when
+    const result = await buildOperationalIncidentChecks()[0]!.run({ cwd, hasAgentFolder: true })
+
+    // then
+    expect(result.status).toBe('info')
+    expect(result.message).toContain('deferred')
+  })
+
+  test('reports ok when no ledger exists', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-doctor-no-incidents-'))
+
+    const result = await buildOperationalIncidentChecks()[0]!.run({ cwd, hasAgentFolder: true })
+
+    expect(result.status).toBe('ok')
   })
 
   test.each([

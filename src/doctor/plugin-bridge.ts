@@ -1,4 +1,4 @@
-import { resolveHostPort, resolveTuiToken, type DockerExec } from '@/container'
+import { CONTAINER_PORT, resolveHostPort, resolveTuiToken, type DockerExec } from '@/container'
 import type { ClientMessage, DoctorCheckPayload, DoctorFixPayload, ServerMessage } from '@/shared'
 
 import { boundedExec } from './bounded-exec'
@@ -10,6 +10,8 @@ export type PluginBridgeOptions = {
   // Injectable so a regression test can prove the late discovery path is
   // bounded too, not just the static checks.
   exec?: DockerExec
+  // Inside the container there is no `docker`; dial the agent's own loopback.
+  inContainer?: boolean
 }
 
 export type PluginBridgeFetchChecks = (opts: PluginBridgeOptions) => Promise<PluginBridgeChecksResult>
@@ -82,6 +84,9 @@ type DialResult = { kind: 'ok'; ws: WebSocket; timeoutMs: number } | { kind: 'un
 async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   let url = opts.url
+  if (url === undefined && opts.inContainer === true) {
+    url = resolveInContainerBridgeUrl(process.env)
+  }
   if (url === undefined) {
     try {
       // Plugin discovery runs AFTER the static checks, so it is the last place
@@ -146,6 +151,14 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
     return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }
   }
   return { kind: 'ok', ws, timeoutMs }
+}
+
+// Sandboxed model bash never receives TYPECLAW_TUI_TOKEN (src/sandbox/env-exposure.ts),
+// so there a token-protected server rejects the dial and plugin checks are
+// reported as deferred. `docker exec` keeps the container env and authenticates.
+export function resolveInContainerBridgeUrl(env: NodeJS.ProcessEnv): string {
+  const token = env.TYPECLAW_TUI_TOKEN
+  return buildBridgeUrl(CONTAINER_PORT, token !== undefined && token !== '' ? token : null)
 }
 
 function buildBridgeUrl(port: number, token: string | null): string {

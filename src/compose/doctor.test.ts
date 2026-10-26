@@ -22,6 +22,7 @@ function passingResult(cwd: string): DoctorRunResult {
   return {
     initial: {
       cwd,
+      stage: 'host',
       hasAgentFolder: true,
       entries: [],
       summary: { ok: 0, warning: 0, error: 0, info: 0, skipped: 0 },

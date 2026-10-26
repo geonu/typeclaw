@@ -34,28 +34,37 @@ import type { DoctorCheck } from './types'
 export function buildStaticChecks(opts: { dockerExec?: DockerExec } & FileOwnershipDeps = {}): DoctorCheck[] {
   const dockerExec = opts.dockerExec ?? defaultDockerExec
 
+  // hostOnly: the container sees neither Docker nor hostd, carries its own Bun,
+  // runs under a different uid namespace, cannot stat host mount sources, and
+  // masks secrets.json from model bash, so these checks would only report
+  // false failures there. The managed Dockerfile/.gitignore are rewritten by
+  // the host on every `typeclaw start`.
   return [
-    dockerDaemon(boundedExec(dockerExec)),
-    bunRuntime(),
+    hostOnly(dockerDaemon(boundedExec(dockerExec))),
+    hostOnly(bunRuntime()),
     agentFolderInitialized(),
-    agentFolderDockerfileTemplate(),
-    agentFolderGitignoreTemplate(),
+    hostOnly(agentFolderDockerfileTemplate()),
+    hostOnly(agentFolderGitignoreTemplate()),
     agentFolderNodeModules(),
     agentFolderGitRepo(),
-    agentFileOwnership(opts),
-    configValid(),
-    apparmorSandbox(),
-    hostdHomeWritable(),
-    wslDriveMount(),
-    windowsSecretPerms(),
-    hostdReachable(),
-    hostdRegistration(),
-    windowsBindMount(),
-    containerState(boundedExec(dockerExec)),
-    containerHostPort(dockerExec),
+    hostOnly(agentFileOwnership(opts)),
+    hostOnly(configValid()),
+    hostOnly(apparmorSandbox()),
+    hostOnly(hostdHomeWritable()),
+    hostOnly(wslDriveMount()),
+    hostOnly(windowsSecretPerms()),
+    hostOnly(hostdReachable()),
+    hostOnly(hostdRegistration()),
+    hostOnly(windowsBindMount()),
+    hostOnly(containerState(boundedExec(dockerExec))),
+    hostOnly(containerHostPort(dockerExec)),
     ...buildOperationalIncidentChecks(),
-    ...buildChannelChecks(),
+    ...buildChannelChecks().map(hostOnly),
   ]
+}
+
+function hostOnly(check: DoctorCheck): DoctorCheck {
+  return { ...check, hostOnly: true }
 }
 
 function dockerDaemon(exec: DockerExec): DoctorCheck {

@@ -1,5 +1,6 @@
 import type { DockerExec } from '@/container'
 import { findAgentDir } from '@/init'
+import { TYPECLAW_CLI_ENTRY } from '@/init/dockerfile'
 import type { DoctorCheckPayload } from '@/shared'
 
 import { buildStaticChecks } from './checks'
@@ -12,12 +13,14 @@ import {
   type PluginBridgeFetchFix,
   type PluginBridgeFixResult,
 } from './plugin-bridge'
+import { detectDoctorStage } from './stage'
 import type {
   CheckContext,
   CheckResult,
   DoctorCheck,
   DoctorReport,
   DoctorRunResult,
+  DoctorStage,
   FixAttempt,
   ReportEntry,
   ReportSummary,
@@ -26,6 +29,7 @@ import type {
 
 export * from './types'
 export { buildStaticChecks } from './checks'
+export { detectDoctorStage } from './stage'
 export { formatJson, formatReport } from './report'
 export { buildCommitMessage, commitAutoFixes } from './commit'
 export {
@@ -39,6 +43,7 @@ export type RunDoctorOptions = {
   cwd?: string
   only?: string[]
   fix?: boolean
+  stage?: DoctorStage
   // Docker executor used by BOTH the static checks and plugin discovery, so a
   // test can drive the whole command against one wedged daemon and prove the
   // real sequencing terminates — not just each half in isolation.
@@ -53,27 +58,32 @@ export async function runDoctor(opts: RunDoctorOptions = {}): Promise<DoctorRunR
   const cwd = opts.cwd ?? findAgentDir(process.cwd()) ?? process.cwd()
   const hasAgentFolder = findAgentDir(cwd) === cwd
   const ctx: CheckContext = { cwd, hasAgentFolder }
+  const stage = opts.stage ?? detectDoctorStage(cwd)
+  const inContainer = stage === 'container'
 
   const staticChecks = (
     opts.staticChecks ?? buildStaticChecks(opts.dockerExec === undefined ? {} : { dockerExec: opts.dockerExec })
-  ).filter((c) => isAllowed(c, opts.only, c.category))
+  ).filter((c) => isAllowed(c, opts.only, c.category) && !(inContainer && c.hostOnly === true))
   const staticResults = await runStaticChecks(staticChecks, ctx)
 
   const fetchPluginChecks =
     opts.fetchPluginChecks ??
     ((bridgeOpts) =>
-      defaultFetchPluginDoctorChecks(
-        opts.dockerExec === undefined ? bridgeOpts : { ...bridgeOpts, exec: opts.dockerExec },
-      ))
+      defaultFetchPluginDoctorChecks({
+        ...bridgeOpts,
+        inContainer,
+        ...(opts.dockerExec === undefined ? {} : { exec: opts.dockerExec }),
+      }))
   const pluginResults = await collectPluginChecks(fetchPluginChecks, ctx, opts.only)
 
-  const initial = buildReport(ctx, staticResults, pluginResults)
+  const initial = buildReport(ctx, stage, staticResults, pluginResults)
 
   if (opts.fix !== true || initial.ok) {
     return { initial }
   }
 
-  const fetchPluginFix = opts.fetchPluginFix ?? defaultFetchPluginDoctorFix
+  const fetchPluginFix =
+    opts.fetchPluginFix ?? ((bridgeOpts) => defaultFetchPluginDoctorFix({ ...bridgeOpts, inContainer }))
   const attempts: FixAttempt[] = []
   attempts.push(...(await runStaticFixes(staticResults, ctx)))
   attempts.push(...(await runPluginFixes(pluginResults.entries, fetchPluginFix, ctx)))
@@ -84,7 +94,7 @@ export async function runDoctor(opts: RunDoctorOptions = {}): Promise<DoctorRunR
 
   const finalStaticResults = await runStaticChecks(staticChecks, ctx)
   const finalPluginResults = await collectPluginChecks(fetchPluginChecks, ctx, opts.only)
-  const final = buildReport(ctx, finalStaticResults, finalPluginResults)
+  const final = buildReport(ctx, stage, finalStaticResults, finalPluginResults)
 
   return { initial, fixAttempts: attempts, commit, final }
 }
@@ -133,8 +143,14 @@ async function collectPluginChecks(
   return { entries: filtered.map((payload) => ({ payload })), reachability }
 }
 
-function buildReport(ctx: CheckContext, staticResults: StaticResult[], plugin: PluginCollect): DoctorReport {
+function buildReport(
+  ctx: CheckContext,
+  stage: DoctorStage,
+  staticResults: StaticResult[],
+  plugin: PluginCollect,
+): DoctorReport {
   const entries: ReportEntry[] = []
+  if (stage === 'container') entries.push(containerStageNote())
   for (const { check, result } of staticResults) {
     const entry: ReportEntry = {
       name: check.name,
@@ -152,7 +168,7 @@ function buildReport(ctx: CheckContext, staticResults: StaticResult[], plugin: P
   }
 
   if (ctx.hasAgentFolder && plugin.reachability.kind !== 'ok') {
-    entries.push(reachabilityNote(plugin.reachability))
+    entries.push(reachabilityNote(plugin.reachability, stage))
   }
 
   for (const { payload } of plugin.entries) {
@@ -174,10 +190,25 @@ function buildReport(ctx: CheckContext, staticResults: StaticResult[], plugin: P
 
   const summary = summarize(entries)
   const ok = summary.error === 0 && summary.warning === 0
-  return { cwd: ctx.cwd, hasAgentFolder: ctx.hasAgentFolder, entries, summary, ok }
+  return { cwd: ctx.cwd, stage, hasAgentFolder: ctx.hasAgentFolder, entries, summary, ok }
 }
 
-function reachabilityNote(reach: PluginBridgeChecksResult): ReportEntry {
+function containerStageNote(): ReportEntry {
+  return {
+    name: 'doctor.container-stage',
+    category: 'runtime',
+    description: 'doctor is running inside the agent container',
+    source: 'static',
+    status: 'info',
+    message: 'running inside the agent container; host-only checks were omitted',
+    details: [
+      'Docker, hostd, Bun, config mounts, AppArmor, file ownership, managed templates, and channel credentials are checked only on the host.',
+      'Run `typeclaw doctor` in the agent folder on the host for the full report.',
+    ],
+  }
+}
+
+function reachabilityNote(reach: PluginBridgeChecksResult, stage: DoctorStage): ReportEntry {
   const message =
     reach.kind === 'unreachable'
       ? `plugin checks deferred: container not reachable (${reach.reason})`
@@ -191,7 +222,12 @@ function reachabilityNote(reach: PluginBridgeChecksResult): ReportEntry {
     source: 'static',
     status: 'info',
     message,
-    details: ['Run `typeclaw start` then re-run `typeclaw doctor` to include plugin checks.'],
+    details:
+      stage === 'container'
+        ? [
+            `Sandboxed bash does not receive the agent websocket token. Run \`typeclaw doctor\` on the host, or \`docker exec <container> bun ${TYPECLAW_CLI_ENTRY} doctor\`, to include plugin checks.`,
+          ]
+        : ['Run `typeclaw start` then re-run `typeclaw doctor` to include plugin checks.'],
   }
 }
 
