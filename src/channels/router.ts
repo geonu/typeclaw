@@ -957,6 +957,10 @@ type LiveSession = {
       })
     | null
   githubReviewThreadCloseoutDecisionTurn: number | null
+  // When this session last resolved its review thread. A reply written before
+  // that resolution was already answered by it, so it must not re-arm the
+  // close-out obligation and force a duplicate reply or the canned fallback.
+  githubReviewThreadResolvedAt: { rootCommentId: string; at: number } | null
   // Round key of a close-out that arrived while the round was still pending
   // completion. Replayed once the round completes; see replayPendingRoundCloseouts.
   pendingGithubReviewRoundCloseout: string | null
@@ -3289,6 +3293,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
                 deferred: true,
               },
         githubReviewThreadCloseoutDecisionTurn: null,
+        githubReviewThreadResolvedAt: null,
         pendingGithubReviewRoundCloseout: null,
         promptQueue: [],
         pendingSystemReminders: [],
@@ -5537,7 +5542,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.emptyStopAfterToolWorkArmed = false
           live.willingnessNudges = 0
           live.logicalTurnStartedAt = now()
-          const stampedCloseout = batch.findLast((item) => item.githubReviewThreadCloseout !== undefined)
+          const latestStampedCloseout = batch.findLast((item) => item.githubReviewThreadCloseout !== undefined)
+          const resolvedAt = live.githubReviewThreadResolvedAt
+          const alreadyResolved =
+            latestStampedCloseout?.githubReviewThreadCloseout !== undefined &&
+            resolvedAt !== null &&
+            resolvedAt.rootCommentId === latestStampedCloseout.githubReviewThreadCloseout.rootCommentId &&
+            latestStampedCloseout.ts > 0 &&
+            latestStampedCloseout.ts <= resolvedAt.at
+          if (alreadyResolved) {
+            logger.info(
+              `[channels] ${live.keyId} github_thread_closeout_already_resolved root=${resolvedAt?.rootCommentId} reply_ts=${latestStampedCloseout?.ts} resolved_at=${resolvedAt?.at}`,
+            )
+          }
+          const stampedCloseout = alreadyResolved ? undefined : latestStampedCloseout
           const deferredCloseout =
             stampedCloseout?.githubReviewThreadCloseout === undefined &&
             live.githubReviewThreadCloseout !== null &&
@@ -9436,6 +9454,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
     if (live !== undefined) {
       live.githubReviewThreadCloseoutDecisionTurn = live.turnSeq
+      if (args.decision === 'resolved' && args.thread !== null) {
+        live.githubReviewThreadResolvedAt = { rootCommentId: args.thread, at: now() }
+      }
       clearGithubReviewThreadCloseout(live)
       logger.info(
         `[channels] ${live.keyId} github_thread_closeout_decided decision=${args.decision} turn=${live.turnSeq}`,
