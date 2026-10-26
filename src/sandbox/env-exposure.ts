@@ -54,6 +54,11 @@ const EXECUTION_CONTROL_ENV_NAMES = new Set<string>([
 
 const EXECUTION_CONTROL_ENV_PREFIXES = ['GIT_CONFIG', 'BASH_FUNC_'] as const
 
+// Operator opt-in for values the model may type into a page but never read:
+// withheld from bash, reachable only through the runtime-side
+// `browser_fill_secret` tool, which types the value without returning it.
+export const SECRET_ENV_PREFIX = 'TYPECLAW_SECRET_'
+
 const GIT_IDENTITY_ENV_NAMES = [
   'GIT_AUTHOR_NAME',
   'GIT_AUTHOR_EMAIL',
@@ -70,6 +75,7 @@ function isWithheldEnvName(name: string): boolean {
   if (RESERVED_SANDBOX_ENV_NAMES.has(name)) return true
   if (RUNTIME_OWNED_ENV_NAMES.has(name)) return true
   if (EXECUTION_CONTROL_ENV_NAMES.has(name)) return true
+  if (name.startsWith(SECRET_ENV_PREFIX)) return true
   return EXECUTION_CONTROL_ENV_PREFIXES.some((prefix) => name === prefix || name.startsWith(prefix))
 }
 
@@ -91,6 +97,20 @@ export function resolveExposableEnvNames(
   }
   for (const name of GIT_IDENTITY_ENV_NAMES) {
     if (runtimeEnv[name]?.length && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+// Names `browser_fill_secret` may type: everything bash already sees, plus the
+// withheld `TYPECLAW_SECRET_*` tier. Runtime controls and sandbox-owned names
+// stay out, so the tool can't plant a runtime token into a page for read-back.
+export function resolveFillableEnvNames(
+  declaredEnv: ReadonlyMap<string, string>,
+  runtimeEnv: Readonly<Record<string, string | undefined>> = {},
+): string[] {
+  const out = resolveExposableEnvNames(declaredEnv, runtimeEnv)
+  for (const [name, fileValue] of declaredEnv) {
+    if (fileValue.length > 0 && name.startsWith(SECRET_ENV_PREFIX)) out.push(name)
   }
   return out
 }
