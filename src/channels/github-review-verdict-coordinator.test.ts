@@ -252,6 +252,35 @@ describe('review verdict idempotency guard', () => {
     expect(warnings.some((line) => line.includes('current_head=sha-newer'))).toBe(true)
   })
 
+  test('names a replaced round instead of a moved head when the head is unchanged', async () => {
+    // given: a newer reply generation replaced this carrier's round at the same head
+    const warnings: string[] = []
+    const replaced = { ...ROUND, kind: 'reply', roundId: 'reply-replaced' } as const
+    registerGithubReviewRound(replaced)
+    registerGithubReviewRound({ ...replaced, roundId: 'reply-newer', carrierThread: '202' })
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: resolver({}),
+      resolveHeadSha: async () => ROUND.headSha,
+      logger: { warn: (message) => warnings.push(message) },
+    })
+
+    // when
+    const decision = await g.guard({
+      callId: 'replaced-carrier',
+      workspace: WS,
+      prNumber: 60,
+      verdict: 'APPROVE',
+      round: replaced,
+      thread: '101',
+    })
+
+    // then
+    expect(decision).toMatchObject({ block: true, kind: 'round-ineligible' })
+    expect(decision?.reason).toContain('replaced')
+    expect(decision?.reason).not.toContain('head moved')
+    expect(warnings.some((line) => line.includes('superseded at unchanged head'))).toBe(true)
+  })
+
   test('keeps a reply-round carrier eligible after a push the adapter never turned into a round', async () => {
     // given: the author replied, then force-pushed; no push round supersedes the reply round
     const replyRound = { ...ROUND, kind: 'reply', roundId: 'reply-head-moved' } as const
@@ -622,6 +651,63 @@ describe('review verdict idempotency guard', () => {
     expect(first).toEqual({ ...ROUND, kind: 'reply', roundId: 'reply-1' })
     expect(second).toEqual(first)
     expect(nonce).toBe(1)
+  })
+
+  test('joins replies to the pending push round re-checking the same head', () => {
+    // given: a push re-check round is pending for the head
+    const push = registerGithubReviewRound(ROUND)
+    const reply = { workspace: WS, prNumber: 60, headSha: ROUND.headSha, blockingReviewId: 7001 }
+
+    // when: replies to the blocking review land on two sibling threads
+    const first = registerOrJoinReplyReviewRound({ ...reply, thread: '202' })
+    const second = registerOrJoinReplyReviewRound({ ...reply, thread: '303' })
+
+    // then: every thread shares the push round and its carrier
+    expect(first).toEqual(ROUND)
+    expect(second).toEqual(ROUND)
+    expect(push).toEqual(ROUND)
+    expect(isGithubReviewRoundPending(ROUND)).toBe(true)
+  })
+
+  test('joins a same-head push re-check to the pending reply round', () => {
+    // given
+    const reply = registerOrJoinReplyReviewRound({
+      workspace: WS,
+      prNumber: 60,
+      headSha: ROUND.headSha,
+      blockingReviewId: 7001,
+      thread: '202',
+      generateRoundId: () => 'reply-first',
+    })
+
+    // when
+    const joined = registerGithubReviewRound(ROUND)
+
+    // then: the reply round keeps owning the head instead of being evicted
+    expect(joined).toEqual(reply)
+    expect(isGithubReviewRoundPending(reply)).toBe(true)
+    expect(isGithubReviewRoundPending(ROUND)).toBe(false)
+  })
+
+  test('a push to a new head still replaces the pending reply round', () => {
+    // given
+    const reply = registerOrJoinReplyReviewRound({
+      workspace: WS,
+      prNumber: 60,
+      headSha: ROUND.headSha,
+      blockingReviewId: 7001,
+      thread: '202',
+      generateRoundId: () => 'reply-old-head',
+    })
+    const nextPush = { ...ROUND, roundId: 'push-new-head', headSha: 'sha-next' }
+
+    // when
+    const registered = registerGithubReviewRound(nextPush)
+
+    // then
+    expect(registered).toEqual(nextPush)
+    expect(isGithubReviewRoundPending(reply)).toBe(false)
+    expect(isGithubReviewRoundPending(nextPush)).toBe(true)
   })
 
   test('makes a lone reply the carrier of its singleton generation', () => {
