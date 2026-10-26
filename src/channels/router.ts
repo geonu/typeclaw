@@ -5544,11 +5544,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             live.githubReviewThreadCloseout.deferred
               ? live.githubReviewThreadCloseout
               : null
+          // A follow-up on a thread whose close-out is still open continues the
+          // same obligation. Keep its start so a reviewer spawned for it before
+          // this batch still holds the close-out instead of being treated as an
+          // earlier turn's child and letting the canned fallback race its verdict.
+          const openCloseout = live.githubReviewThreadCloseout
+          const continuedStartedAt = (next: GithubReviewThreadCloseout): number =>
+            openCloseout !== null &&
+            openCloseout.workspace === next.workspace &&
+            openCloseout.prNumber === next.prNumber &&
+            openCloseout.rootCommentId === next.rootCommentId
+              ? openCloseout.startedAt
+              : live.logicalTurnStartedAt
           live.githubReviewThreadCloseout =
             stampedCloseout?.githubReviewThreadCloseout !== undefined
               ? {
                   ...stampedCloseout.githubReviewThreadCloseout,
-                  startedAt: live.logicalTurnStartedAt,
+                  startedAt: continuedStartedAt(stampedCloseout.githubReviewThreadCloseout),
                   correctionAttempts: 0,
                   deferred: false,
                 }
@@ -5556,7 +5568,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
                 ? null
                 : {
                     ...deferredCloseout,
-                    startedAt: live.logicalTurnStartedAt,
+                    startedAt: continuedStartedAt(deferredCloseout),
                     correctionAttempts: 0,
                   }
           if (stampedCloseout?.githubReviewThreadCloseout !== undefined) {
