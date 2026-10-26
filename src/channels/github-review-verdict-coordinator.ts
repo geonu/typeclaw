@@ -235,6 +235,11 @@ let reviewRounds = new Map<string, ReviewRoundState>()
 let expiredReviewRoundKeys = new Set<string>()
 type ReplyReviewRoundGeneration = { round: GithubReviewFollowupRound; createdAt: number }
 let replyReviewRoundGenerations = new Map<string, ReplyReviewRoundGeneration>()
+// Round key -> key of the same-head counterpart it joined. Queued and persisted
+// inbounds still carry the joiner's round and re-register it later; the alias
+// keeps resolving to the canonical round after it completes, where the
+// pending-only counterpart lookup would no longer find it.
+let joinedRoundAliases = new Map<string, string>()
 let tokenSeq = 0
 
 export function githubReviewRoundKey(round: GithubReviewFollowupRound): string {
@@ -262,7 +267,7 @@ export function registerOrJoinReplyReviewRound(input: {
     replyReviewRoundGenerations.delete(correlationKey)
   }
 
-  const round: GithubReviewFollowupRound = {
+  const candidate: GithubReviewFollowupRound = {
     kind: 'reply',
     roundId: (input.generateRoundId ?? randomUUID)(),
     workspace: input.workspace,
@@ -270,8 +275,8 @@ export function registerOrJoinReplyReviewRound(input: {
     headSha: input.headSha,
     carrierThread: input.thread,
   }
+  const round = registerGithubReviewRound(candidate, currentTime, now) ?? candidate
   replyReviewRoundGenerations.set(correlationKey, { round, createdAt: currentTime })
-  registerGithubReviewRound(round, currentTime, now)
   return round
 }
 
@@ -282,6 +287,25 @@ export function registerGithubReviewRound(
 ): GithubReviewFollowupRound | null {
   const key = githubReviewRoundKey(round)
   if (expiredReviewRoundKeys.has(key)) return null
+  // A push round and a reply round on the same head ask for the same fresh
+  // verdict. A push re-check and a reply to the blocking review routinely land
+  // together, and evicting one for the other split sibling threads across
+  // rounds: the evicted carrier's verdict was then refused as superseded while
+  // the surviving round's carrier never owned the blocking obligation. Join the
+  // pending counterpart instead so one carrier answers for the head.
+  if (activeReviewRoundState(key, now) === undefined) {
+    const aliasKey = joinedRoundAliases.get(key)
+    if (aliasKey !== undefined) {
+      const canonical = activeReviewRoundState(aliasKey, now)
+      if (canonical !== undefined) return canonical.round
+      joinedRoundAliases.delete(key)
+    }
+    const counterpart = pendingSameHeadCounterpart(round, now)
+    if (counterpart !== undefined) {
+      joinedRoundAliases.set(key, githubReviewRoundKey(counterpart.round))
+      return counterpart.round
+    }
+  }
   for (const [candidateKey, state] of reviewRounds) {
     if (activeReviewRoundState(candidateKey, now) === undefined) continue
     if (candidateKey !== key && state.round.workspace === round.workspace && state.round.prNumber === round.prNumber) {
@@ -317,6 +341,9 @@ export function restoreGithubReviewRound(
   const registered = registerGithubReviewRound(round, createdAt, now)
   if (registered === null) return null
   const key = githubReviewRoundKey(registered)
+  // Joined a same-head counterpart: its live state is authoritative, and this
+  // record's persisted status describes a different round.
+  if (key !== githubReviewRoundKey(round)) return registered
   // Restoration is monotonic: a persisted `pending` record must never overwrite
   // an unexpired round this process already completed. A sibling session that
   // was idle-GC'd before completion still carries the stale status, and letting
@@ -460,6 +487,18 @@ export function isGithubReviewRoundSuperseded(round: GithubReviewFollowupRound, 
   )
 }
 
+function pendingSameHeadCounterpart(round: GithubReviewFollowupRound, now: () => number): ReviewRoundState | undefined {
+  expireReviewRounds(now)
+  return Array.from(reviewRounds.values()).find(
+    (state) =>
+      state.status === 'pending' &&
+      state.round.kind !== round.kind &&
+      state.round.workspace === round.workspace &&
+      state.round.prNumber === round.prNumber &&
+      state.round.headSha === round.headSha,
+  )
+}
+
 function pendingPushRoundForPr(
   target: { workspace: string; prNumber: number },
   now: () => number = Date.now,
@@ -596,6 +635,9 @@ export function abortGithubReviewStateForPr(
   for (const [generationKey, generation] of replyReviewRoundGenerations) {
     if (generation.round.workspace !== workspace || generation.round.prNumber !== prNumber) continue
     replyReviewRoundGenerations.delete(generationKey)
+  }
+  for (const aliasKey of joinedRoundAliases.keys()) {
+    if (aliasKey.startsWith(`${key}#`)) joinedRoundAliases.delete(aliasKey)
   }
 
   // A draft abort abandons local work, not output already observed on GitHub.
@@ -1034,6 +1076,7 @@ export function __resetReviewVerdictGuardForTest(): void {
   reviewRounds = new Map<string, ReviewRoundState>()
   expiredReviewRoundKeys = new Set<string>()
   replyReviewRoundGenerations = new Map<string, ReplyReviewRoundGeneration>()
+  joinedRoundAliases = new Map<string, string>()
   tokenSeq = 0
   processEffectiveResolver = async () => ({ ok: false })
   processHeadShaResolver = async () => null

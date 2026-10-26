@@ -56,6 +56,7 @@ import { BackgroundObligationStore } from './background-obligations'
 import { recoveryNoticeCause } from './continuity-types'
 import {
   __resetReviewVerdictGuardForTest,
+  completeGithubReviewRound,
   configureReviewVerdictCoordinator,
   guardGithubReviewRoundDismissal,
   isGithubReviewRoundComplete,
@@ -20856,6 +20857,35 @@ describe('ChannelRouter GitHub review-thread closeout obligation', () => {
     // then: the anti-strand fallback still fires
     expect(logs.filter((line) => line.includes('github_thread_closeout_retry'))).toHaveLength(1)
     expect(sent.map((message) => message.text)).toEqual([GITHUB_REVIEW_THREAD_CLOSEOUT_FALLBACK_TEXT])
+    __resetReviewVerdictGuardForTest()
+    await router.stop()
+  })
+
+  test('a queued same-head push re-check keeps the reply round it joined after that round completes', async () => {
+    // given: a pending reply round, and a push re-check for the same head queued behind it
+    __resetReviewVerdictGuardForTest()
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { nowRef: { value: Date.now() } })
+    router.registerOutbound('github', async () => ({ ok: true }))
+    const pushRound = { ...replyRound, kind: 'push', roundId: 'push-round' } as const
+    await router.route(closeoutInbound({ githubReviewRound: replyRound }))
+    await router.route(
+      closeoutInbound({
+        externalMessageId: 'recheck',
+        text: 'PR #123 received new commits.',
+        githubReviewRound: pushRound,
+        githubReviewThreadCloseout: undefined,
+      }),
+    )
+
+    // when: the reply round completes before the queued push drains
+    completeGithubReviewRound(replyRound)
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(GITHUB_KEY)
+
+    // then: the push re-check resolves to the completed reply round instead of replacing it
+    expect(isGithubReviewRoundComplete(replyRound)).toBe(true)
+    expect(isGithubReviewRoundPending(pushRound)).toBe(false)
     __resetReviewVerdictGuardForTest()
     await router.stop()
   })
