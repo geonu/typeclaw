@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
 
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
@@ -2101,6 +2102,8 @@ describe('createServer session lifecycle', () => {
     const registry = new LiveSessionRegistry()
     const starting = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
+    const ending = Promise.withResolvers<void>()
+    const releaseEnd = Promise.withResolvers<void>()
     const events: string[] = []
     let resourcesDisposed = 0
     const hooks = createHookBus()
@@ -2115,8 +2118,10 @@ describe('createServer session lifecycle', () => {
           await release.promise
           events.push('start-exit')
         },
-        'session.end': () => {
+        'session.end': async () => {
           events.push('end')
+          ending.resolve()
+          await releaseEnd.promise
         },
       },
     )
@@ -2138,10 +2143,15 @@ describe('createServer session lifecycle', () => {
     await waitForState(() => server!.pendingWebSockets === 0)
     const disposedBeforeStartFinished = session.disposeCalls
     release.resolve()
+    await ending.promise
+    await setImmediate()
+    const registeredBeforeEndFinished = registry.size()
+    releaseEnd.resolve()
     await waitForState(() => resourcesDisposed > 0 || registry.size() > 0)
 
     expect(disposedBeforeStartFinished).toBe(0)
     expect(events).toEqual(['start-enter', 'start-exit', 'end'])
+    expect(registeredBeforeEndFinished).toBe(0)
     expect(registry.size()).toBe(0)
     expect(session.disposeCalls).toBe(1)
     expect(resourcesDisposed).toBe(1)
