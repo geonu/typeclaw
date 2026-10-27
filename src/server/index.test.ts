@@ -2,10 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
 
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
+import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
 import { readContinuationState } from '@/agent/todo/continuation-state'
@@ -2045,6 +2047,162 @@ describe('createServer plugin hooks', () => {
 })
 
 describe('createServer session lifecycle', () => {
+  test('close during session creation disposes the late result without registering it', async () => {
+    const session = createFakeSession()
+    const registry = new LiveSessionRegistry()
+    const creating = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let resourcesDisposed = 0
+    const lifecycleEvents: string[] = []
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'lifecycle',
+      '/tmp/typeclaw-lifecycle-test',
+      { info() {}, warn() {}, error() {} },
+      {
+        'session.start': () => {
+          lifecycleEvents.push('start')
+        },
+        'session.end': () => {
+          lifecycleEvents.push('end')
+        },
+      },
+    )
+    server = createServer({
+      port: 0,
+      agentDir: '/tmp/typeclaw-lifecycle-test',
+      pluginRuntime: makeRuntime({ registry: EMPTY_REGISTRY, hooks }),
+      liveSessionRegistry: registry,
+      createSession: async () => {
+        creating.resolve()
+        await release.promise
+        return {
+          session,
+          dispose: async () => {
+            resourcesDisposed++
+          },
+        }
+      },
+    }).start()
+    const { ws } = await connect(`ws://localhost:${server.port}`)
+    await creating.promise
+    ws.close()
+    await waitForState(() => server!.pendingWebSockets === 0)
+    release.resolve()
+    await waitForState(() => resourcesDisposed > 0 || registry.size() > 0)
+
+    expect(registry.size()).toBe(0)
+    expect(session.disposeCalls).toBe(1)
+    expect(resourcesDisposed).toBe(1)
+    expect(lifecycleEvents).toEqual([])
+  })
+
+  test('close during session.start waits for the hook and never registers a closed session', async () => {
+    const session = createFakeSession()
+    const registry = new LiveSessionRegistry()
+    const starting = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const ending = Promise.withResolvers<void>()
+    const releaseEnd = Promise.withResolvers<void>()
+    const events: string[] = []
+    let resourcesDisposed = 0
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'lifecycle',
+      '/tmp/typeclaw-lifecycle-test',
+      { info() {}, warn() {}, error() {} },
+      {
+        'session.start': async () => {
+          events.push('start-enter')
+          starting.resolve()
+          await release.promise
+          events.push('start-exit')
+        },
+        'session.end': async () => {
+          events.push('end')
+          ending.resolve()
+          await releaseEnd.promise
+        },
+      },
+    )
+    server = createServer({
+      port: 0,
+      agentDir: '/tmp/typeclaw-lifecycle-test',
+      pluginRuntime: makeRuntime({ registry: EMPTY_REGISTRY, hooks }),
+      liveSessionRegistry: registry,
+      createSession: async () => ({
+        session,
+        dispose: async () => {
+          resourcesDisposed++
+        },
+      }),
+    }).start()
+    const { ws } = await connect(`ws://localhost:${server.port}`)
+    await starting.promise
+    ws.close()
+    await waitForState(() => server!.pendingWebSockets === 0)
+    const disposedBeforeStartFinished = session.disposeCalls
+    release.resolve()
+    await ending.promise
+    await setImmediate()
+    const registeredBeforeEndFinished = registry.size()
+    releaseEnd.resolve()
+    await waitForState(() => resourcesDisposed > 0 || registry.size() > 0)
+
+    expect(disposedBeforeStartFinished).toBe(0)
+    expect(events).toEqual(['start-enter', 'start-exit', 'end'])
+    expect(registeredBeforeEndFinished).toBe(0)
+    expect(registry.size()).toBe(0)
+    expect(session.disposeCalls).toBe(1)
+    expect(resourcesDisposed).toBe(1)
+  })
+
+  for (const failure of ['session', 'resources'] as const) {
+    test(`unregisters a closed session even when ${failure} disposal throws`, async () => {
+      const session = createFakeSession()
+      const registry = new LiveSessionRegistry()
+      const errors: string[] = []
+      let resourcesDisposed = 0
+      if (failure === 'session') {
+        session.dispose = () => {
+          session.disposeCalls++
+          throw new Error('session_disposal_failed')
+        }
+      }
+      server = createServer({
+        port: 0,
+        liveSessionRegistry: registry,
+        logger: {
+          info() {},
+          warn() {},
+          error: (message) => {
+            errors.push(message)
+          },
+        },
+        createSession: async () => ({
+          session,
+          dispose: async () => {
+            resourcesDisposed++
+            if (failure === 'resources') throw new Error('resource_disposal_failed')
+          },
+        }),
+      }).start()
+      const { ws, waitFor } = await connect(`ws://localhost:${server.port}`)
+      await waitFor((message) => message.type === 'connected')
+      expect(registry.size()).toBe(1)
+      ws.close()
+      await waitForState(() => registry.size() === 0)
+
+      expect(session.disposeCalls).toBe(1)
+      expect(resourcesDisposed).toBe(1)
+      expect(
+        errors.some((message) =>
+          message.includes(failure === 'session' ? 'session_disposal_failed' : 'resource_disposal_failed'),
+        ),
+      ).toBe(true)
+    })
+  }
+
   test('disposes the underlying AgentSession on websocket close', async () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session)

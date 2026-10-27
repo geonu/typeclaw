@@ -117,6 +117,18 @@ TUI ↔ WS depends on the stream-driven drain loop:
 - **Queued prompts render in execution order.** The TUI doesn't append the `> text` line at submit. Server emits `prompt_started` from the drain loop right after `shift()`. Old containers running pre-`prompt_started` server code leave typed messages invisible — restart after any protocol change.
 - **`interrupt`-delivery prompts abort on receipt.** `session.abort()` from the publish path; in-flight `prompt()` resolves immediately; drain dequeues the new prompt.
 
+### TUI connection lifetime
+
+`src/server/index.ts` coordinates WebSocket close with asynchronous session creation
+and `session.start`. A late factory result for a disconnected client is disposed
+without starting hooks, registering a live session, or subscribing to the stream.
+If `session.start` has already begun, close waits for it before `session.end`.
+
+Agent-session and auxiliary-resource disposal are attempted independently. Cleanup
+failures go to the operator log; live-registry removal still runs in `finally`.
+An established session stays registered until its end hooks and disposal finish,
+so diagnostics do not confuse unfinished cleanup with a completed close.
+
 ## Cron split (celery-style)
 
 `src/cron/scheduler.ts` is a pure clock — computes next-fire and invokes `onFire(job)`. Knows nothing about execution. `src/cron/consumer.ts` subscribes, dispatches, and coalesces by jobId. Long-running jobs no longer block scheduler ticks; overlapping fires are dropped by the consumer with a warning.
