@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { isWindows } from '@/shared'
 
-import { _setCurlBinaryForTest, _setSearchRetryForTest } from './ddg'
+import { _setCurlBinaryForTest, _setDdgPacingForTest, _setSearchRetryForTest } from './ddg'
 import { webSearchTool } from './websearch'
 
 const onWindows = isWindows()
@@ -51,11 +51,13 @@ describe.skipIf(onWindows)('websearch tool: web (DuckDuckGo)', () => {
     // Collapse the production CAPTCHA backoff so the retry path doesn't burn
     // real seconds: one attempt, zero-delay sleep.
     _setSearchRetryForTest({ attempts: 1, sleep: async () => {} })
+    _setDdgPacingForTest({ intervalMs: 0 })
   })
 
   afterEach(() => {
     _setCurlBinaryForTest(null)
     _setSearchRetryForTest(null)
+    _setDdgPacingForTest(null)
     rmSync(scratchDir, { recursive: true, force: true })
   })
 
