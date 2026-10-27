@@ -9,6 +9,7 @@ import { waitFor } from '@/test-helpers/wait-for'
 import { CurlImpersonateError } from './curl-impersonate'
 import {
   _setCurlBinaryForTest,
+  _setDdgPacingForTest,
   _setSearchRetryForTest,
   DDG_CONCURRENCY,
   DdgCaptchaError,
@@ -274,11 +275,13 @@ describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
   beforeEach(() => {
     scratchDir = mkdtempSync(join(tmpdir(), 'ddg-search-test-'))
     _setSearchRetryForTest({ attempts: 3, sleep: async () => {} })
+    _setDdgPacingForTest({ intervalMs: 0 })
   })
 
   afterEach(() => {
     _setCurlBinaryForTest(null)
     _setSearchRetryForTest(null)
+    _setDdgPacingForTest(null)
     rmSync(scratchDir, { recursive: true, force: true })
   })
 
@@ -289,16 +292,88 @@ describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
     _setCurlBinaryForTest(path)
   }
 
-  test('retries past a transient CAPTCHA and returns results', async () => {
-    // given: first response is a CAPTCHA, the next is a real SERP
-    installFakeBinary(fakeCurlSwitching(scratchDir, CAPTCHA_SERP, RESULT_SERP))
+  test('a CAPTCHA is not retried and starts a cooldown that sends no requests until it ends', async () => {
+    // given: every profile is challenged until an "ok" flag file appears
+    let clock = 0
+    _setDdgPacingForTest({ intervalMs: 0, cooldownMs: 60_000, now: () => clock })
+    const counter = join(scratchDir, 'count')
+    const okFlag = join(scratchDir, 'ok')
+    installFakeBinary(`
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
+  i=$((i + 1))
+done
+N=$(cat ${counter} 2>/dev/null || echo 0)
+echo $((N + 1)) > ${counter}
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+if [ -f ${okFlag} ]; then printf '%s' '${RESULT_SERP}'; else printf '%s' '${CAPTCHA_SERP}'; fi
+printf '%s' "$RENDERED"
+`)
 
-    // when
+    // when: the first search is challenged on every profile
+    await expect(ddgSearch('q', 10)).rejects.toBeInstanceOf(DdgCaptchaError)
+
+    // then: one request per profile, no retries
+    expect(await Bun.file(counter).text()).toBe('2\n')
+
+    // when: a search inside the cooldown, even after DDG would answer again
+    writeFileSync(okFlag, '', 'utf8')
+    clock = 59_999
+
+    // then: fails fast without touching the network
+    await expect(ddgSearch('q', 10)).rejects.toBeInstanceOf(DdgCaptchaError)
+    expect(await Bun.file(counter).text()).toBe('2\n')
+
+    // when: the cooldown has elapsed
+    clock = 60_000
     const results = await ddgSearch('q', 10)
 
-    // then
-    expect(results).toHaveLength(1)
+    // then: searches resume normally
     expect(results[0]?.url).toBe('https://ok.example/')
+    expect(await Bun.file(counter).text()).toBe('3\n')
+  })
+
+  test('a search waiting for its request slot sends nothing once a concurrent search starts the cooldown', async () => {
+    // given: every response is a CAPTCHA, and each pacing wait is held until released
+    const held: Array<() => void> = []
+    _setDdgPacingForTest({
+      intervalMs: 1_000,
+      now: () => 0,
+      sleep: () => new Promise<void>((resolve) => held.push(resolve)),
+    })
+    const counter = join(scratchDir, 'count')
+    installFakeBinary(fakeCurlSwitching(scratchDir, CAPTCHA_SERP, CAPTCHA_SERP))
+
+    // when: A sends its first profile while B waits for a slot, then A waits for its second
+    const a = ddgSearch('a', 10)
+    const b = ddgSearch('b', 10)
+    await waitFor(() => held.length === 2, { description: 'B and A second-profile waits are queued' })
+
+    // when: A's second profile is challenged and starts the cooldown
+    held[1]?.()
+    await expect(a).rejects.toBeInstanceOf(DdgCaptchaError)
+    expect(await Bun.file(counter).text()).toBe('2\n')
+
+    // then: releasing B's wait sends no request
+    held[0]?.()
+    await expect(b).rejects.toBeInstanceOf(DdgCaptchaError)
+    expect(await Bun.file(counter).text()).toBe('2\n')
+  })
+
+  test('spaces a burst of searches by the minimum request interval, without delaying the first', async () => {
+    // given: a frozen clock and a sleep that records each requested wait
+    const waits: number[] = []
+    _setDdgPacingForTest({ intervalMs: 1_000, now: () => 0, sleep: async (ms) => void waits.push(ms) })
+    installFakeBinary(fakeCurlSwitching(scratchDir, RESULT_SERP, RESULT_SERP))
+
+    // when: three searches fire at once
+    const results = await Promise.all([ddgSearch('a', 10), ddgSearch('b', 10), ddgSearch('c', 10)])
+
+    // then: all succeed, the first goes out immediately, the rest queue one interval apart
+    expect(results.every((r) => r[0]?.url === 'https://ok.example/')).toBe(true)
+    expect(waits.sort((x, y) => x - y)).toEqual([1_000, 2_000])
   })
 
   test('falls back to the next impersonation profile within one attempt when the first is challenged', async () => {
@@ -474,8 +549,8 @@ printf '%s' "$RENDERED"
 })
 
 describe('isTransientSearchError', () => {
-  test('a CAPTCHA is transient', () => {
-    expect(isTransientSearchError(new DdgCaptchaError())).toBe(true)
+  test('a CAPTCHA is NOT retried (the cooldown handles it)', () => {
+    expect(isTransientSearchError(new DdgCaptchaError())).toBe(false)
   })
 
   test('a curl connection timeout (exit 28) is transient', () => {

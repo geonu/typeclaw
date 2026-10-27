@@ -12,6 +12,8 @@ icon: Search
 
 **DDG search uses the Firefox, then Safari, profiles — not Chrome.** Since 2026-10, DDG-lite answers every desktop Chrome fingerprint (`curl_chrome124`–`curl_chrome146`) with a 202 challenge from IPs where `curl_firefox147` and `curl_safari184` still get a normal SERP. `ddgSearch` tries `DDG_PROFILES` in order and reports a CAPTCHA only when every profile is challenged. `web_fetch` keeps the `curl_chrome136` default.
 
+**DDG requests are paced and a CAPTCHA triggers a cooldown, not a retry.** The `DDG_CONCURRENCY` cap bounds parallelism but not rate, so a subagent fan-out could still trip the gate. `ddgSearch` spaces every outbound request by `DDG_MIN_REQUEST_INTERVAL_MS` (process-wide). When every profile is challenged it stops sending for `DDG_CAPTCHA_COOLDOWN_MS`; calls inside the window fail fast with `DdgCaptchaError` and touch no network, because each request to a boxed IP keeps the box alive. Only curl connection timeouts are retried.
+
 ## The pin
 
 Pinned to **lexiforest's actively-maintained fork** (Chrome 136+ profiles, v1.5.6, May 2026) — **not** the original `lwthiker/curl-impersonate` whose last release carries Chrome ≤116 (two years stale, useless against current DDG fingerprinting). The constant block in `dockerfile.ts` calls this out by name.

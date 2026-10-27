@@ -40,6 +40,41 @@ const searchLimiter = createKeyedSemaphore({ concurrency: DDG_CONCURRENCY })
 
 const DDG_KEY = 'ddg'
 
+// The concurrency cap bounds parallelism, not rate: a subagent fan-out of ~10
+// searches inside 30s still tripped DDG's gate behind a cap of 2 (production
+// incident, 2026-10-27). Spacing every outbound request by a minimum interval
+// turns such a burst into a queue instead of a volley.
+export const DDG_MIN_REQUEST_INTERVAL_MS = 1_500
+
+// Once DDG serves a challenge to every profile the source IP is boxed for
+// minutes, and each further request keeps the box alive. Stop sending for a
+// cooldown window: calls inside it fail fast without touching the network.
+export const DDG_CAPTCHA_COOLDOWN_MS = 5 * 60_000
+
+type Pacing = {
+  intervalMs: number
+  cooldownMs: number
+  now: () => number
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>
+}
+const DEFAULT_PACING: Pacing = {
+  intervalMs: DDG_MIN_REQUEST_INTERVAL_MS,
+  cooldownMs: DDG_CAPTCHA_COOLDOWN_MS,
+  now: () => Date.now(),
+  sleep: abortableSleep,
+}
+let pacing: Pacing = DEFAULT_PACING
+let nextRequestAt = 0
+let cooldownUntil = 0
+
+// Test-only seam: swaps the clock/sleep and interval/cooldown, and resets the
+// process-wide pacing state so tests don't leak a cooldown into each other.
+export function _setDdgPacingForTest(override: Partial<Pacing> | null): void {
+  pacing = { ...DEFAULT_PACING, ...override }
+  nextRequestAt = 0
+  cooldownUntil = 0
+}
+
 export type DdgResult = {
   title: string
   url: string
@@ -63,9 +98,14 @@ export async function ddgSearch(query: string, limit: number, signal?: AbortSign
       withSearchRetry(
         async () => {
           for (const binary of DDG_PROFILES) {
+            if (pacing.now() < cooldownUntil) throw new DdgCaptchaError()
+            await waitForRequestSlot(signal)
+            // A concurrent search may have started the cooldown while this one waited.
+            if (pacing.now() < cooldownUntil) throw new DdgCaptchaError()
             const html = await fetchDdgHtml(query, signal, binary)
             if (!isCaptcha(html)) return parseDdgHtml(html).slice(0, limit)
           }
+          cooldownUntil = pacing.now() + pacing.cooldownMs
           throw new DdgCaptchaError()
         },
         { ...retryOverride, shouldRetry: isTransientSearchError, signal },
@@ -74,18 +114,38 @@ export async function ddgSearch(query: string, limit: number, signal?: AbortSign
   )
 }
 
-// Both a tripped CAPTCHA and a bare connection timeout are transient: DDG's
-// gate lifts after a cooldown, and an egress timeout is almost always a
-// momentary network blip (the incident that motivated this: an agent's egress
-// timed out for a few minutes, then recovered). Retrying both under the bounded
-// `withSearchRetry` backoff turns an otherwise-unbounded model-driven retry
-// loop into at most `attempts` code-level tries that then surface a single
-// terminal error. A hard network failure (DNS, refused, TLS) is NOT retried —
-// it won't fix itself on a re-run and would just burn the budget.
+// Only a bare connection timeout is retried: an egress timeout is almost
+// always a momentary network blip (the incident that motivated this: an agent's
+// egress timed out for a few minutes, then recovered). Retrying under the
+// bounded `withSearchRetry` backoff turns an otherwise-unbounded model-driven
+// retry loop into at most `attempts` code-level tries. A CAPTCHA is NOT retried:
+// DDG's gate lasts minutes, far beyond the retry backoff, and every retry keeps
+// the box alive — the cooldown above handles it instead. A hard network failure
+// (DNS, refused, TLS) is NOT retried either; it won't fix itself on a re-run.
 export function isTransientSearchError(error: unknown): boolean {
-  if (error instanceof DdgCaptchaError) return true
-  if (error instanceof CurlImpersonateError && isCurlExitTimeout(error)) return true
-  return false
+  return error instanceof CurlImpersonateError && isCurlExitTimeout(error)
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function waitForRequestSlot(signal?: AbortSignal): Promise<void> {
+  const now = pacing.now()
+  const slot = Math.max(now, nextRequestAt)
+  nextRequestAt = slot + pacing.intervalMs
+  if (slot > now) await pacing.sleep(slot - now, signal)
 }
 
 export class DdgCaptchaError extends Error {
