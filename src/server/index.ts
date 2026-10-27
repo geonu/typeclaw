@@ -220,6 +220,7 @@ type SessionState = {
   // generation that ran session.start. A plugin reload mid-connection does
   // not re-target this session's lifecycle hooks.
   runtimeSnapshot: PluginRuntimeState | null
+  sessionStarted: boolean
   unsubTurnOutcome: Unsubscribe | null
   // Serializes outcome persistence and the idle continuation decision. The
   // tail always fulfills so one disk failure cannot poison every later turn;
@@ -313,6 +314,7 @@ export function createServer({
   runIdleContinuation: todoIdleContinuation = runIdleContinuation,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
+  const initializingSessions = new WeakMap<Ws, Promise<void>>()
   const callIdToWs = new Map<string, AnyOwnerWs>()
 
   // The first TUI WS open per container lifetime checks for
@@ -513,8 +515,11 @@ export function createServer({
           if (rawWs.data.kind === 'tunnel-logs') return
           if (rawWs.data.kind === 'inspect') return
           const ws = rawWs as Ws
+          const initialized = Promise.withResolvers<void>()
+          initializingSessions.set(ws, initialized.promise)
           try {
             const handoff = await takeRestartHandoff()
+            if (ws.readyState !== WebSocket.OPEN) return
             const resumed = handoff !== null ? resumeFromHandoff(handoff, sessionFactory) : null
             const sessionManager = resumed ?? sessionFactory?.createPersisted()
             const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
@@ -576,6 +581,7 @@ export function createServer({
               unsubClaim: null,
               activeClaimCode: null,
               runtimeSnapshot: runtimeSnapshot ?? null,
+              sessionStarted: false,
               unsubTurnOutcome: null,
               todoOutcomeWrite: Promise.resolve(true),
               todoContinuation: { recordTurnOutcome: todoOutcomeWriter, runIdleContinuation: todoIdleContinuation },
@@ -583,10 +589,14 @@ export function createServer({
               dispose,
             }
             sessionStates.set(ws, state)
+            // Close owns disposal, including a factory result that arrives after disconnect.
+            if (ws.readyState !== WebSocket.OPEN) return
 
             if (runtimeSnapshot !== undefined && agentDir !== undefined) {
+              state.sessionStarted = true
               await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
             }
+            if (ws.readyState !== WebSocket.OPEN) return
 
             if (agentDir !== undefined) {
               state.unsubTurnOutcome = subscribeTurnOutcome(state, agentDir, logger)
@@ -653,6 +663,7 @@ export function createServer({
                   logger.error(`[server] ${sessionFileId}: clear abort suppression failed: ${describeErr(err)}`),
                 )
               }
+              if (ws.readyState !== WebSocket.OPEN) return
               stream.publish({
                 target: { kind: 'session', sessionId: sessionFileId },
                 payload: { kind: 'prompt', text: ' ', delivery: 'queue' },
@@ -664,6 +675,9 @@ export function createServer({
             console.error(`session ${ws.data.sessionId}: open failed: ${message}`)
             send(ws, { type: 'error', message })
             ws.close()
+          } finally {
+            initialized.resolve()
+            initializingSessions.delete(ws)
           }
         },
         async message(rawWs, raw) {
@@ -903,26 +917,47 @@ export function createServer({
             return
           }
           const ws = rawWs as Ws
-          const state = sessionStates.get(ws)
-          state?.unsubBroadcast?.()
-          state?.unsubPrompts?.()
-          state?.unsubClaim?.()
-          if (state?.activeClaimCode !== null && state?.activeClaimCode !== undefined && claimController) {
-            claimController.cancelClaim(state.activeClaimCode)
-          }
           commandRunner?.abortForOwner(ws)
           for (const [callId, owner] of callIdToWs) {
             if (owner === ws) callIdToWs.delete(callId)
           }
+          // Do not run session.end/dispose while session creation or session.start is pending.
+          await initializingSessions.get(ws)
+          const state = sessionStates.get(ws)
           try {
-            if (state && state.runtimeSnapshot !== null) {
+            state?.unsubBroadcast?.()
+            state?.unsubPrompts?.()
+            state?.unsubClaim?.()
+            if (state?.activeClaimCode !== null && state?.activeClaimCode !== undefined && claimController) {
+              claimController.cancelClaim(state.activeClaimCode)
+            }
+            if (state?.sessionStarted && state.runtimeSnapshot !== null) {
               await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId, origin: state.origin })
             }
+          } catch (err) {
+            logger.error(
+              `[server] ${state?.sessionFileId ?? ws.data.sessionId}: close cleanup failed: ${describeErr(err)}`,
+            )
+          }
+          try {
+            try {
+              state?.unsubTurnOutcome?.()
+            } finally {
+              state?.session.dispose()
+            }
+          } catch (err) {
+            logger.error(
+              `[server] ${state?.sessionFileId ?? ws.data.sessionId}: session disposal failed: ${describeErr(err)}`,
+            )
+          }
+          try {
+            await state?.dispose()
+          } catch (err) {
+            logger.error(
+              `[server] ${state?.sessionFileId ?? ws.data.sessionId}: resource disposal failed: ${describeErr(err)}`,
+            )
           } finally {
             if (state) {
-              state.unsubTurnOutcome?.()
-              state.session.dispose()
-              await state.dispose()
               liveSessionRegistry?.unregister(state.sessionFileId)
             }
             sessionStates.delete(ws)
