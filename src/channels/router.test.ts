@@ -20912,6 +20912,52 @@ describe('ChannelRouter GitHub review-thread closeout obligation', () => {
       await router.stop()
     })
   }
+  test('an explicit skip of a reply on a thread this session already resolved needs no close-out', async () => {
+    // given: the session resolves the thread, then a reply written after the resolve arrives
+    __resetReviewVerdictGuardForTest()
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: OutboundMessage[] = []
+    const nowRef = { value: 50_000 }
+    const { router, sessions } = makeRouter(dir, { logs, nowRef })
+    router.registerOutbound('github', async (message) => {
+      sent.push(message)
+      return { ok: true }
+    })
+    await router.route(
+      closeoutInbound({ externalMessageId: 'recheck', githubReviewThreadCloseout: undefined, ts: 48_000 }),
+    )
+    const session = sessions[0]!
+    session.onPrompt = async () => {
+      if (session.prompts.length === 1) {
+        await router.route(closeoutInbound({ externalMessageId: 'reply', text: '반영했습니다.', ts: 51_000 }))
+        router.finishGithubReviewThreadCloseout?.({
+          sessionId: 'ses_fake_1',
+          workspace: GITHUB_KEY.workspace,
+          prNumber: 123,
+          thread: GITHUB_KEY.thread,
+          decision: 'resolved',
+        })
+        await router.send({ ...GITHUB_KEY, text: 'Verified at the new head; resolving.' })
+      } else {
+        await router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'already resolved' })
+      }
+      session.setAssistantText('NO_REPLY')
+    }
+
+    // when: the reply's turn explicitly skips
+    await router.__testing!.flushDebounce(GITHUB_KEY)
+    await router.__testing!.flushDebounce(GITHUB_KEY)
+
+    // then: no reminder, no canned fallback, obligation settled
+    expect(session.prompts).toHaveLength(2)
+    expect(logs.some((line) => line.includes('github_thread_closeout_retry'))).toBe(false)
+    expect(logs.some((line) => line.includes('github_thread_closeout_fallback'))).toBe(false)
+    expect(sent.map((message) => message.text)).toEqual(['Verified at the new head; resolving.'])
+    expect(router.hasOutstandingGithubReviewThreadCloseout?.('ses_fake_1')).toBe(false)
+    __resetReviewVerdictGuardForTest()
+    await router.stop()
+  })
   test('a queued same-head push re-check keeps the reply round it joined after that round completes', async () => {
     // given: a pending reply round, and a push re-check for the same head queued behind it
     __resetReviewVerdictGuardForTest()
