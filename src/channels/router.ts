@@ -7787,6 +7787,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       armRetainedOutputAckIfEligible(live, successfulSendsBeforePrompt, true)
       logger.info(`[channels] ${live.keyId} skipped_by_tool reason=${JSON.stringify(reason)}`)
+      // This session already resolved the thread and the model read the newer
+      // reply and deliberately skipped it. Leaving a resolved thread resolved is
+      // a close-out decision, so neither the reminder nor the "leaving it open"
+      // fallback applies. A turn that ends silent without skip_response still owes one.
+      const closeout = live.githubReviewThreadCloseout
+      const resolvedAt = live.githubReviewThreadResolvedAt
+      if (closeout !== null && resolvedAt !== null && resolvedAt.rootCommentId === closeout.rootCommentId) {
+        clearGithubReviewThreadCloseout(live)
+        live.githubReviewThreadCloseoutDecisionTurn = live.turnSeq
+        logger.info(
+          `[channels] ${live.keyId} github_thread_closeout_skipped_already_resolved pr=${closeout.prNumber} root=${closeout.rootCommentId}`,
+        )
+      }
       void dropContinuationReactions(live)
       return
     }
